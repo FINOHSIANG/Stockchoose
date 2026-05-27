@@ -53,6 +53,36 @@ import {
   runBacktest,
   screenStocks
 } from "./strategyEngine";
+import {
+  defaultBaseUrlForProvider,
+  defaultInfoSourceSettings,
+  ensureInfoSourceSettings,
+  enabledSourceModules,
+  infoSourceProviderOptions,
+  sourceModuleLabels,
+  testInfoSourceConnection,
+  type InfoSourceSettings,
+  type SourceModuleKey
+} from "./integrationServices";
+import {
+  defaultOpenSourceDataSummary,
+  syncOpenSourceMarketData,
+  type OpenSourceDataSummary
+} from "./openDataService";
+import {
+  bindTradeConnection,
+  createTradePlan,
+  defaultPaperTradeState,
+  defaultTradeConnectionSettings,
+  ensurePaperTradeState,
+  ensureTradeConnectionSettings,
+  submitPaperTradePlan as submitPaperTradePlanToState,
+  tradePlanToCsv,
+  type ExecutionMode,
+  type PaperTradeState,
+  type TradeConnectionSettings,
+  type TradePlan
+} from "./tradingServices";
 import type {
   AssetItem,
   BacktestConfig,
@@ -66,6 +96,7 @@ import type {
   RankCondition,
   SelectionRow,
   StepKey,
+  Stock,
   StockPool,
   StrategyConfig
 } from "./types";
@@ -154,6 +185,24 @@ function formatDateTime(updatedAt?: string) {
   return `${padTimePart(date.getMonth() + 1)}-${padTimePart(date.getDate())} ${padTimePart(date.getHours())}:${padTimePart(date.getMinutes())}`;
 }
 
+function safeFileName(name: string) {
+  return name.replace(/[\\/:*?"<>|]/g, "_") || "export";
+}
+
+function downloadTextFile(filename: string, content: string, type = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function ensureStockData(value: Stock[]) {
+  return Array.isArray(value) && value.length ? value : STOCKS;
+}
+
 function touchStrategyUpdatedAt(item: StrategyConfig): StrategyConfig {
   return { ...item, updatedAt: new Date().toISOString() };
 }
@@ -177,50 +226,6 @@ const operators: Array<{ value: FilterOperator; label: string }> = [
 
 type ModalKey = null | "pool" | "summary" | "asset" | "customFactor" | "optimization" | "compare";
 type MainSection = "strategy" | "trade" | "settings";
-type SourceModuleKey = "market" | "finance" | "filing" | "news";
-
-interface InfoSourceSettings {
-  provider: string;
-  baseUrl: string;
-  apiToken: string;
-  timeoutSeconds: number;
-  refreshInterval: number;
-  modules: Record<SourceModuleKey, boolean>;
-  lastTestAt?: string;
-  lastSavedAt?: string;
-}
-
-const sourceModuleLabels: Array<{ key: SourceModuleKey; label: string; description: string }> = [
-  { key: "market", label: "行情数据接口", description: "股票价格、成交额、换手率、分钟行情。" },
-  { key: "finance", label: "财务指标接口", description: "财报条目、估值、盈利质量、成长指标。" },
-  { key: "filing", label: "公告研报接口", description: "上市公司公告、定期报告、分析师评级。" },
-  { key: "news", label: "资讯舆情接口", description: "新闻、资金流、主题热度与事件标签。" }
-];
-
-const defaultInfoSourceSettings: InfoSourceSettings = {
-  provider: "本地模拟数据",
-  baseUrl: "http://127.0.0.1:9000/api",
-  apiToken: "",
-  timeoutSeconds: 15,
-  refreshInterval: 5,
-  modules: {
-    market: true,
-    finance: true,
-    filing: false,
-    news: false
-  }
-};
-
-function ensureInfoSourceSettings(settings: InfoSourceSettings): InfoSourceSettings {
-  return {
-    ...defaultInfoSourceSettings,
-    ...settings,
-    modules: {
-      ...defaultInfoSourceSettings.modules,
-      ...(settings.modules ?? {})
-    }
-  };
-}
 
 function pct(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
@@ -593,6 +598,21 @@ function App() {
     ensureInfoSourceSettings(loadLocal("infoSourceSettings", defaultInfoSourceSettings))
   );
   const [infoSourceStatus, setInfoSourceStatus] = useState("未测试");
+  const [stocks, setStocks] = useState<Stock[]>(() => ensureStockData(loadLocal("openSourceStocks", STOCKS)));
+  const [openSourceSummary, setOpenSourceSummary] = useState<OpenSourceDataSummary>(() => ({
+    ...defaultOpenSourceDataSummary,
+    stockCount: STOCKS.length,
+    ...loadLocal("openSourceDataSummary", {})
+  }));
+  const [tradeConnection, setTradeConnection] = useState<TradeConnectionSettings>(() =>
+    ensureTradeConnectionSettings(loadLocal("tradeConnectionSettings", defaultTradeConnectionSettings))
+  );
+  const [tradeConnectionStatus, setTradeConnectionStatus] = useState(() =>
+    ensureTradeConnectionSettings(loadLocal("tradeConnectionSettings", defaultTradeConnectionSettings)).bound ? "交易接口已绑定" : "未绑定交易接口"
+  );
+  const [paperTradeState, setPaperTradeState] = useState<PaperTradeState>(() =>
+    ensurePaperTradeState(loadLocal("paperTradeState", defaultPaperTradeState))
+  );
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [rankRows, setRankRows] = useState<RankingRow[]>([]);
   const [selectionRows, setSelectionRows] = useState<SelectionRow[]>([]);
@@ -603,6 +623,10 @@ function App() {
     saveLocal("draftStrategy", strategy);
     saveLocal("savedStrategies", savedStrategies);
     saveLocal("infoSourceSettings", infoSourceSettings);
+    saveLocal("openSourceStocks", stocks);
+    saveLocal("openSourceDataSummary", openSourceSummary);
+    saveLocal("tradeConnectionSettings", tradeConnection);
+    saveLocal("paperTradeState", paperTradeState);
   }, []);
 
   const pools = useMemo(() => [...SYSTEM_POOLS, ...customPools], [customPools]);
@@ -611,9 +635,9 @@ function App() {
     return orderFactors([...baseFactors, ...createDetailFactors(baseFactors)]);
   }, [customFactors]);
   const availableIndustry2 = useMemo(() => {
-    const list = STOCKS.filter((stock) => strategy.industry1 === "全部" || stock.industry1 === strategy.industry1).map((stock) => stock.industry2);
+    const list = stocks.filter((stock) => strategy.industry1 === "全部" || stock.industry1 === strategy.industry1).map((stock) => stock.industry2);
     return ["全部", ...Array.from(new Set(list))];
-  }, [strategy.industry1]);
+  }, [stocks, strategy.industry1]);
   const visibleFactors = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     const groupKeys = guornFactorKeysByGroup[activeFactorGroup];
@@ -625,7 +649,7 @@ function App() {
       return queryMatch;
     });
   }, [activeFactorGroup, factors, query]);
-  const previewRows = useMemo(() => screenStocks(strategy, STOCKS, pools, factors), [strategy, pools, factors]);
+  const previewRows = useMemo(() => screenStocks(strategy, stocks, pools, factors), [strategy, stocks, pools, factors]);
 
   const persistStrategy = (next: StrategyConfig, markUpdated = true) => {
     const nextStrategy = markUpdated ? touchStrategyUpdatedAt(next) : next;
@@ -701,24 +725,24 @@ function App() {
   const runCurrentTask = (tab = backtestTab) => {
     saveLocal("backtestConfig", backtestConfig);
     if (tab === "rank" || tab === "factorCorrelation") {
-      setRankRows(rankingAnalysis(strategy, STOCKS, pools, factors));
+      setRankRows(rankingAnalysis(strategy, stocks, pools, factors));
       setBacktestTab(tab);
       return;
     }
     if (tab === "daily" || tab === "realtime") {
-      setSelectionRows(screenStocks(strategy, STOCKS, pools, factors));
+      setSelectionRows(screenStocks(strategy, stocks, pools, factors));
       setBacktestTab(tab);
       return;
     }
-    const next = runBacktest(strategy, STOCKS, pools, factors, backtestConfig);
+    const next = runBacktest(strategy, stocks, pools, factors, backtestConfig);
     setResult(next);
     setSelectionRows(next.rows);
     setBacktestTab("backtest");
   };
 
   const saveStrategy = (saveAs = false) => {
-    const name = saveAs || !strategy.name ? window.prompt("策略名称", strategy.name || "股票策略") : strategy.name;
-    if (!name) return;
+    const baseName = (strategy.name || "股票策略").trim();
+    const name = saveAs ? `${baseName} 副本` : baseName;
     const next = touchStrategyUpdatedAt({ ...strategy, id: saveAs ? uid("strategy") : strategy.id, name });
     const existingIndex = savedStrategies.findIndex((item) => item.id === next.id);
     const list = existingIndex >= 0 ? savedStrategies.map((item, index) => (index === existingIndex ? next : item)) : [...savedStrategies, next];
@@ -794,7 +818,7 @@ function App() {
   };
 
   const optimize = () => {
-    const best = optimizeStrategy(strategy, STOCKS, pools, factors, backtestConfig);
+    const best = optimizeStrategy(strategy, stocks, pools, factors, backtestConfig);
     persistStrategy(best.candidate);
     setResult(best.result);
     setModal(null);
@@ -823,13 +847,82 @@ function App() {
     setInfoSourceStatus("已保存信息来源接口配置");
   };
 
-  const testInfoSourceConnection = () => {
+  const runInfoSourceConnectionTest = async () => {
+    setInfoSourceStatus("正在检测信息来源接口...");
     const next = ensureInfoSourceSettings({ ...infoSourceSettings, lastTestAt: new Date().toISOString() });
-    setInfoSourceSettings(next);
-    saveLocal("infoSourceSettings", next);
-    const urlValid = /^https?:\/\/.+/i.test(next.baseUrl.trim());
-    const moduleEnabled = Object.values(next.modules).some(Boolean);
-    setInfoSourceStatus(urlValid && moduleEnabled ? "连接检测通过，接口配置格式有效" : "连接检测失败，请检查接口地址和启用模块");
+    const result = await testInfoSourceConnection(next);
+    const tested = ensureInfoSourceSettings({ ...next, lastTestAt: result.checkedAt });
+    setInfoSourceSettings(tested);
+    saveLocal("infoSourceSettings", tested);
+    setInfoSourceStatus(`${result.message}：${result.details}`);
+  };
+
+  const syncOpenSourceData = async () => {
+    setInfoSourceStatus("正在同步免费开源数据...");
+    const result = await syncOpenSourceMarketData(infoSourceSettings, STOCKS);
+    if (result.ok) {
+      setStocks(result.stocks);
+      setOpenSourceSummary(result.summary);
+      saveLocal("openSourceStocks", result.stocks);
+      saveLocal("openSourceDataSummary", result.summary);
+      setResult(null);
+      setRankRows([]);
+      setSelectionRows([]);
+    }
+    setInfoSourceStatus(`${result.message}：${result.details}`);
+  };
+
+  const patchTradeConnection = (patch: Partial<TradeConnectionSettings>) => {
+    setTradeConnection((current) => ensureTradeConnectionSettings({ ...current, ...patch, bound: false }));
+    setTradeConnectionStatus("交易接口配置已修改，请重新绑定");
+  };
+
+  const bindTradingInterface = () => {
+    const result = bindTradeConnection(tradeConnection);
+    if (!result.ok) {
+      setTradeConnectionStatus(`交易接口绑定失败：${result.message}`);
+      return false;
+    }
+    setTradeConnection(result.settings);
+    saveLocal("tradeConnectionSettings", result.settings);
+    setTradeConnectionStatus(result.message);
+    return true;
+  };
+
+  const exportTradePlan = (rows: SelectionRow[], mode: ExecutionMode, label = "交易指令") => {
+    const plan = createTradePlan({
+      strategy,
+      rows,
+      mode,
+      accountId: tradeConnection.accountId
+    });
+    const nextState = ensurePaperTradeState({
+      ...paperTradeState,
+      plans: [plan, ...paperTradeState.plans.filter((item) => item.id !== plan.id)].slice(0, 30)
+    });
+    setPaperTradeState(nextState);
+    saveLocal("paperTradeState", nextState);
+    downloadTextFile(`${safeFileName(strategy.name)}-${label}.csv`, `\ufeff${tradePlanToCsv(plan)}`, "text/csv;charset=utf-8");
+    setTradeConnectionStatus(`已生成 ${plan.orders.length} 条${label}`);
+    return plan;
+  };
+
+  const submitPaperTradePlan = (rows: SelectionRow[]) => {
+    if (!tradeConnection.bound) {
+      setTradeConnectionStatus("自动交易前必须先绑定交易接口");
+      return null;
+    }
+    const plan = createTradePlan({
+      strategy,
+      rows,
+      mode: "auto",
+      accountId: tradeConnection.accountId
+    });
+    const nextState = submitPaperTradePlanToState(paperTradeState, plan);
+    setPaperTradeState(nextState);
+    saveLocal("paperTradeState", nextState);
+    setTradeConnectionStatus(`纸面交易已成交 ${plan.orders.length} 笔`);
+    return plan;
   };
 
   return (
@@ -937,17 +1030,30 @@ function App() {
               </main>
             ) : topSection === "trade" ? (
               <main>
-                <TradeWorkspace strategy={strategy} rows={selectionRows.length ? selectionRows : previewRows} />
+                <TradeWorkspace
+                  strategy={strategy}
+                  rows={selectionRows.length ? selectionRows : previewRows}
+                  tradeConnection={tradeConnection}
+                  tradeConnectionStatus={tradeConnectionStatus}
+                  paperTradeState={paperTradeState}
+                  patchTradeConnection={patchTradeConnection}
+                  bindTradingInterface={bindTradingInterface}
+                  exportTradePlan={exportTradePlan}
+                  submitPaperTradePlan={submitPaperTradePlan}
+                />
               </main>
             ) : (
               <main>
                 <SettingsWorkspace
                   settings={infoSourceSettings}
                   status={infoSourceStatus}
+                  summary={openSourceSummary}
+                  stockCount={stocks.length}
                   patchSettings={patchInfoSourceSettings}
                   toggleModule={toggleSourceModule}
                   onSave={saveInfoSourceSettings}
-                  onTest={testInfoSourceConnection}
+                  onTest={runInfoSourceConnectionTest}
+                  onSyncOpenData={syncOpenSourceData}
                 />
               </main>
             )}
@@ -1595,19 +1701,25 @@ function HedgeStep({ strategy, patchHedge }: { strategy: StrategyConfig; patchHe
 function SettingsWorkspace({
   settings,
   status,
+  summary,
+  stockCount,
   patchSettings,
   toggleModule,
   onSave,
-  onTest
+  onTest,
+  onSyncOpenData
 }: {
   settings: InfoSourceSettings;
   status: string;
+  summary: OpenSourceDataSummary;
+  stockCount: number;
   patchSettings: (patch: Partial<InfoSourceSettings>) => void;
   toggleModule: (key: SourceModuleKey) => void;
   onSave: () => void;
   onTest: () => void;
+  onSyncOpenData: () => void;
 }) {
-  const enabledCount = sourceModuleLabels.filter((item) => settings.modules[item.key]).length;
+  const enabledCount = enabledSourceModules(settings).length;
   return (
     <section className="settings-workspace">
       <div className="settings-title-row">
@@ -1618,6 +1730,9 @@ function SettingsWorkspace({
         <div className="settings-actions">
           <button className="btn" onClick={onTest}>
             测试连接
+          </button>
+          <button className="btn" onClick={onSyncOpenData}>
+            同步开源数据
           </button>
           <button className="btn primary" onClick={onSave}>
             <Save size={15} />
@@ -1635,10 +1750,16 @@ function SettingsWorkspace({
         <div className="settings-form-grid">
           <label>
             <span>接口来源</span>
-            <select value={settings.provider} onChange={(event) => patchSettings({ provider: event.target.value })}>
-              {["本地模拟数据", "聚宽 JQData", "Tushare Pro", "Wind 数据服务", "自定义 REST 接口"].map((item) => (
-                <option key={item} value={item}>
-                  {item}
+            <select
+              value={settings.provider}
+              onChange={(event) => {
+                const provider = event.target.value;
+                patchSettings({ provider, baseUrl: defaultBaseUrlForProvider(provider) });
+              }}
+            >
+              {infoSourceProviderOptions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
                 </option>
               ))}
             </select>
@@ -1704,16 +1825,48 @@ function SettingsWorkspace({
           <span>最近保存</span>
           <strong>{formatDateTime(settings.lastSavedAt)}</strong>
         </div>
+        <div>
+          <span>股票数据</span>
+          <strong>{stockCount} 只</strong>
+        </div>
+        <div>
+          <span>开源同步</span>
+          <strong>{summary.sourceRows ? `${summary.matchedRows} / ${summary.sourceRows}` : "--"}</strong>
+        </div>
+        <div>
+          <span>最近同步</span>
+          <strong>{formatDateTime(summary.lastSyncAt)}</strong>
+        </div>
       </div>
     </section>
   );
 }
 
-function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: SelectionRow[] }) {
+function TradeWorkspace({
+  strategy,
+  rows,
+  tradeConnection,
+  tradeConnectionStatus,
+  paperTradeState,
+  patchTradeConnection,
+  bindTradingInterface,
+  exportTradePlan,
+  submitPaperTradePlan
+}: {
+  strategy: StrategyConfig;
+  rows: SelectionRow[];
+  tradeConnection: TradeConnectionSettings;
+  tradeConnectionStatus: string;
+  paperTradeState: PaperTradeState;
+  patchTradeConnection: (patch: Partial<TradeConnectionSettings>) => void;
+  bindTradingInterface: () => boolean;
+  exportTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string) => TradePlan;
+  submitPaperTradePlan: (rows: SelectionRow[]) => TradePlan | null;
+}) {
   const [tradeMode, setTradeMode] = useState<"strategy" | "condition">("strategy");
-  const [executionMode, setExecutionMode] = useState<"manual" | "auto">("manual");
-  const [tradeInterfaceBound, setTradeInterfaceBound] = useState(false);
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("manual");
   const [tradeTab, setTradeTab] = useState<"holding" | "rebalance" | "log" | "history">("holding");
+  const tradeInterfaceBound = tradeConnection.bound;
   const holdings = rows.slice(0, Math.max(strategy.trading.maxHoldings, 1));
   const accountAsset = 1000000;
   const strategyAsset = 500000;
@@ -1749,6 +1902,7 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
         ? `开始执行买入指令，买入${row.stock.name}${row.shares}股。`
         : `订单 ${1531451296800 + index} 已全部成交：买入${row.shares}股${row.stock.name}，成交均价：${row.stock.metrics.price?.toFixed(3)}。`
   }));
+  const paperFills = paperTradeState.fills.slice(0, 8);
   const conditionRows = holdings.slice(0, 5).map((row, index) => {
     const price = row.stock.metrics.price ?? 0;
     const direction = index % 2 === 0 ? "买入" : "卖出";
@@ -1811,13 +1965,37 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
           </button>
         </div>
         {executionMode === "auto" ? (
-          <button className="btn primary" onClick={() => setTradeInterfaceBound(true)}>
+          <button className="btn primary" onClick={bindTradingInterface}>
             {tradeInterfaceBound ? "交易接口已绑定" : "绑定交易接口"}
           </button>
         ) : (
-          <button className="btn">导出指令模板</button>
+          <button className="btn" onClick={() => exportTradePlan(rows, "manual", "指令模板")}>导出指令模板</button>
         )}
       </div>
+
+      {executionMode === "auto" ? (
+        <div className="trade-connection-panel">
+          <label>
+            <span>交易接口</span>
+            <input value={tradeConnection.provider} onChange={(event) => patchTradeConnection({ provider: event.target.value })} />
+          </label>
+          <label>
+            <span>接口地址</span>
+            <input value={tradeConnection.endpoint} onChange={(event) => patchTradeConnection({ endpoint: event.target.value })} />
+          </label>
+          <label>
+            <span>资金账号</span>
+            <input value={tradeConnection.accountId} onChange={(event) => patchTradeConnection({ accountId: event.target.value })} />
+          </label>
+          <label>
+            <span>接口 Token</span>
+            <input type="password" value={tradeConnection.token} onChange={(event) => patchTradeConnection({ token: event.target.value })} placeholder="纸面交易可为空" />
+          </label>
+          <p className={tradeConnectionStatus.includes("失败") || tradeConnectionStatus.includes("必须") ? "trade-connection-status danger" : "trade-connection-status"}>
+            {tradeConnectionStatus}
+          </p>
+        </div>
+      ) : null}
 
       <div className="trade-mode-tabs">
         <button className={tradeMode === "strategy" ? "active" : ""} onClick={() => setTradeMode("strategy")}>
@@ -1900,12 +2078,12 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
                   {executionMode === "manual" ? (
                     <>
                       <button className="text-link">手动确认</button>
-                      <button className="text-link">生成指令</button>
+                      <button className="text-link" onClick={() => exportTradePlan(rows, "manual", "交易指令")}>生成指令</button>
                     </>
                   ) : (
                     <>
                       <button className="text-link">{tradeInterfaceBound ? "自动执行" : "待绑定"}</button>
-                      <button className="text-link" onClick={() => setTradeInterfaceBound(true)}>
+                      <button className="text-link" onClick={bindTradingInterface}>
                         绑定接口
                       </button>
                     </>
@@ -2003,10 +2181,12 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
           <div className="rebalance-toolbar">
             <div>
               <h3>交易指令（2026-05-25）</h3>
-              <button className="btn primary">{executionMode === "manual" ? "生成手动交易指令" : "确认自动交易计划"}</button>
-              {executionMode === "manual" ? <button className="btn primary">导出交易指令</button> : null}
+              <button className="btn primary" onClick={() => (executionMode === "manual" ? exportTradePlan(rows, "manual", "交易指令") : submitPaperTradePlan(rows))}>
+                {executionMode === "manual" ? "生成手动交易指令" : "确认自动交易计划"}
+              </button>
+              {executionMode === "manual" ? <button className="btn primary" onClick={() => exportTradePlan(rows, "manual", "交易指令")}>导出交易指令</button> : null}
               {executionMode === "auto" ? (
-                <button className="btn primary" onClick={() => setTradeInterfaceBound(true)}>
+                <button className="btn primary" onClick={bindTradingInterface}>
                   {tradeInterfaceBound ? "交易接口已绑定" : "绑定交易接口"}
                 </button>
               ) : null}
@@ -2108,6 +2288,7 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
             <SelectField label="选择策略：" value={strategy.name} options={[strategy.name, "策略外资产"]} onChange={() => undefined} />
             <button className="btn primary">查看历史记录</button>
             <a>导出</a>
+            <span>纸面成交：{paperFills.length}笔</span>
           </div>
           <table className="live-table">
             <thead>
@@ -2137,6 +2318,20 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
                   <td />
                 </tr>
               ))}
+              {paperFills.map((fill, index) => (
+                <tr key={fill.id}>
+                  <td>{historyRows.length + index + 1}</td>
+                  <td>{fill.filledAt.replace("T", " ").slice(0, 19)}</td>
+                  <td>{fill.name}</td>
+                  <td>
+                    <a>{fill.code}</a>
+                  </td>
+                  <td>{fill.side}{fill.shares}</td>
+                  <td>{fill.price.toFixed(3)}</td>
+                  <td className={fill.side === "买入" ? "negative" : "positive"}>{fill.side === "买入" ? "-" : "+"}{formatMoney(fill.amount)}</td>
+                  <td />
+                </tr>
+              ))}
               <tr>
                 <td>{historyRows.length + 1}</td>
                 <td>2026-05-22 17:49:53</td>
@@ -2159,7 +2354,8 @@ function TradeWorkspace({ strategy, rows }: { strategy: StrategyConfig; rows: Se
           formatMoney={formatMoney}
           executionMode={executionMode}
           tradeInterfaceBound={tradeInterfaceBound}
-          bindTradeInterface={() => setTradeInterfaceBound(true)}
+          bindTradeInterface={bindTradingInterface}
+          exportConditionInstructions={() => exportTradePlan(rows, "manual", "条件单指令")}
         />
       )}
     </section>
@@ -2172,7 +2368,8 @@ function ConditionTradePanel({
   formatMoney,
   executionMode,
   tradeInterfaceBound,
-  bindTradeInterface
+  bindTradeInterface,
+  exportConditionInstructions
 }: {
   rows: Array<{
     id: string;
@@ -2191,7 +2388,8 @@ function ConditionTradePanel({
   formatMoney: (value: number) => string;
   executionMode: "manual" | "auto";
   tradeInterfaceBound: boolean;
-  bindTradeInterface: () => void;
+  bindTradeInterface: () => boolean;
+  exportConditionInstructions: () => void;
 }) {
   const first = rows[0];
   return (
@@ -2217,7 +2415,7 @@ function ConditionTradePanel({
               {tradeInterfaceBound ? "交易接口已绑定" : "绑定交易接口"}
             </button>
           ) : (
-            <button className="btn">导出条件单指令</button>
+            <button className="btn" onClick={exportConditionInstructions}>导出条件单指令</button>
           )}
           <button className="btn">暂停全部</button>
         </div>
