@@ -70,6 +70,19 @@ import {
   type OpenSourceDataSummary
 } from "./openDataService";
 import {
+  createDefaultNewsSourceEndpoint,
+  defaultBaseUrlForNewsProvider,
+  defaultNewsSourceSettings,
+  enabledNewsSources,
+  ensureNewsSourceSettings,
+  newsLanguageOptions,
+  newsSourceProviderOptions,
+  testNewsSourceConnection,
+  type NewsSourceEndpoint,
+  type NewsSourceProvider,
+  type NewsSourceSettings
+} from "./newsSourceServices";
+import {
   bindTradeConnection,
   createTradePlan,
   defaultPaperTradeState,
@@ -83,6 +96,17 @@ import {
   type TradeConnectionSettings,
   type TradePlan
 } from "./tradingServices";
+import {
+  buildSentimentInsightReport,
+  buildSentimentRecommendations,
+  filterSentimentEvents,
+  sampleSentimentEvents,
+  scoreSentimentEvent,
+  sentimentCategories,
+  sentimentDirections,
+  sentimentSeverityLevels,
+  type SentimentFilters
+} from "./sentimentServices";
 import type {
   AssetItem,
   BacktestConfig,
@@ -225,7 +249,16 @@ const operators: Array<{ value: FilterOperator; label: string }> = [
 ];
 
 type ModalKey = null | "pool" | "summary" | "asset" | "customFactor" | "optimization" | "compare";
-type MainSection = "strategy" | "trade" | "settings";
+type MainSection = "strategy" | "sentiment" | "trade" | "settings";
+
+const defaultSentimentFilters: SentimentFilters = {
+  category: "全部",
+  direction: "全部",
+  industry: "全部",
+  severity: "全部",
+  minScore: 60,
+  query: ""
+};
 
 function pct(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
@@ -598,6 +631,10 @@ function App() {
     ensureInfoSourceSettings(loadLocal("infoSourceSettings", defaultInfoSourceSettings))
   );
   const [infoSourceStatus, setInfoSourceStatus] = useState("未测试");
+  const [newsSourceSettings, setNewsSourceSettings] = useState<NewsSourceSettings>(() =>
+    ensureNewsSourceSettings(loadLocal("newsSourceSettings", defaultNewsSourceSettings))
+  );
+  const [newsSourceStatus, setNewsSourceStatus] = useState("新闻源未测试");
   const [stocks, setStocks] = useState<Stock[]>(() => ensureStockData(loadLocal("openSourceStocks", STOCKS)));
   const [openSourceSummary, setOpenSourceSummary] = useState<OpenSourceDataSummary>(() => ({
     ...defaultOpenSourceDataSummary,
@@ -623,6 +660,7 @@ function App() {
     saveLocal("draftStrategy", strategy);
     saveLocal("savedStrategies", savedStrategies);
     saveLocal("infoSourceSettings", infoSourceSettings);
+    saveLocal("newsSourceSettings", newsSourceSettings);
     saveLocal("openSourceStocks", stocks);
     saveLocal("openSourceDataSummary", openSourceSummary);
     saveLocal("tradeConnectionSettings", tradeConnection);
@@ -872,6 +910,74 @@ function App() {
     setInfoSourceStatus(`${result.message}：${result.details}`);
   };
 
+  const patchNewsSource = (id: string, patch: Partial<NewsSourceEndpoint>) => {
+    setNewsSourceSettings((current) =>
+      ensureNewsSourceSettings({
+        ...current,
+        sources: current.sources.map((source) => (source.id === id ? { ...source, ...patch } : source))
+      })
+    );
+  };
+
+  const toggleNewsSource = (id: string) => {
+    setNewsSourceSettings((current) =>
+      ensureNewsSourceSettings({
+        ...current,
+        sources: current.sources.map((source) => (source.id === id ? { ...source, enabled: !source.enabled } : source))
+      })
+    );
+  };
+
+  const addNewsSource = () => {
+    const next = ensureNewsSourceSettings({
+      ...newsSourceSettings,
+      sources: [...newsSourceSettings.sources, createDefaultNewsSourceEndpoint(uid("news"))]
+    });
+    setNewsSourceSettings(next);
+    setNewsSourceStatus("已新增新闻源接口，请完善配置后保存");
+  };
+
+  const removeNewsSource = (id: string) => {
+    if (newsSourceSettings.sources.length <= 1) {
+      setNewsSourceStatus("至少保留一个新闻源接口");
+      return;
+    }
+    const next = ensureNewsSourceSettings({
+      ...newsSourceSettings,
+      sources: newsSourceSettings.sources.filter((source) => source.id !== id)
+    });
+    setNewsSourceSettings(next);
+    setNewsSourceStatus("已删除新闻源接口，请保存配置");
+  };
+
+  const saveNewsSourceSettings = () => {
+    const next = ensureNewsSourceSettings({ ...newsSourceSettings, lastSavedAt: new Date().toISOString() });
+    setNewsSourceSettings(next);
+    saveLocal("newsSourceSettings", next);
+    setNewsSourceStatus("已保存新闻源接口配置");
+  };
+
+  const runNewsSourceConnectionTest = async (id: string) => {
+    const source = newsSourceSettings.sources.find((item) => item.id === id);
+    if (!source) {
+      setNewsSourceStatus("未找到新闻源接口");
+      return;
+    }
+    setNewsSourceStatus(`正在检测新闻源：${source.name}...`);
+    const result = await testNewsSourceConnection(source);
+    setNewsSourceSettings((current) => {
+      const next = ensureNewsSourceSettings({
+        ...current,
+        sources: current.sources.map((item) =>
+          item.id === id ? { ...item, lastTestAt: result.checkedAt, lastStatus: `${result.message}：${result.details}` } : item
+        )
+      });
+      saveLocal("newsSourceSettings", next);
+      return next;
+    });
+    setNewsSourceStatus(`${result.message}：${result.details}`);
+  };
+
   const patchTradeConnection = (patch: Partial<TradeConnectionSettings>) => {
     setTradeConnection((current) => ensureTradeConnectionSettings({ ...current, ...patch, bound: false }));
     setTradeConnectionStatus("交易接口配置已修改，请重新绑定");
@@ -930,18 +1036,25 @@ function App() {
       <div className="app-shell">
         <header className="primary-nav">
           <button className={topSection === "strategy" ? "active" : ""} onClick={() => setTopSection("strategy")}>
+            <SlidersHorizontal size={16} />
             策略
           </button>
+          <button className={topSection === "sentiment" ? "active" : ""} onClick={() => setTopSection("sentiment")}>
+            <Activity size={16} />
+            舆情
+          </button>
           <button className={topSection === "trade" ? "active" : ""} onClick={() => setTopSection("trade")}>
+            <LineChart size={16} />
             交易
           </button>
-          <button className={topSection === "settings" ? "active" : ""} onClick={() => setTopSection("settings")}>
+          <button className={`nav-settings-entry ${topSection === "settings" ? "active" : ""}`} onClick={() => setTopSection("settings")}>
+            <Settings size={16} />
             设置
           </button>
         </header>
 
-        <div className={`workspace-layout ${managerCollapsed ? "manager-collapsed" : ""} ${topSection === "settings" ? "settings-mode" : ""}`}>
-          {topSection !== "settings" ? (
+        <div className={`workspace-layout ${managerCollapsed ? "manager-collapsed" : ""} ${topSection === "settings" || topSection === "sentiment" ? "settings-mode" : ""}`}>
+          {topSection === "strategy" || topSection === "trade" ? (
             <StrategyManagerSidebar
               strategy={strategy}
               savedStrategies={savedStrategies}
@@ -1028,6 +1141,10 @@ function App() {
                   openCompare={() => setModal("compare")}
                 />
               </main>
+            ) : topSection === "sentiment" ? (
+              <main>
+                <SentimentWorkspace stocks={stocks} />
+              </main>
             ) : topSection === "trade" ? (
               <main>
                 <TradeWorkspace
@@ -1049,8 +1166,16 @@ function App() {
                   status={infoSourceStatus}
                   summary={openSourceSummary}
                   stockCount={stocks.length}
+                  newsSettings={newsSourceSettings}
+                  newsStatus={newsSourceStatus}
                   patchSettings={patchInfoSourceSettings}
                   toggleModule={toggleSourceModule}
+                  patchNewsSource={patchNewsSource}
+                  toggleNewsSource={toggleNewsSource}
+                  onAddNewsSource={addNewsSource}
+                  onRemoveNewsSource={removeNewsSource}
+                  onSaveNewsSources={saveNewsSourceSettings}
+                  onTestNewsSource={runNewsSourceConnectionTest}
                   onSave={saveInfoSourceSettings}
                   onTest={runInfoSourceConnectionTest}
                   onSyncOpenData={syncOpenSourceData}
@@ -1698,13 +1823,235 @@ function HedgeStep({ strategy, patchHedge }: { strategy: StrategyConfig; patchHe
   );
 }
 
+function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
+  const [filters, setFilters] = useState<SentimentFilters>(defaultSentimentFilters);
+  const industryOptions = useMemo(
+    () => ["全部", ...Array.from(new Set(sampleSentimentEvents.flatMap((event) => event.industries))).sort()],
+    []
+  );
+  const events = useMemo(() => filterSentimentEvents(sampleSentimentEvents, filters), [filters]);
+  const recommendations = useMemo(() => buildSentimentRecommendations(events, stocks), [events, stocks]);
+  const report = useMemo(() => buildSentimentInsightReport(events, recommendations), [events, recommendations]);
+  const topEvent = events[0];
+  const positiveCount = events.filter((event) => event.direction === "利好").length;
+  const negativeCount = events.filter((event) => event.direction === "利空").length;
+  const majorCount = events.filter((event) => event.severity === "特别重大" || event.severity === "重大").length;
+  const focusedIndustry = filters.industry === "全部" ? report.topIndustries[0]?.industry ?? "--" : filters.industry;
+
+  const exportReport = () => {
+    const lines = [
+      `# ${report.title}`,
+      "",
+      `结论：${report.conclusion}`,
+      `筛选：行业 ${filters.industry} / 重大程度 ${filters.severity} / 事件类型 ${filters.category} / 影响方向 ${filters.direction} / 最低价值分 ${filters.minScore}`,
+      "",
+      "## 高价值事件",
+      ...events.map((event) => `- ${event.title}（${event.category}/${event.direction}/${event.severity}，${event.industries.join("、")}，价值分 ${scoreSentimentEvent(event)}）：${event.summary}`),
+      "",
+      "## 推荐股票",
+      ...recommendations.slice(0, 8).map((item) => `- ${item.stock.name} ${item.stock.code}：${item.score}分，${item.reason}`),
+      "",
+      "## 验证点",
+      ...report.validationPoints.map((item) => `- ${item}`)
+    ];
+    downloadTextFile(`舆情选股洞察-${new Date().toISOString().slice(0, 10)}.md`, lines.join("\n"), "text/markdown;charset=utf-8");
+  };
+
+  return (
+    <section className="sentiment-workspace">
+      <div className="sentiment-title-row">
+        <div>
+          <h2>舆情选股</h2>
+          <p>独立事件驱动选股板块，用于筛选价值新闻、分类事件、推荐关联股票并输出洞察报告。</p>
+        </div>
+        <div className="settings-actions">
+          <button className="btn" onClick={() => setFilters(defaultSentimentFilters)}>
+            重置筛选
+          </button>
+          <button className="btn primary" onClick={exportReport}>
+            <Download size={15} />
+            导出报告
+          </button>
+        </div>
+      </div>
+
+      <div className="sentiment-radar">
+        <div>
+          <span>高价值事件</span>
+          <strong>{events.length}</strong>
+        </div>
+        <div>
+          <span>推荐股票</span>
+          <strong>{recommendations.length}</strong>
+        </div>
+        <div>
+          <span>利好 / 利空</span>
+          <strong>{positiveCount} / {negativeCount}</strong>
+        </div>
+        <div>
+          <span>最高价值分</span>
+          <strong>{topEvent ? scoreSentimentEvent(topEvent) : "--"}</strong>
+        </div>
+        <div>
+          <span>命中行业</span>
+          <strong>{focusedIndustry}</strong>
+        </div>
+        <div>
+          <span>重大事件</span>
+          <strong>{majorCount}</strong>
+        </div>
+      </div>
+
+      <div className="sentiment-filters">
+        <label>
+          <span>事件类型</span>
+          <select value={filters.category} onChange={(event) => setFilters((current) => ({ ...current, category: event.target.value as SentimentFilters["category"] }))}>
+            {sentimentCategories.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>定点行业</span>
+          <select value={filters.industry} onChange={(event) => setFilters((current) => ({ ...current, industry: event.target.value }))}>
+            {industryOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>重大程度</span>
+          <select value={filters.severity} onChange={(event) => setFilters((current) => ({ ...current, severity: event.target.value as SentimentFilters["severity"] }))}>
+            {sentimentSeverityLevels.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>影响方向</span>
+          <select value={filters.direction} onChange={(event) => setFilters((current) => ({ ...current, direction: event.target.value as SentimentFilters["direction"] }))}>
+            {sentimentDirections.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>最低价值分</span>
+          <input type="number" min={0} max={100} value={filters.minScore} onChange={(event) => setFilters((current) => ({ ...current, minScore: Number(event.target.value) }))} />
+        </label>
+        <label className="wide">
+          <span>关键词 / 股票代码 / 行业</span>
+          <input value={filters.query} onChange={(event) => setFilters((current) => ({ ...current, query: event.target.value }))} placeholder="搜索政策、订单、行业、股票代码" />
+        </label>
+      </div>
+
+      <div className="sentiment-layout">
+        <section className="sentiment-panel">
+          <div className="sentiment-panel-title">
+            <h3>事件雷达</h3>
+            <span>按价值分排序</span>
+          </div>
+          <div className="sentiment-event-list">
+            {events.map((event) => (
+              <article className="sentiment-event" key={event.id}>
+                <div className="sentiment-event-head">
+                  <strong>{event.title}</strong>
+                  <span className={event.direction === "利空" ? "sentiment-badge negative" : "sentiment-badge"}>{event.direction}</span>
+                </div>
+                <p>{event.summary}</p>
+                <div className="sentiment-meta">
+                  <span>{event.category}</span>
+                  <span>{event.industries.join("、")}</span>
+                  <span>{event.horizon}</span>
+                  <span>{event.severity}</span>
+                  <span>价值分 {scoreSentimentEvent(event)}</span>
+                  <span>{event.occurredAt}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="sentiment-panel">
+          <div className="sentiment-panel-title">
+            <h3>推荐关联股票</h3>
+            <span>事件 + 基本面 + 动量</span>
+          </div>
+          <table className="data-table sentiment-table">
+            <thead>
+              <tr>
+                <th>股票</th>
+                <th>方向</th>
+                <th>综合分</th>
+                <th>风险</th>
+                <th>推荐理由</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recommendations.slice(0, 8).map((item) => (
+                <tr key={item.stock.code}>
+                  <td>
+                    <strong>{item.stock.name}</strong>
+                    <span>{item.stock.code}</span>
+                  </td>
+                  <td>{item.direction}</td>
+                  <td>{item.score}</td>
+                  <td>{item.risk}</td>
+                  <td>{item.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <section className="sentiment-report">
+        <div className="sentiment-panel-title">
+          <h3>深度洞察报告</h3>
+          <span>{report.eventCount} 个事件，{report.longIdeas.length} 个多头线索</span>
+        </div>
+        <div className="report-grid">
+          <div>
+            <strong>核心结论</strong>
+            <p>{report.conclusion}</p>
+          </div>
+          <div>
+            <strong>事件分类</strong>
+            <p>{report.topCategories.map((item) => `${item.category} ${item.count}`).join(" / ") || "--"}</p>
+          </div>
+          <div>
+            <strong>行业热度</strong>
+            <p>{report.topIndustries.map((item) => `${item.industry} ${item.count}`).join(" / ") || "--"}</p>
+          </div>
+          <div>
+            <strong>验证清单</strong>
+            <ul>
+              {report.validationPoints.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
+    </section>
+  );
+}
+
 function SettingsWorkspace({
   settings,
   status,
   summary,
   stockCount,
+  newsSettings,
+  newsStatus,
   patchSettings,
   toggleModule,
+  patchNewsSource,
+  toggleNewsSource,
+  onAddNewsSource,
+  onRemoveNewsSource,
+  onSaveNewsSources,
+  onTestNewsSource,
   onSave,
   onTest,
   onSyncOpenData
@@ -1713,13 +2060,22 @@ function SettingsWorkspace({
   status: string;
   summary: OpenSourceDataSummary;
   stockCount: number;
+  newsSettings: NewsSourceSettings;
+  newsStatus: string;
   patchSettings: (patch: Partial<InfoSourceSettings>) => void;
   toggleModule: (key: SourceModuleKey) => void;
+  patchNewsSource: (id: string, patch: Partial<NewsSourceEndpoint>) => void;
+  toggleNewsSource: (id: string) => void;
+  onAddNewsSource: () => void;
+  onRemoveNewsSource: (id: string) => void;
+  onSaveNewsSources: () => void;
+  onTestNewsSource: (id: string) => void;
   onSave: () => void;
   onTest: () => void;
   onSyncOpenData: () => void;
 }) {
   const enabledCount = enabledSourceModules(settings).length;
+  const enabledNewsCount = enabledNewsSources(newsSettings).length;
   return (
     <section className="settings-workspace">
       <div className="settings-title-row">
@@ -1812,6 +2168,121 @@ function SettingsWorkspace({
         </div>
       </div>
 
+      <div className="settings-panel news-source-panel">
+        <div className="settings-panel-title">
+          <div>
+            <h3>新闻源接口管理</h3>
+            <p>用于舆情选股的新闻事件输入源，可按来源独立启停、测试和保存。</p>
+          </div>
+          <div className="settings-actions">
+            <span className={newsStatus.includes("失败") ? "settings-status danger" : "settings-status"}>{newsStatus}</span>
+            <button className="btn" onClick={onAddNewsSource}>
+              <Plus size={14} />
+              新增新闻源
+            </button>
+            <button className="btn primary" onClick={onSaveNewsSources}>
+              <Save size={15} />
+              保存新闻源
+            </button>
+          </div>
+        </div>
+
+        <div className="news-source-list">
+          {newsSettings.sources.map((source) => (
+            <section className="news-source-card" key={source.id}>
+              <div className="news-source-card-title">
+                <label className="settings-module-row compact">
+                  <input type="checkbox" checked={source.enabled} onChange={() => toggleNewsSource(source.id)} />
+                  <span>
+                    <strong>{source.name}</strong>
+                    <em>{source.enabled ? "已启用" : "已停用"} · {source.provider}</em>
+                  </span>
+                </label>
+                <div className="news-source-actions">
+                  <button className="btn" onClick={() => onTestNewsSource(source.id)}>
+                    测试接口
+                  </button>
+                  <button className="btn danger" onClick={() => onRemoveNewsSource(source.id)} disabled={newsSettings.sources.length <= 1}>
+                    <Trash2 size={14} />
+                    删除
+                  </button>
+                </div>
+              </div>
+
+              <div className="news-source-grid">
+                <label>
+                  <span>新闻源名称</span>
+                  <input value={source.name} onChange={(event) => patchNewsSource(source.id, { name: event.target.value })} />
+                </label>
+                <label>
+                  <span>来源类型</span>
+                  <select
+                    value={source.provider}
+                    onChange={(event) => {
+                      const provider = event.target.value as NewsSourceProvider;
+                      patchNewsSource(source.id, { provider, baseUrl: defaultBaseUrlForNewsProvider(provider) });
+                    }}
+                  >
+                    {newsSourceProviderOptions.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="wide">
+                  <span>接口地址</span>
+                  <input value={source.baseUrl} onChange={(event) => patchNewsSource(source.id, { baseUrl: event.target.value })} />
+                </label>
+                <label>
+                  <span>API Token</span>
+                  <input type="password" value={source.apiToken} onChange={(event) => patchNewsSource(source.id, { apiToken: event.target.value })} />
+                </label>
+                <label>
+                  <span>语言</span>
+                  <select value={source.language} onChange={(event) => patchNewsSource(source.id, { language: event.target.value as NewsSourceEndpoint["language"] })}>
+                    {newsLanguageOptions.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>刷新周期（分钟）</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={240}
+                    value={source.refreshInterval}
+                    onChange={(event) => patchNewsSource(source.id, { refreshInterval: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span>单次拉取</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={source.maxItems}
+                    onChange={(event) => patchNewsSource(source.id, { maxItems: Number(event.target.value) })}
+                  />
+                </label>
+                <label className="wide">
+                  <span>关键词 / 查询语句</span>
+                  <input value={source.query} onChange={(event) => patchNewsSource(source.id, { query: event.target.value })} />
+                </label>
+              </div>
+
+              <div className="news-source-meta">
+                <span>最近测试：{formatDateTime(source.lastTestAt)}</span>
+                <span>{source.lastStatus ?? "尚未测试"}</span>
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+
       <div className="settings-summary">
         <div>
           <span>已启用模块</span>
@@ -1836,6 +2307,14 @@ function SettingsWorkspace({
         <div>
           <span>最近同步</span>
           <strong>{formatDateTime(summary.lastSyncAt)}</strong>
+        </div>
+        <div>
+          <span>新闻源</span>
+          <strong>{enabledNewsCount} / {newsSettings.sources.length}</strong>
+        </div>
+        <div>
+          <span>新闻源保存</span>
+          <strong>{formatDateTime(newsSettings.lastSavedAt)}</strong>
         </div>
       </div>
     </section>

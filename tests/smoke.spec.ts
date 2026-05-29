@@ -51,6 +51,19 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("因子IC概览")).toBeVisible();
   await expect(page.getByText("因子相关性矩阵")).toBeVisible();
 
+  await page.locator(".primary-nav").getByRole("button", { name: "舆情", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "舆情选股" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "事件雷达" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "推荐关联股票" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "深度洞察报告" })).toBeVisible();
+  await page.getByLabel("事件类型").selectOption("风险负面");
+  await page.getByLabel("定点行业").selectOption("食品饮料");
+  await page.getByLabel("重大程度").selectOption("重大");
+  await expect(page.getByText("命中行业")).toBeVisible();
+  await expect(page.getByText("重大事件")).toBeVisible();
+  await expect(page.getByText("高端白酒批价波动")).toBeVisible();
+  await page.locator(".primary-nav").getByRole("button", { name: "策略", exact: true }).click();
+
   await page.getByRole("button", { name: "交易模型" }).click();
   await expect(page.getByText("模型Ⅰ--定期轮动")).toBeVisible();
 
@@ -98,18 +111,31 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByRole("button", { name: "保存条件单" })).toBeVisible();
 
   await page.locator(".primary-nav").getByRole("button", { name: "设置", exact: true }).click();
+  const navBox = await page.locator(".primary-nav").boundingBox();
+  const settingsNavBox = await page.locator(".primary-nav").getByRole("button", { name: "设置", exact: true }).boundingBox();
+  expect(settingsNavBox && navBox ? settingsNavBox.x + settingsNavBox.width : 0).toBeGreaterThan(navBox ? navBox.x + navBox.width - 160 : 0);
   await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "信息来源接口" })).toBeVisible();
-  await expect(page.getByLabel("接口来源")).toBeVisible();
-  await expect(page.getByLabel("接口地址")).toBeVisible();
+  const infoSourcePanel = page.locator(".settings-panel").filter({ hasText: "信息来源接口" });
+  await expect(infoSourcePanel.getByLabel("接口来源")).toBeVisible();
+  await expect(infoSourcePanel.getByLabel("接口地址")).toBeVisible();
   await expect(page.getByRole("button", { name: "测试连接" })).toBeVisible();
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/连接检测通过/)).toBeVisible();
-  await page.getByLabel("接口来源").selectOption("AKShare / AKTools 免费开源数据");
-  await expect(page.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:8080/api/public");
+  await infoSourcePanel.getByLabel("接口来源").selectOption("AKShare / AKTools 免费开源数据");
+  await expect(infoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:8080/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/AKShare\/AKTools/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();
   await expect(page.getByText(/开源数据同步完成/)).toBeVisible();
   await expect(page.getByText("2 / 2")).toBeVisible();
+
+  await expect(page.getByRole("heading", { name: "新闻源接口管理" })).toBeVisible();
+  await expect(page.getByText("本地舆情样本").first()).toBeVisible();
+  await page.locator(".news-source-card").first().getByRole("button", { name: "测试接口" }).click();
+  await expect(page.getByText(/新闻源检测通过/).first()).toBeVisible();
+  await page.getByRole("button", { name: "新增新闻源" }).click();
+  await expect(page.getByText("自定义新闻源").first()).toBeVisible();
+  await page.getByRole("button", { name: "保存新闻源" }).click();
+  await expect(page.getByText(/已保存新闻源接口配置/)).toBeVisible();
 });
