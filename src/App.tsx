@@ -32,8 +32,7 @@ import {
   PROPERTY_OPTIONS,
   REGION_OPTIONS,
   SAMPLE_ASSETS,
-  STOCKS,
-  SYSTEM_POOLS
+  STOCKS
 } from "./data";
 import {
   createCustomFactor,
@@ -41,6 +40,7 @@ import {
   createDefaultStrategy,
   createStaticPool,
   loadLocal,
+  removeLocal,
   saveLocal,
   uid
 } from "./storage";
@@ -83,6 +83,20 @@ import {
   type NewsSourceSettings
 } from "./newsSourceServices";
 import {
+  defaultBaseUrlForNewsAnalysisProvider,
+  defaultModelForNewsAnalysisProvider,
+  defaultNewsAnalysisModelSettings,
+  enabledNewsAnalysisTasks,
+  ensureNewsAnalysisModelSettings,
+  newsAnalysisDepthOptions,
+  newsAnalysisModelProviderOptions,
+  newsAnalysisTaskLabels,
+  testNewsAnalysisModelConnection,
+  type NewsAnalysisModelProvider,
+  type NewsAnalysisModelSettings,
+  type NewsAnalysisTaskKey
+} from "./newsAnalysisModelServices";
+import {
   bindTradeConnection,
   createTradePlan,
   defaultPaperTradeState,
@@ -98,15 +112,69 @@ import {
 } from "./tradingServices";
 import {
   buildSentimentInsightReport,
-  buildSentimentRecommendations,
+  buildSentimentEventsFromNewsArticles,
+  buildSentimentLinkedStocks,
   filterSentimentEvents,
-  sampleSentimentEvents,
   scoreSentimentEvent,
   sentimentCategories,
   sentimentDirections,
   sentimentSeverityLevels,
+  type SentimentEvent,
   type SentimentFilters
 } from "./sentimentServices";
+import {
+  defaultNewsFetchStats,
+  defaultNewsFilters,
+  fetchNewsArticlesFromSources,
+  filterNewsArticles,
+  formatNewsDate,
+  getNewsSourceList,
+  getNewsStats,
+  newsCategoryOptions,
+  newsDateRangeOptions,
+  newsFetchModeOptions,
+  newsImportanceOptions,
+  newsSentimentOptions,
+  type NewsArticle,
+  type NewsFetchMode,
+  type NewsFetchStats,
+  type NewsFilters
+} from "./newsPageServices";
+import {
+  buildAnnualFinancialReports,
+  buildFinancialReportSourceDataUrl,
+  type AnnualFinancialReport,
+  type AnnualFinancialReportYear
+} from "./financialReportServices";
+import {
+  buildValuationRows,
+  calculateValuation,
+  defaultValuationFilters,
+  enterpriseStateOptions,
+  hasRequiredRealValuationData,
+  missingRealValuationFields,
+  summarizeValuationRows,
+  valuationBoardOptions,
+  valuationStyleOptions,
+  type ValuationFilters,
+  type ValuationRow
+} from "./valuationServices";
+import {
+  fetchStockKlineHistory,
+  syncTencentAllAshareMarketData,
+  syncTencentRealMarketData,
+  type StockKlineHistoryResult,
+  type StockKlinePeriod,
+  type StockKlinePoint
+} from "./realMarketDataService";
+import {
+  displayStockCode,
+  isCodeLikeStockQuery,
+  normalizeStockCodeInput,
+  resolveStockByCode,
+  stockCodeForStorage,
+  stockMatchesCodeQuery
+} from "./stockIdentity";
 import type {
   AssetItem,
   BacktestConfig,
@@ -209,6 +277,28 @@ function formatDateTime(updatedAt?: string) {
   return `${padTimePart(date.getMonth() + 1)}-${padTimePart(date.getDate())} ${padTimePart(date.getHours())}:${padTimePart(date.getMinutes())}`;
 }
 
+const refreshIntervalOptions = [
+  { label: "关闭自动刷新", value: 0 },
+  { label: "1 分钟", value: 1 },
+  { label: "5 分钟", value: 5 },
+  { label: "15 分钟", value: 15 },
+  { label: "30 分钟", value: 30 },
+  { label: "60 分钟", value: 60 }
+];
+
+function loadManualFirstRefreshInterval(name: string) {
+  const migrationKey = `${name}:manualFirstDefaultV1`;
+  const migrated = loadLocal(migrationKey, false);
+  const stored = loadLocal<number | null>(name, null);
+  if (!migrated && (stored === null || stored === 15)) {
+    saveLocal(name, 0);
+    saveLocal(migrationKey, true);
+    return 0;
+  }
+  const value = typeof stored === "number" ? stored : Number(stored ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function safeFileName(name: string) {
   return name.replace(/[\\/:*?"<>|]/g, "_") || "export";
 }
@@ -223,8 +313,40 @@ function downloadTextFile(filename: string, content: string, type = "text/plain;
   URL.revokeObjectURL(url);
 }
 
+const mojibakeTextPattern = /[\uFFFD]|锟|Ã|Â|ŵ|˼/;
+
+function hasRealRuntimeStockData(stock: Stock) {
+  return stock.metrics.realQuoteSource === 1 || stock.metrics.openSourceMarketSource === 1;
+}
+
 function ensureStockData(value: Stock[]) {
-  return Array.isArray(value) && value.length ? value : STOCKS;
+  if (!Array.isArray(value) || !value.length) return [];
+  return value.filter((stock) => !mojibakeTextPattern.test(stock.name) && hasRealRuntimeStockData(stock));
+}
+
+function purgeLegacyLocalFakeData() {
+  const marker = "localFakeDataClearedV1";
+  if (loadLocal(marker, false)) return;
+  [
+    "openSourceStocks",
+    "openSourceDataSummary",
+    "valuationDataSource",
+    "paperTradeState",
+    "newsSourceSettings",
+    "infoSourceSettings"
+  ].forEach(removeLocal);
+  saveLocal(marker, true);
+}
+
+function createRuntimeSystemPools(stocks: Stock[]): StockPool[] {
+  const byBoard = (board: Stock["board"]) => stocks.filter((stock) => stock.board === board).map((stock) => stock.code);
+  return [
+    { id: "all", name: "全部股票", type: "system", codes: stocks.map((stock) => stock.code), description: "真实数据接入后的股票全集。" },
+    { id: "main-board", name: "主板", type: "system", codes: byBoard("主板"), description: "真实数据接入后的主板股票。" },
+    { id: "cyb", name: "创业板", type: "system", codes: byBoard("创业板"), description: "真实数据接入后的创业板股票。" },
+    { id: "kcb50", name: "科创板", type: "system", codes: byBoard("科创板"), description: "真实数据接入后的科创板股票。" },
+    { id: "bse50", name: "北交所", type: "system", codes: byBoard("北交所"), description: "真实数据接入后的北交所股票。" }
+  ];
 }
 
 function touchStrategyUpdatedAt(item: StrategyConfig): StrategyConfig {
@@ -249,7 +371,28 @@ const operators: Array<{ value: FilterOperator; label: string }> = [
 ];
 
 type ModalKey = null | "pool" | "summary" | "asset" | "customFactor" | "optimization" | "compare";
-type MainSection = "strategy" | "sentiment" | "trade" | "settings";
+type MainSection = "strategy" | "sentiment" | "valuation" | "trade" | "settings";
+type StockReference = Pick<Stock, "code" | "name">;
+type StockInfoTarget = StockReference & { stock?: Stock };
+type SortDirection = "asc" | "desc";
+type ValuationDataSource = "none" | "tencentQuote";
+type ValuationSortKey = "currentPrice" | "fairValue" | "marketCap" | "fairMarketCap" | "safetyMargin" | "governanceScore" | "action";
+
+const stockKlinePeriodOptions: Array<{ value: StockKlinePeriod; label: string }> = [
+  { value: "day", label: "日K" },
+  { value: "week", label: "周K" },
+  { value: "month", label: "月K" }
+];
+
+const valuationSortLabels: Record<ValuationSortKey, string> = {
+  currentPrice: "现价",
+  fairValue: "核算价值",
+  marketCap: "市值",
+  fairMarketCap: "核算市值",
+  safetyMargin: "安全边际",
+  governanceScore: "治理",
+  action: "动作"
+};
 
 const defaultSentimentFilters: SentimentFilters = {
   category: "全部",
@@ -267,6 +410,113 @@ function pct(value: number) {
 function round(value: number, precision = 2) {
   const scale = 10 ** precision;
   return Math.round(value * scale) / scale;
+}
+
+function resolveStockInfoTarget(stock: StockReference, stocks: Stock[]): StockInfoTarget {
+  const fullStock = resolveStockByCode(stocks, stock.code);
+  return {
+    code: fullStock?.code ?? stock.code,
+    name: fullStock?.name ?? stock.name,
+    stock: fullStock
+  };
+}
+
+function formatStockMetric(stock: Stock, key: string, suffix = "", precision = 2) {
+  const value = stock.metrics[key];
+  if (!Number.isFinite(value)) return "--";
+  return `${round(value, precision)}${suffix}`;
+}
+
+function stockMetricValue(stock: Stock, key: string) {
+  const value = stock.metrics[key];
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function formatOptionalMetric(value: number | undefined, suffix = "", precision = 2) {
+  if (value === undefined || !Number.isFinite(value)) return "--";
+  return `${round(value, precision)}${suffix}`;
+}
+
+function formatStockRatio(stock: Stock, numeratorKey: string, denominatorKey: string, suffix = "%") {
+  const numerator = stockMetricValue(stock, numeratorKey);
+  const denominator = stockMetricValue(stock, denominatorKey);
+  if (numerator === undefined || denominator === undefined || Math.abs(denominator) < 0.01) return "--";
+  return `${round((numerator / denominator) * 100, 2)}${suffix}`;
+}
+
+function stockReportSignals(stock: Stock) {
+  const signals: string[] = [];
+  if (stock.metrics.realAnnualReportSource !== 1) {
+    return ["尚未接入真实财报、治理或监管处罚源，不展示本地样本推导提示"];
+  }
+  const cashflow = stockMetricValue(stock, "operatingCashflow") ?? 0;
+  const netProfit = stockMetricValue(stock, "netProfit") ?? 0;
+  const debtRatio = stockMetricValue(stock, "debtRatio") ?? 0;
+  const currentRatio = stockMetricValue(stock, "currentRatio") ?? 0;
+  const receivableRatio = (() => {
+    const receivables = stockMetricValue(stock, "receivables");
+    const revenue = stockMetricValue(stock, "revenue");
+    return receivables !== undefined && revenue ? receivables / revenue : undefined;
+  })();
+  const pledgeRatio = stockMetricValue(stock, "pledgeRatio") ?? 0;
+  const violationScore = stockMetricValue(stock, "violationScore") ?? 0;
+
+  if (netProfit > 0 && cashflow / netProfit >= 0.8) signals.push("经营现金流覆盖净利润，利润含金量较好");
+  if (netProfit > 0 && cashflow / netProfit < 0.5) signals.push("经营现金流覆盖不足，需要核查应收、存货和收入确认");
+  if (debtRatio > 65 && stock.industry1 !== "银行") signals.push("资产负债率偏高，估值应提高财务折价");
+  if (currentRatio > 0 && currentRatio < 1) signals.push("流动比率低于 1，短期偿债压力偏高");
+  if (receivableRatio !== undefined && receivableRatio > 0.2) signals.push("应收账款占收入比例偏高，需关注回款质量");
+  if (pledgeRatio > 20) signals.push("股权质押比例较高，治理风险上升");
+  if (violationScore > 35) signals.push("违规风险分偏高，需核查公告与监管记录");
+  if (!signals.length) signals.push("当前真实字段未触发显著财务或治理预警");
+  return signals;
+}
+
+function StockNameAction({
+  stock,
+  onOpen,
+  className = "stock-inline-link",
+  children
+}: {
+  stock: StockReference;
+  onOpen?: (stock: StockReference) => void;
+  className?: string;
+  children?: React.ReactNode;
+}) {
+  if (!onOpen) return <>{children ?? stock.name}</>;
+  return (
+    <button className={className} type="button" onClick={() => onOpen(stock)}>
+      {children ?? stock.name}
+    </button>
+  );
+}
+
+function valuationActionRank(row: ValuationRow) {
+  if (row.governanceScore < 45) return 0;
+  if (row.safetyMargin >= 60) return 5;
+  if (row.safetyMargin >= 35) return 4;
+  if (row.safetyMargin >= 10) return 3;
+  if (row.safetyMargin >= 0) return 2;
+  return 1;
+}
+
+function valuationFairMarketCap(row: ValuationRow) {
+  if (!Number.isFinite(row.marketCap) || !Number.isFinite(row.currentPrice) || row.currentPrice <= 0) return 0;
+  return round((row.marketCap / row.currentPrice) * row.fairValue, 2);
+}
+
+function valuationSortValue(row: ValuationRow, key: ValuationSortKey) {
+  if (key === "action") return valuationActionRank(row);
+  if (key === "fairMarketCap") return valuationFairMarketCap(row);
+  return row[key];
+}
+
+function movingAverage(points: StockKlinePoint[], windowSize: number) {
+  return points.map((_, index) => {
+    if (index + 1 < windowSize) return null;
+    const slice = points.slice(index + 1 - windowSize, index + 1);
+    return slice.reduce((sum, point) => sum + point.close, 0) / windowSize;
+  });
 }
 
 function getFactorName(factors: Factor[], key: string) {
@@ -484,6 +734,585 @@ function Modal({ title, children, onClose, wide = false }: { title: string; chil
   );
 }
 
+function formatKlineAxisDate(date: string) {
+  const parts = date.split("-");
+  if (parts.length >= 3) return `${parts[1]}-${parts[2]}`;
+  return date;
+}
+
+function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
+  const width = 780;
+  const height = 320;
+  const left = 46;
+  const right = 18;
+  const top = 18;
+  const priceHeight = 210;
+  const volumeTop = 244;
+  const volumeHeight = 48;
+  const plotWidth = width - left - right;
+  const priceMax = Math.max(...points.map((point) => point.high));
+  const priceMin = Math.min(...points.map((point) => point.low));
+  const priceRange = Math.max(priceMax - priceMin, 0.01);
+  const volumeMax = Math.max(...points.map((point) => point.volume), 1);
+  const step = plotWidth / points.length;
+  const candleWidth = Math.max(4, step * 0.56);
+  const ma5 = movingAverage(points, 5);
+  const ma20 = movingAverage(points, 20);
+  const yPrice = (value: number) => top + ((priceMax - value) / priceRange) * priceHeight;
+  const xPoint = (index: number) => left + index * step + step / 2;
+  const firstAverageIndex = (values: Array<number | null>) => values.findIndex((item) => item !== null);
+  const maPath = (values: Array<number | null>) => {
+    const firstIndex = firstAverageIndex(values);
+    return values
+      .map((value, index) => (value === null ? "" : `${index === firstIndex ? "M" : "L"} ${xPoint(index).toFixed(2)} ${yPrice(value).toFixed(2)}`))
+      .filter(Boolean)
+      .join(" ");
+  };
+
+  return (
+    <>
+      <div className="stock-kline-chart-wrap">
+        <svg className="stock-kline-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="股票真实K线图">
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+            const y = top + ratio * priceHeight;
+            const price = priceMax - ratio * priceRange;
+            return (
+              <g key={ratio}>
+                <line x1={left} y1={y} x2={width - right} y2={y} className="kline-grid" />
+                <text x={8} y={y + 4} className="kline-axis">{price.toFixed(2)}</text>
+              </g>
+            );
+          })}
+          <path d={maPath(ma5)} className="kline-ma ma5" />
+          <path d={maPath(ma20)} className="kline-ma ma20" />
+          {points.map((point, index) => {
+            const rising = point.close >= point.open;
+            const x = xPoint(index);
+            const yOpen = yPrice(point.open);
+            const yClose = yPrice(point.close);
+            const yHigh = yPrice(point.high);
+            const yLow = yPrice(point.low);
+            const bodyY = Math.min(yOpen, yClose);
+            const bodyHeight = Math.max(1, Math.abs(yClose - yOpen));
+            const volumeHeightValue = (point.volume / volumeMax) * volumeHeight;
+            return (
+              <g key={`${point.date}-${index}`} className={rising ? "kline-up" : "kline-down"}>
+                <line x1={x} y1={yHigh} x2={x} y2={yLow} className="kline-wick" />
+                <rect x={x - candleWidth / 2} y={bodyY} width={candleWidth} height={bodyHeight} rx={1} className="kline-body" />
+                <rect x={x - candleWidth / 2} y={volumeTop + volumeHeight - volumeHeightValue} width={candleWidth} height={volumeHeightValue} className="kline-volume" />
+              </g>
+            );
+          })}
+          <line x1={left} y1={volumeTop} x2={width - right} y2={volumeTop} className="kline-grid strong" />
+          {[0, Math.floor(points.length / 2), points.length - 1].map((index) => (
+            <text key={index} x={xPoint(index)} y={height - 8} textAnchor="middle" className="kline-axis">{formatKlineAxisDate(points[index].date)}</text>
+          ))}
+        </svg>
+      </div>
+      <div className="stock-kline-legend">
+        <span className="ma5">MA5</span>
+        <span className="ma20">MA20</span>
+        <span>最高 {points[points.length - 1].high.toFixed(2)}</span>
+        <span>最低 {points[points.length - 1].low.toFixed(2)}</span>
+        <span>成交量 {points[points.length - 1].volume.toFixed(2)} 万手</span>
+      </div>
+    </>
+  );
+}
+
+function StockKlinePanel({
+  result,
+  loading,
+  period,
+  onPeriodChange
+}: {
+  result: StockKlineHistoryResult | null;
+  loading: boolean;
+  period: StockKlinePeriod;
+  onPeriodChange: (period: StockKlinePeriod) => void;
+}) {
+  const points = result?.points ?? [];
+  const latest = points[points.length - 1];
+  const previous = points[points.length - 2] ?? latest;
+  const latestChange = latest && previous?.close ? ((latest.close - previous.close) / previous.close) * 100 : 0;
+
+  return (
+    <div className="stock-kline-panel">
+      <div className="stock-kline-head">
+        <div>
+          <h4>K线走势</h4>
+          <span>真实历史行情，按股票交易口径切换日K、周K、月K；不使用模拟走势。</span>
+        </div>
+        <div className="stock-kline-actions">
+          <div className="stock-kline-periods" role="tablist" aria-label="K线周期">
+            {stockKlinePeriodOptions.map((option) => (
+              <button
+                key={option.value}
+                className={period === option.value ? "active" : ""}
+                onClick={() => onPeriodChange(option.value)}
+                role="tab"
+                aria-selected={period === option.value}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {latest ? (
+            <div className="stock-kline-latest">
+              <strong>{latest.close.toFixed(2)}</strong>
+              <em className={latestChange >= 0 ? "positive" : "negative"}>{pct(latestChange)}</em>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {loading ? <div className="stock-kline-state">正在加载真实K线...</div> : null}
+      {!loading && result && !result.ok ? <div className="stock-kline-state error">{result.message}</div> : null}
+      {!loading && result?.ok && points.length ? <StockKlineChart points={points} /> : null}
+      {!loading && result?.ok && !points.length ? <div className="stock-kline-state error">K线获取失败：接口未返回有效历史行情</div> : null}
+    </div>
+  );
+}
+
+function StockInfoDetailGrid({
+  title,
+  description,
+  items,
+  columns = 4
+}: {
+  title: string;
+  description?: string;
+  items: Array<{ label: string; value: string; note?: string }>;
+  columns?: 2 | 3 | 4;
+}) {
+  return (
+    <div className="stock-info-section">
+      <div className="stock-info-section-title">
+        <div>
+          <h4>{title}</h4>
+          {description ? <p>{description}</p> : null}
+        </div>
+      </div>
+      <div className={`stock-info-detail-grid columns-${columns}`}>
+        {items.map((item) => (
+          <div key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+            {item.note ? <em>{item.note}</em> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function buildAnnualReportStatementItems(report: AnnualFinancialReport) {
+  return [
+    { label: "营业收入", value: `${round(report.metrics.revenue, 2)} 亿` },
+    { label: "归母净利润", value: `${round(report.metrics.netProfit, 2)} 亿` },
+    { label: "经营现金流", value: `${round(report.metrics.operatingCashflow, 2)} 亿` },
+    { label: "总资产", value: `${round(report.metrics.totalAssets, 2)} 亿` },
+    { label: "总负债", value: `${round(report.metrics.totalLiabilities, 2)} 亿` },
+    { label: "存货", value: `${round(report.metrics.inventory, 2)} 亿` },
+    { label: "应收账款", value: `${round(report.metrics.receivables, 2)} 亿` },
+    { label: "每股收益 EPS", value: `${round(report.metrics.eps, 2)} 元` },
+    { label: "每股净资产 BPS", value: `${round(report.metrics.bps, 2)} 元` },
+    { label: "员工人数", value: `${round(report.metrics.employeeCount, 0)} 人` },
+    { label: "报告期", value: report.periodEnd },
+    { label: "审计意见", value: report.auditOpinion }
+  ];
+}
+
+function buildAnnualReportRatioItems(report: AnnualFinancialReport) {
+  return [
+    { label: "毛利率", value: `${round(report.metrics.grossMargin, 2)}%` },
+    { label: "净利率", value: `${round(report.metrics.netMargin, 2)}%` },
+    { label: "ROE", value: `${round(report.metrics.roe, 2)}%` },
+    { label: "ROA", value: `${round(report.metrics.roa, 2)}%` },
+    { label: "营收增长", value: `${round(report.metrics.revenueGrowth, 2)}%` },
+    { label: "净利增长", value: `${round(report.metrics.profitGrowth, 2)}%` },
+    { label: "资产负债率", value: `${round(report.metrics.debtRatio, 2)}%` },
+    { label: "流动比率", value: `${round(report.metrics.currentRatio, 2)}x` },
+    { label: "总资产周转率", value: `${round(report.metrics.assetTurnover, 2)}x` },
+    { label: "股息率", value: `${round(report.metrics.dividendYield, 2)}%` },
+    { label: "现金流/净利润", value: `${round(report.metrics.cashProfitRatio, 2)}%` },
+    { label: "应收/收入", value: `${round(report.metrics.receivableRevenueRatio, 2)}%` }
+  ];
+}
+
+function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
+  const reports = buildAnnualFinancialReports(stock);
+  const [selectedYear, setSelectedYear] = useState<AnnualFinancialReportYear>("2025");
+
+  useEffect(
+    function resetAnnualReportYear() {
+      setSelectedYear("2025");
+    },
+    [stock.code]
+  );
+
+  if (!reports.length) {
+    return (
+      <div className="stock-info-section annual-report-section">
+        <div className="stock-info-section-title annual-report-title">
+          <div>
+            <h4>财报摘要</h4>
+            <p>本地样本财报已清空，当前仅展示真实财报源返回的数据。</p>
+          </div>
+        </div>
+        <div className="stock-related-info-empty">尚未接入该股票的真实年度财报源文件，暂不展示财报摘要或下载源文件。</div>
+      </div>
+    );
+  }
+
+  const selectedReport = reports.find((report) => report.year === selectedYear) ?? reports[0];
+  const statementItems = buildAnnualReportStatementItems(selectedReport);
+  const ratioItems = buildAnnualReportRatioItems(selectedReport);
+
+  return (
+    <div className="stock-info-section annual-report-section">
+      <div className="stock-info-section-title annual-report-title">
+        <div>
+          <h4>财报摘要</h4>
+          <p>
+            {selectedReport.year} 年度报告，报告期 {selectedReport.periodEnd}，披露日期 {selectedReport.disclosureDate}。
+          </p>
+        </div>
+        <div className="annual-report-actions">
+          <div className="annual-report-years" role="tablist" aria-label="财报年度">
+            {reports.map((report) => (
+              <button
+                key={report.year}
+                className={report.year === selectedReport.year ? "active" : ""}
+                onClick={() => setSelectedYear(report.year)}
+                role="tab"
+                aria-selected={report.year === selectedReport.year}
+                type="button"
+              >
+                {report.year}
+              </button>
+            ))}
+          </div>
+          <a className="btn annual-report-source-download" href={buildFinancialReportSourceDataUrl(selectedReport)} download={selectedReport.sourceFileName}>
+            <Download size={14} />
+            源文件
+          </a>
+        </div>
+      </div>
+
+      <div className="annual-report-source-panel">
+        <div>
+          <span>源文件</span>
+          <strong>{selectedReport.sourceFileName}</strong>
+          <em>{selectedReport.sourceNote}</em>
+        </div>
+        <div>
+          <span>来源</span>
+          <strong>{selectedReport.sourceProvider}</strong>
+          <em>{selectedReport.sourceFileType} / {selectedReport.currencyUnit}</em>
+        </div>
+      </div>
+
+      <div className="annual-report-subtitle">
+        <strong>主要报表项目</strong>
+        <span>利润表、资产负债表、现金流量表核心字段</span>
+      </div>
+      <div className="stock-info-detail-grid columns-4">
+        {statementItems.map((item) => (
+          <div key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+
+      <div className="annual-report-subtitle">
+        <strong>关键财务比率</strong>
+        <span>按当前年度报告字段计算，随年度切换同步变化</span>
+      </div>
+      <div className="stock-info-detail-grid columns-4">
+        {ratioItems.map((item) => (
+          <div key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function isDisclosureArticle(article: NewsArticle) {
+  return article.category === "公司公告" || article.category === "财报业绩";
+}
+
+function sortNewsByPublishTime(articles: NewsArticle[]) {
+  return [...articles].sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+}
+
+function StockRelatedArticleCard({ article, fallback }: { article: NewsArticle; fallback?: boolean }) {
+  return (
+    <article className={`stock-related-info-card ${fallback ? "fallback" : ""}`}>
+      <div className="stock-related-info-head">
+        <div className="stock-related-info-source">
+          <span className="news-source-icon">{article.sourceIcon}</span>
+          <span>{article.source}</span>
+          <span>{formatNewsDate(article.publishedAt)}</span>
+        </div>
+        <div className="news-article-badges">
+          <span className={`news-badge sentiment-${article.sentiment === "利好" ? "positive" : article.sentiment === "利空" ? "negative" : "neutral"}`}>
+            {article.sentiment}
+          </span>
+          <span className="news-badge category">{article.category}</span>
+          {article.importance !== "一般" ? <span className="news-badge importance">{article.importance}</span> : null}
+        </div>
+      </div>
+      <h5>{article.title}</h5>
+      <p>{article.summary}</p>
+      <div className="stock-related-info-footer">
+        {fallback ? <span className="news-tag">行业关联</span> : <span className="news-tag">直接关联</span>}
+        {article.tags.slice(0, 3).map((tag) => (
+          <span className="news-tag" key={tag}>{tag}</span>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function StockRelatedInfoSection({ stock }: { stock: Stock }) {
+  const directArticles: NewsArticle[] = [];
+  const useFallback = false;
+  const displayArticles = directArticles.slice(0, 6);
+  const disclosureArticles = displayArticles.filter(isDisclosureArticle);
+  const newsArticles = displayArticles.filter((article) => !isDisclosureArticle(article));
+
+  return (
+    <div className="stock-info-section stock-related-info-section">
+      <div className="stock-info-section-title">
+        <div>
+          <h4>相关信息</h4>
+          <p>
+            展示与 {stock.name} 直接关联的新闻、财报业绩和产业链线索；暂无直接信息时展示同一行业线索并明确标注。
+          </p>
+        </div>
+        <span className="stock-related-info-count">
+          {`直接关联 ${directArticles.length} 条`}
+        </span>
+      </div>
+      <div className="stock-related-info-notice">本地样本资讯已清空。请通过新闻页面手动刷新真实新闻源，命中该股票后再展示相关新闻、财报或产业链信息。</div>
+      <div className="stock-related-info-layout">
+        <div className="stock-related-info-column">
+          <div className="stock-related-info-column-title">
+            <strong>财报/资讯</strong>
+            <span>{disclosureArticles.length} 条</span>
+          </div>
+          {disclosureArticles.length ? (
+            disclosureArticles.map((article) => <StockRelatedArticleCard article={article} fallback={useFallback} key={article.id} />)
+          ) : (
+            <div className="stock-related-info-empty">暂无直接关联的公司公告或财报业绩信息。</div>
+          )}
+        </div>
+        <div className="stock-related-info-column">
+          <div className="stock-related-info-column-title">
+            <strong>相关新闻</strong>
+            <span>{newsArticles.length} 条</span>
+          </div>
+          {newsArticles.length ? (
+            newsArticles.map((article) => <StockRelatedArticleCard article={article} fallback={useFallback} key={article.id} />)
+          ) : (
+            <div className="stock-related-info-empty">暂无直接关联的新闻、政策或产业链信息。</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StockInfoModal({ target, onClose }: { target: StockInfoTarget; onClose: () => void }) {
+  const sourceStock = target.stock;
+  const [liveStock, setLiveStock] = useState<Stock | null>(() => sourceStock ?? null);
+  const [klinePeriod, setKlinePeriod] = useState<StockKlinePeriod>("day");
+  const [klineResult, setKlineResult] = useState<StockKlineHistoryResult | null>(null);
+  const [klineLoading, setKlineLoading] = useState(false);
+  const [stockInfoSyncStatus, setStockInfoSyncStatus] = useState("腾讯股票信息接口已就绪");
+  const [stockInfoSyncing, setStockInfoSyncing] = useState(false);
+  const stock = liveStock;
+  const stockCode = stock?.code ?? "";
+
+  useEffect(
+    function resetLiveStockOnTargetChange() {
+      setLiveStock(sourceStock ?? null);
+      setStockInfoSyncStatus(sourceStock ? "腾讯股票信息接口已就绪" : "当前股票池未收录，无法请求股票信息");
+    },
+    [sourceStock?.code]
+  );
+
+  useEffect(
+    function loadStockKlineHistory() {
+      if (!stock) {
+        setKlineResult(null);
+        return;
+      }
+
+      let active = true;
+      setKlineLoading(true);
+      setKlineResult(null);
+
+      fetchStockKlineHistory(stock, klinePeriod)
+        .then((result) => {
+          if (active) setKlineResult(result);
+        })
+        .catch((error) => {
+          if (!active) return;
+          setKlineResult({
+            ok: false,
+            checkedAt: new Date().toISOString(),
+            message: `K线获取失败：${error instanceof Error ? error.message : "未知网络错误"}`,
+            points: [],
+            sourceRows: 0
+          });
+        })
+        .finally(() => {
+          if (active) setKlineLoading(false);
+        });
+
+      return function cancelStockKlineHistory() {
+        active = false;
+      };
+    },
+    [stockCode, klinePeriod]
+  );
+
+  const refreshStockInfo = async () => {
+    if (!stock) return;
+    setStockInfoSyncing(true);
+    setStockInfoSyncStatus("正在从腾讯刷新股票行情、估值和成交信息...");
+    const result = await syncTencentRealMarketData([stock]);
+    if (result.ok && result.stocks[0]) {
+      setLiveStock(result.stocks[0]);
+      setStockInfoSyncStatus(`${result.message}：${result.details}`);
+    } else {
+      setStockInfoSyncStatus(`${result.message}：${result.details}`);
+    }
+    setStockInfoSyncing(false);
+  };
+
+  if (!stock) {
+    const strictCodeMiss = isCodeLikeStockQuery(target.code);
+    return (
+      <Modal title={`${target.name} ${displayStockCode(target)}`} onClose={onClose}>
+        <div className="stock-info-empty">
+          <strong>当前股票池暂无该股票基础信息</strong>
+          <p>
+            {strictCodeMiss
+              ? "已按完整股票代码精确查询，当前股票池未收录该证券。可能是已退市/历史代码，系统不会回退到相似代码，避免错配到其他股票。"
+              : "该股票来自新闻关联结果，但未包含在当前真实股票池中。接入完整行情和财务数据后可展示详细信息。"}
+          </p>
+        </div>
+      </Modal>
+    );
+  }
+
+  const metrics = [
+    ["现价", formatStockMetric(stock, "price", " 元")],
+    ["涨跌幅", formatStockMetric(stock, "pctChange", "%")],
+    ["总市值", formatStockMetric(stock, "marketCap", " 亿")],
+    ["流通市值", formatStockMetric(stock, "floatMarketCap", " 亿")],
+    ["PE", formatStockMetric(stock, "pe", "x")],
+    ["PB", formatStockMetric(stock, "pb", "x")],
+    ["ROE", formatStockMetric(stock, "roe", "%")],
+    ["股息率", formatStockMetric(stock, "dividendYield", "%")],
+    ["质量分", formatStockMetric(stock, "qualityScore", "", 1)],
+    ["60日动量", formatStockMetric(stock, "momentum60", "%")],
+    ["营收增长", formatStockMetric(stock, "revenueGrowth", "%")],
+    ["净利增长", formatStockMetric(stock, "profitGrowth", "%")],
+    ["负债率", formatStockMetric(stock, "debtRatio", "%")],
+    ["流动比率", formatStockMetric(stock, "currentRatio", "x")]
+  ];
+  const companyAttributeItems = [
+    { label: "交易所/板块", value: `${stock.exchange} / ${stock.board}` },
+    { label: "行业层级", value: `${stock.industry1} / ${stock.industry2}` },
+    { label: "地区/属性", value: `${stock.region} / ${stock.property}` },
+    { label: "指数成分", value: stock.indexes.length ? stock.indexes.join(" / ") : "暂无指数成分" },
+    { label: "融资融券", value: stock.isMargin ? "融资融券标的" : "非融资融券标的" },
+    { label: "特殊状态", value: [stock.isST ? "ST" : "", stock.isSuspended ? "停牌" : "", stock.isSTAR ? "科创属性" : ""].filter(Boolean).join(" / ") || "常规交易" },
+    { label: "上市天数", value: formatStockMetric(stock, "listingDays", " 天", 0) },
+    { label: "年内交易天数", value: formatStockMetric(stock, "tradingDays", " 天", 0) }
+  ];
+  const governanceItems = [
+    { label: "股权质押比例", value: formatStockMetric(stock, "pledgeRatio", "%") },
+    { label: "重大违规风险", value: formatStockMetric(stock, "violationScore", " 分") },
+    { label: "股东高管持股", value: formatStockMetric(stock, "insiderHolding", "%") },
+    { label: "基金重仓持股", value: formatStockMetric(stock, "fundHolding", "%") },
+    { label: "指数权重", value: formatStockMetric(stock, "indexWeight", "%") },
+    { label: "评级综合分", value: formatStockMetric(stock, "ratingScore", " / 5", 2) },
+    { label: "目标价空间", value: formatStockMetric(stock, "targetUpside", "%") },
+    { label: "质量分", value: formatStockMetric(stock, "qualityScore", " 分", 1) }
+  ];
+  const reportSignals = stockReportSignals(stock);
+
+  return (
+    <Modal title="股票信息" onClose={onClose} wide>
+      <div className="stock-info-card">
+        <div className="stock-info-head">
+          <div>
+            <h3>{stock.name}</h3>
+            <span>{displayStockCode(stock)} / {stock.exchange} / {stock.board}</span>
+          </div>
+          <div className="stock-info-head-right">
+            <div className="stock-info-badges">
+              <span>{stock.industry1}</span>
+              <span>{stock.industry2}</span>
+              <span>{stock.property}</span>
+              <span>{stock.region}</span>
+              {stock.isST ? <span className="danger">ST</span> : null}
+              {stock.isSuspended ? <span className="danger">停牌</span> : null}
+            </div>
+            <div className="stock-info-live-source">
+              <button className="btn" type="button" onClick={refreshStockInfo} disabled={stockInfoSyncing}>
+                <RefreshCcw size={14} />
+                {stockInfoSyncing ? "刷新中" : "刷新股票信息"}
+              </button>
+              <span>{stockInfoSyncStatus}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="stock-info-metrics">
+          {metrics.map(([label, value]) => (
+            <div key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+
+        <StockKlinePanel result={klineResult} loading={klineLoading} period={klinePeriod} onPeriodChange={setKlinePeriod} />
+
+        <StockAnnualFinancialReportSection stock={stock} />
+        <StockRelatedInfoSection stock={stock} />
+        <StockInfoDetailGrid title="公司与交易属性" description="公司属性、交易属性、指数成分与上市交易状态。" items={companyAttributeItems} columns={2} />
+        <StockInfoDetailGrid title="治理与机构信息" description="股权质押、违规风险、机构持仓与分析师相关字段。" items={governanceItems} />
+
+        <div className="stock-info-section">
+          <div className="stock-info-section-title">
+            <div>
+              <h4>财报与治理提示</h4>
+              <p>基于当前已接入字段生成，只做风险定位，不替代公告核验。</p>
+            </div>
+          </div>
+          <ul className="stock-info-signal-list">
+            {reportSignals.map((signal) => (
+              <li key={signal}>{signal}</li>
+            ))}
+          </ul>
+        </div>
+
+      </div>
+    </Modal>
+  );
+}
+
 function StrategyManagerSidebar({
   strategy,
   savedStrategies,
@@ -614,6 +1443,7 @@ function StrategyManagerSidebar({
 }
 
 function App() {
+  purgeLegacyLocalFakeData();
   const [strategy, setStrategy] = useState<StrategyConfig>(() => ensureStrategyUpdatedAt(loadLocal("draftStrategy", createDefaultStrategy())));
   const [backtestConfig, setBacktestConfig] = useState<BacktestConfig>(() => loadLocal("backtestConfig", createDefaultBacktestConfig()));
   const [savedStrategies, setSavedStrategies] = useState<StrategyConfig[]>(() => loadLocal<StrategyConfig[]>("savedStrategies", []).map(ensureStrategyUpdatedAt));
@@ -635,12 +1465,18 @@ function App() {
     ensureNewsSourceSettings(loadLocal("newsSourceSettings", defaultNewsSourceSettings))
   );
   const [newsSourceStatus, setNewsSourceStatus] = useState("新闻源未测试");
-  const [stocks, setStocks] = useState<Stock[]>(() => ensureStockData(loadLocal("openSourceStocks", STOCKS)));
+  const [newsAnalysisModelSettings, setNewsAnalysisModelSettings] = useState<NewsAnalysisModelSettings>(() =>
+    ensureNewsAnalysisModelSettings(loadLocal("newsAnalysisModelSettings", defaultNewsAnalysisModelSettings))
+  );
+  const [newsAnalysisModelStatus, setNewsAnalysisModelStatus] = useState("新闻分析模型未测试");
+  const [stocks, setStocks] = useState<Stock[]>(() => ensureStockData(loadLocal("openSourceStocks", [])));
   const [openSourceSummary, setOpenSourceSummary] = useState<OpenSourceDataSummary>(() => ({
     ...defaultOpenSourceDataSummary,
-    stockCount: STOCKS.length,
+    stockCount: 0,
     ...loadLocal("openSourceDataSummary", {})
   }));
+  const [valuationDataSource, setValuationDataSource] = useState<ValuationDataSource>(() => loadLocal<ValuationDataSource>("valuationDataSource", "none"));
+  const [valuationRealDataStatus, setValuationRealDataStatus] = useState("价值核算未接入真实数据，当前不进行本地样本核算");
   const [tradeConnection, setTradeConnection] = useState<TradeConnectionSettings>(() =>
     ensureTradeConnectionSettings(loadLocal("tradeConnectionSettings", defaultTradeConnectionSettings))
   );
@@ -653,6 +1489,7 @@ function App() {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [rankRows, setRankRows] = useState<RankingRow[]>([]);
   const [selectionRows, setSelectionRows] = useState<SelectionRow[]>([]);
+  const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
   const [poolDraft, setPoolDraft] = useState({ name: "我的股票池", codes: "600519,300750,002594,600036,600900" });
   const [customFactorDraft, setCustomFactorDraft] = useState({ name: "质量成长合成", formula: "qualityScore * 0.6 + revenueGrowth * 0.4 - pe * 0.2" });
 
@@ -661,13 +1498,14 @@ function App() {
     saveLocal("savedStrategies", savedStrategies);
     saveLocal("infoSourceSettings", infoSourceSettings);
     saveLocal("newsSourceSettings", newsSourceSettings);
+    saveLocal("newsAnalysisModelSettings", newsAnalysisModelSettings);
     saveLocal("openSourceStocks", stocks);
     saveLocal("openSourceDataSummary", openSourceSummary);
     saveLocal("tradeConnectionSettings", tradeConnection);
     saveLocal("paperTradeState", paperTradeState);
   }, []);
 
-  const pools = useMemo(() => [...SYSTEM_POOLS, ...customPools], [customPools]);
+  const pools = useMemo(() => [...createRuntimeSystemPools(stocks), ...customPools], [stocks, customPools]);
   const factors = useMemo(() => {
     const baseFactors = orderFactors([...FACTORS, ...customFactors]);
     return orderFactors([...baseFactors, ...createDetailFactors(baseFactors)]);
@@ -688,6 +1526,7 @@ function App() {
     });
   }, [activeFactorGroup, factors, query]);
   const previewRows = useMemo(() => screenStocks(strategy, stocks, pools, factors), [strategy, stocks, pools, factors]);
+  const openStockInfo = (stock: StockReference) => setStockInfoTarget(resolveStockInfoTarget(stock, stocks));
 
   const persistStrategy = (next: StrategyConfig, markUpdated = true) => {
     const nextStrategy = markUpdated ? touchStrategyUpdatedAt(next) : next;
@@ -824,7 +1663,7 @@ function App() {
   const createPool = () => {
     const codes = poolDraft.codes
       .split(/[\s,，;；]+/)
-      .map((code) => code.trim())
+      .map((code) => stockCodeForStorage(code, stocks))
       .filter(Boolean);
     const next = createStaticPool(poolDraft.name || "我的股票池", codes);
     const list = [...customPools, next];
@@ -897,7 +1736,7 @@ function App() {
 
   const syncOpenSourceData = async () => {
     setInfoSourceStatus("正在同步免费开源数据...");
-    const result = await syncOpenSourceMarketData(infoSourceSettings, STOCKS);
+    const result = await syncOpenSourceMarketData(infoSourceSettings, stocks);
     if (result.ok) {
       setStocks(result.stocks);
       setOpenSourceSummary(result.summary);
@@ -908,6 +1747,21 @@ function App() {
       setSelectionRows([]);
     }
     setInfoSourceStatus(`${result.message}：${result.details}`);
+  };
+
+  const syncValuationRealData = async () => {
+    setValuationRealDataStatus("正在从腾讯行情扫描全市场 A 股代码并接入真实行情...");
+    const result = await syncTencentAllAshareMarketData([]);
+    if (result.ok) {
+      setStocks(result.stocks);
+      saveLocal("openSourceStocks", result.stocks);
+      setValuationDataSource("tencentQuote");
+      saveLocal<ValuationDataSource>("valuationDataSource", "tencentQuote");
+      setResult(null);
+      setRankRows([]);
+      setSelectionRows([]);
+    }
+    setValuationRealDataStatus(`${result.message}：${result.details}`);
   };
 
   const patchNewsSource = (id: string, patch: Partial<NewsSourceEndpoint>) => {
@@ -978,6 +1832,39 @@ function App() {
     setNewsSourceStatus(`${result.message}：${result.details}`);
   };
 
+  const patchNewsAnalysisModelSettings = (patch: Partial<NewsAnalysisModelSettings>) => {
+    setNewsAnalysisModelSettings((current) => ensureNewsAnalysisModelSettings({ ...current, ...patch }));
+  };
+
+  const toggleNewsAnalysisTask = (key: NewsAnalysisTaskKey) => {
+    setNewsAnalysisModelSettings((current) =>
+      ensureNewsAnalysisModelSettings({
+        ...current,
+        tasks: {
+          ...current.tasks,
+          [key]: !current.tasks[key]
+        }
+      })
+    );
+  };
+
+  const saveNewsAnalysisModelSettings = () => {
+    const next = ensureNewsAnalysisModelSettings({ ...newsAnalysisModelSettings, lastSavedAt: new Date().toISOString() });
+    setNewsAnalysisModelSettings(next);
+    saveLocal("newsAnalysisModelSettings", next);
+    setNewsAnalysisModelStatus("已保存新闻信息分析模型接口配置");
+  };
+
+  const runNewsAnalysisModelConnectionTest = async () => {
+    setNewsAnalysisModelStatus("正在检测新闻信息分析模型接口...");
+    const next = ensureNewsAnalysisModelSettings({ ...newsAnalysisModelSettings, lastTestAt: new Date().toISOString() });
+    const result = await testNewsAnalysisModelConnection(next);
+    const tested = ensureNewsAnalysisModelSettings({ ...next, lastTestAt: result.checkedAt });
+    setNewsAnalysisModelSettings(tested);
+    saveLocal("newsAnalysisModelSettings", tested);
+    setNewsAnalysisModelStatus(`${result.message}：${result.details}`);
+  };
+
   const patchTradeConnection = (patch: Partial<TradeConnectionSettings>) => {
     setTradeConnection((current) => ensureTradeConnectionSettings({ ...current, ...patch, bound: false }));
     setTradeConnectionStatus("交易接口配置已修改，请重新绑定");
@@ -1039,13 +1926,17 @@ function App() {
             <SlidersHorizontal size={16} />
             策略
           </button>
+          <button className={topSection === "trade" ? "active" : ""} onClick={() => setTopSection("trade")}>
+            <LineChart size={16} />
+            交易
+          </button>
           <button className={topSection === "sentiment" ? "active" : ""} onClick={() => setTopSection("sentiment")}>
             <Activity size={16} />
             舆情
           </button>
-          <button className={topSection === "trade" ? "active" : ""} onClick={() => setTopSection("trade")}>
-            <LineChart size={16} />
-            交易
+          <button className={topSection === "valuation" ? "active" : ""} onClick={() => setTopSection("valuation")}>
+            <BarChart3 size={16} />
+            价值核算
           </button>
           <button className={`nav-settings-entry ${topSection === "settings" ? "active" : ""}`} onClick={() => setTopSection("settings")}>
             <Settings size={16} />
@@ -1053,7 +1944,7 @@ function App() {
           </button>
         </header>
 
-        <div className={`workspace-layout ${managerCollapsed ? "manager-collapsed" : ""} ${topSection === "settings" || topSection === "sentiment" ? "settings-mode" : ""}`}>
+        <div className={`workspace-layout ${managerCollapsed ? "manager-collapsed" : ""} ${topSection === "settings" || topSection === "sentiment" || topSection === "valuation" ? "settings-mode" : ""}`}>
           {topSection === "strategy" || topSection === "trade" ? (
             <StrategyManagerSidebar
               strategy={strategy}
@@ -1139,11 +2030,21 @@ function App() {
                   strategy={strategy}
                   runCurrentTask={runCurrentTask}
                   openCompare={() => setModal("compare")}
+                  onOpenStockInfo={openStockInfo}
                 />
               </main>
             ) : topSection === "sentiment" ? (
               <main>
-                <SentimentWorkspace stocks={stocks} />
+                <SentimentWorkspace stocks={stocks} newsSourceSettings={newsSourceSettings} />
+              </main>
+            ) : topSection === "valuation" ? (
+              <main>
+                <ValuationWorkspace
+                  stocks={stocks}
+                  realDataStatus={valuationRealDataStatus}
+                  isRealDataReady={valuationDataSource === "tencentQuote" && stocks.some((stock) => stock.metrics.realQuoteSource === 1)}
+                  onSyncRealData={syncValuationRealData}
+                />
               </main>
             ) : topSection === "trade" ? (
               <main>
@@ -1157,6 +2058,7 @@ function App() {
                   bindTradingInterface={bindTradingInterface}
                   exportTradePlan={exportTradePlan}
                   submitPaperTradePlan={submitPaperTradePlan}
+                  onOpenStockInfo={openStockInfo}
                 />
               </main>
             ) : (
@@ -1168,6 +2070,8 @@ function App() {
                   stockCount={stocks.length}
                   newsSettings={newsSourceSettings}
                   newsStatus={newsSourceStatus}
+                  newsAnalysisSettings={newsAnalysisModelSettings}
+                  newsAnalysisStatus={newsAnalysisModelStatus}
                   patchSettings={patchInfoSourceSettings}
                   toggleModule={toggleSourceModule}
                   patchNewsSource={patchNewsSource}
@@ -1176,6 +2080,10 @@ function App() {
                   onRemoveNewsSource={removeNewsSource}
                   onSaveNewsSources={saveNewsSourceSettings}
                   onTestNewsSource={runNewsSourceConnectionTest}
+                  patchNewsAnalysis={patchNewsAnalysisModelSettings}
+                  toggleNewsAnalysisTask={toggleNewsAnalysisTask}
+                  onSaveNewsAnalysis={saveNewsAnalysisModelSettings}
+                  onTestNewsAnalysis={runNewsAnalysisModelConnectionTest}
                   onSave={saveInfoSourceSettings}
                   onTest={runInfoSourceConnectionTest}
                   onSyncOpenData={syncOpenSourceData}
@@ -1316,6 +2224,8 @@ function App() {
           <ComparePanel result={result} strategy={strategy} />
         </Modal>
       ) : null}
+
+      {stockInfoTarget ? <StockInfoModal target={stockInfoTarget} onClose={() => setStockInfoTarget(null)} /> : null}
     </>
   );
 }
@@ -1507,10 +2417,10 @@ function ScreenStep({
           </div>
           <div className="tabs">
             <button className={conditionTab === "filter" ? "active" : ""} onClick={() => setConditionTab("filter")}>
-              筛选条件 <em>{strategy.filters.length || ""}</em>
+              筛选条件 {strategy.filters.length > 0 ? <em>{strategy.filters.length}</em> : null}
             </button>
             <button className={conditionTab === "rank" ? "active" : ""} onClick={() => setConditionTab("rank")}>
-              排名条件 <em>{strategy.ranks.length || ""}</em>
+              排名条件 {strategy.ranks.length > 0 ? <em>{strategy.ranks.length}</em> : null}
             </button>
           </div>
           {conditionTab === "filter" ? (
@@ -1823,20 +2733,181 @@ function HedgeStep({ strategy, patchHedge }: { strategy: StrategyConfig; patchHe
   );
 }
 
-function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
-  const [filters, setFilters] = useState<SentimentFilters>(defaultSentimentFilters);
-  const industryOptions = useMemo(
-    () => ["全部", ...Array.from(new Set(sampleSentimentEvents.flatMap((event) => event.industries))).sort()],
-    []
+function RefreshControlBar({
+  title,
+  status,
+  lastRefreshAt,
+  intervalMinutes,
+  onIntervalChange,
+  onRefresh
+}: {
+  title: string;
+  status: string;
+  lastRefreshAt: string;
+  intervalMinutes: number;
+  onIntervalChange: (value: number) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <div className="refresh-control-bar">
+      <div className="refresh-control-status">
+        <span>{title}</span>
+        <strong>最后刷新 {formatDateTime(lastRefreshAt)}</strong>
+        <em>{status}</em>
+      </div>
+      <label>
+        <span>刷新频率</span>
+        <select value={intervalMinutes} onChange={(event) => onIntervalChange(Number(event.target.value))}>
+          {refreshIntervalOptions.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button className="btn primary" onClick={onRefresh}>
+        <RefreshCcw size={14} />
+        手动刷新
+      </button>
+    </div>
   );
-  const events = useMemo(() => filterSentimentEvents(sampleSentimentEvents, filters), [filters]);
-  const recommendations = useMemo(() => buildSentimentRecommendations(events, stocks), [events, stocks]);
-  const report = useMemo(() => buildSentimentInsightReport(events, recommendations), [events, recommendations]);
+}
+
+function NewsFetchModeBar({
+  mode,
+  onModeChange
+}: {
+  mode: NewsFetchMode;
+  onModeChange: (mode: NewsFetchMode) => void;
+}) {
+  const activeMode = newsFetchModeOptions.find((item) => item.value === mode) ?? newsFetchModeOptions[0];
+  return (
+    <div className="news-fetch-mode-bar">
+      <label>
+        <span>拉取模式</span>
+        <select value={mode} onChange={(event) => onModeChange(event.target.value as NewsFetchMode)}>
+          {newsFetchModeOptions.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p>{activeMode.description}</p>
+    </div>
+  );
+}
+
+function NewsFetchStatsBar({
+  stats,
+  effectiveEventCount,
+  linkedStockCount
+}: {
+  stats: NewsFetchStats;
+  effectiveEventCount: number;
+  linkedStockCount: number;
+}) {
+  const items = [
+    { label: "扫描股票数", value: stats.scannedStocks },
+    { label: "请求次数", value: stats.requestCount },
+    { label: "返回新闻数", value: stats.returnedRows },
+    { label: "有效事件数", value: effectiveEventCount },
+    { label: "关联股票数", value: linkedStockCount }
+  ];
+  return (
+    <div className="news-fetch-stats-bar">
+      {items.map((item) => (
+        <div key={item.label}>
+          <span>{item.label}</span>
+          <strong>{item.value.toLocaleString()}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SentimentWorkspace({ stocks, newsSourceSettings }: { stocks: Stock[]; newsSourceSettings: NewsSourceSettings }) {
+  const [sentimentTab, setSentimentTab] = useState<"overview" | "news">("overview");
+  const [filters, setFilters] = useState<SentimentFilters>(defaultSentimentFilters);
+  const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
+  const [rawSentimentEvents, setRawSentimentEvents] = useState<SentimentEvent[]>([]);
+  const [sentimentLastRefreshAt, setSentimentLastRefreshAt] = useState(() => new Date().toISOString());
+  const [sentimentRefreshStatus, setSentimentRefreshStatus] = useState("等待接入真实新闻源，当前不使用本地舆情样本");
+  const [sentimentRefreshInterval, setSentimentRefreshInterval] = useState(() => loadManualFirstRefreshInterval("sentimentRefreshInterval"));
+  const [sentimentFetchMode, setSentimentFetchMode] = useState<NewsFetchMode>(() => loadLocal("sentimentNewsFetchMode", "fast" as NewsFetchMode));
+  const [sentimentFetchStats, setSentimentFetchStats] = useState<NewsFetchStats>(defaultNewsFetchStats);
+  const [sentimentFetchEventCount, setSentimentFetchEventCount] = useState(0);
+  const [sentimentFetchLinkedStockCount, setSentimentFetchLinkedStockCount] = useState(0);
+  const industryOptions = useMemo(
+    () => ["全部", ...Array.from(new Set(rawSentimentEvents.flatMap((event) => event.industries))).sort()],
+    [rawSentimentEvents]
+  );
+  const events = useMemo(() => filterSentimentEvents(rawSentimentEvents, filters), [rawSentimentEvents, filters]);
+  const linkedStocks = useMemo(() => buildSentimentLinkedStocks(events, stocks), [events, stocks]);
+  const report = useMemo(() => buildSentimentInsightReport(events, linkedStocks), [events, linkedStocks]);
   const topEvent = events[0];
   const positiveCount = events.filter((event) => event.direction === "利好").length;
   const negativeCount = events.filter((event) => event.direction === "利空").length;
   const majorCount = events.filter((event) => event.severity === "特别重大" || event.severity === "重大").length;
   const focusedIndustry = filters.industry === "全部" ? report.topIndustries[0]?.industry ?? "--" : filters.industry;
+  const openStockInfo = (stock: StockReference) => setStockInfoTarget(resolveStockInfoTarget(stock, stocks));
+
+  const refreshSentimentData = async (mode: "手动" | "自动" = "手动") => {
+    const fetchModeLabel = newsFetchModeOptions.find((item) => item.value === sentimentFetchMode)?.label ?? "快速";
+    setSentimentRefreshStatus(`${mode}刷新中：正在按${fetchModeLabel}模式从真实新闻源拉取新闻并重算舆情事件...`);
+    const result = await fetchNewsArticlesFromSources(enabledNewsSources(newsSourceSettings), stocks, fetch, { mode: sentimentFetchMode });
+    setSentimentLastRefreshAt(result.checkedAt);
+    setSentimentFetchStats(result.stats);
+    if (!result.ok) {
+      if (!rawSentimentEvents.length) setRawSentimentEvents([]);
+      setSentimentFetchEventCount(0);
+      setSentimentFetchLinkedStockCount(0);
+      setSentimentRefreshStatus(`${mode}${result.message}：${result.details}`);
+      return;
+    }
+    const nextEvents = buildSentimentEventsFromNewsArticles(result.articles, stocks);
+    const nextLinkedStocks = buildSentimentLinkedStocks(nextEvents, stocks);
+    setRawSentimentEvents(nextEvents);
+    setSentimentFetchEventCount(nextEvents.length);
+    setSentimentFetchLinkedStockCount(nextLinkedStocks.length);
+    setSentimentRefreshStatus(
+      nextEvents.length
+        ? `${mode}${result.message}：扫描 ${result.stats.scannedStocks} 只股票，请求 ${result.stats.requestCount} 次，返回 ${result.stats.returnedRows} 条新闻，生成 ${nextEvents.length} 个舆情事件，关联 ${nextLinkedStocks.length} 只股票`
+        : `${mode}刷新失败：真实新闻源返回 ${result.articles.length} 条数据，但未形成可关联股票的舆情事件`
+    );
+  };
+
+  const updateSentimentRefreshInterval = (value: number) => {
+    setSentimentRefreshInterval(value);
+    saveLocal("sentimentRefreshInterval", value);
+    setSentimentRefreshStatus(value > 0 ? `已设置每 ${value} 分钟自动刷新` : "已关闭自动刷新");
+  };
+
+  const updateSentimentFetchMode = (value: NewsFetchMode) => {
+    setSentimentFetchMode(value);
+    saveLocal("sentimentNewsFetchMode", value);
+    const option = newsFetchModeOptions.find((item) => item.value === value);
+    setSentimentRefreshStatus(`已切换为${option?.label ?? "快速"}模式，手动刷新后生效`);
+  };
+
+  useEffect(
+    function scheduleSentimentAutoRefresh() {
+      if (!sentimentRefreshInterval) return;
+      const timer = window.setInterval(() => {
+        void refreshSentimentData("自动");
+      }, sentimentRefreshInterval * 60 * 1000);
+      return () => window.clearInterval(timer);
+    },
+    [sentimentRefreshInterval, newsSourceSettings, stocks, rawSentimentEvents.length, sentimentFetchMode]
+  );
+
+  useEffect(
+    function loadInitialRealSentimentData() {
+      if (!sentimentRefreshInterval) return;
+      void refreshSentimentData("自动");
+    },
+    [sentimentRefreshInterval, newsSourceSettings, stocks]
+  );
 
   const exportReport = () => {
     const lines = [
@@ -1848,8 +2919,8 @@ function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
       "## 高价值事件",
       ...events.map((event) => `- ${event.title}（${event.category}/${event.direction}/${event.severity}，${event.industries.join("、")}，价值分 ${scoreSentimentEvent(event)}）：${event.summary}`),
       "",
-      "## 推荐股票",
-      ...recommendations.slice(0, 8).map((item) => `- ${item.stock.name} ${item.stock.code}：${item.score}分，${item.reason}`),
+      "## 关联股票",
+      ...linkedStocks.slice(0, 20).map((item) => `- ${item.stock.name} ${displayStockCode(item.stock)}：${item.relationLevel}，关联度 ${item.relationScore}，${item.reason}`),
       "",
       "## 验证点",
       ...report.validationPoints.map((item) => `- ${item}`)
@@ -1862,18 +2933,47 @@ function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
       <div className="sentiment-title-row">
         <div>
           <h2>舆情选股</h2>
-          <p>独立事件驱动选股板块，用于筛选价值新闻、分类事件、推荐关联股票并输出洞察报告。</p>
+          <p>独立事件驱动板块，用于筛选价值新闻、分类事件、展示关联股票并输出洞察报告，不生成买卖推荐。</p>
+        </div>
+        <div className="sentiment-sub-tabs">
+          <button className={sentimentTab === "overview" ? "active" : ""} onClick={() => setSentimentTab("overview")}>
+            舆情概览
+          </button>
+          <button className={sentimentTab === "news" ? "active" : ""} onClick={() => setSentimentTab("news")}>
+            新闻页面
+          </button>
         </div>
         <div className="settings-actions">
-          <button className="btn" onClick={() => setFilters(defaultSentimentFilters)}>
-            重置筛选
-          </button>
-          <button className="btn primary" onClick={exportReport}>
-            <Download size={15} />
-            导出报告
-          </button>
+          {sentimentTab === "overview" ? (
+            <>
+              <button className="btn" onClick={() => setFilters(defaultSentimentFilters)}>
+                重置筛选
+              </button>
+              <button className="btn primary" onClick={exportReport}>
+                <Download size={15} />
+                导出报告
+              </button>
+            </>
+          ) : null}
         </div>
       </div>
+
+      {sentimentTab === "overview" ? (
+        <>
+      <RefreshControlBar
+        title="舆情选股刷新"
+        status={sentimentRefreshStatus}
+        lastRefreshAt={sentimentLastRefreshAt}
+        intervalMinutes={sentimentRefreshInterval}
+        onIntervalChange={updateSentimentRefreshInterval}
+        onRefresh={() => refreshSentimentData("手动")}
+      />
+      <NewsFetchModeBar mode={sentimentFetchMode} onModeChange={updateSentimentFetchMode} />
+      <NewsFetchStatsBar
+        stats={sentimentFetchStats}
+        effectiveEventCount={sentimentFetchEventCount}
+        linkedStockCount={sentimentFetchLinkedStockCount}
+      />
 
       <div className="sentiment-radar">
         <div>
@@ -1881,8 +2981,8 @@ function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
           <strong>{events.length}</strong>
         </div>
         <div>
-          <span>推荐股票</span>
-          <strong>{recommendations.length}</strong>
+          <span>关联股票</span>
+          <strong>{linkedStocks.length}</strong>
         </div>
         <div>
           <span>利好 / 利空</span>
@@ -1952,54 +3052,72 @@ function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
             <span>按价值分排序</span>
           </div>
           <div className="sentiment-event-list">
-            {events.map((event) => (
-              <article className="sentiment-event" key={event.id}>
-                <div className="sentiment-event-head">
-                  <strong>{event.title}</strong>
-                  <span className={event.direction === "利空" ? "sentiment-badge negative" : "sentiment-badge"}>{event.direction}</span>
-                </div>
-                <p>{event.summary}</p>
-                <div className="sentiment-meta">
-                  <span>{event.category}</span>
-                  <span>{event.industries.join("、")}</span>
-                  <span>{event.horizon}</span>
-                  <span>{event.severity}</span>
-                  <span>价值分 {scoreSentimentEvent(event)}</span>
-                  <span>{event.occurredAt}</span>
-                </div>
-              </article>
-            ))}
+            {events.length ? (
+              events.map((event) => (
+                <article className="sentiment-event" key={event.id}>
+                  <div className="sentiment-event-head">
+                    <strong>{event.title}</strong>
+                    <span className={event.direction === "利空" ? "sentiment-badge negative" : "sentiment-badge"}>{event.direction}</span>
+                  </div>
+                  <p>{event.summary}</p>
+                  <div className="sentiment-meta">
+                    <span>{event.category}</span>
+                    <span>{event.industries.join("、") || "未识别行业"}</span>
+                    <span>{event.horizon}</span>
+                    <span>{event.severity}</span>
+                    <span>价值分 {scoreSentimentEvent(event)}</span>
+                    <span>{event.occurredAt}</span>
+                    <span>{event.source}</span>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <div className="news-empty">
+                <p>暂无真实舆情事件。请确认设置中已启用真实新闻源，然后手动刷新；接口失败时不会展示本地样本。</p>
+              </div>
+            )}
           </div>
         </section>
 
         <section className="sentiment-panel">
           <div className="sentiment-panel-title">
-            <h3>推荐关联股票</h3>
-            <span>事件 + 基本面 + 动量</span>
+            <h3>关联股票</h3>
+            <span>仅展示真实新闻关联关系</span>
           </div>
           <table className="data-table sentiment-table">
             <thead>
               <tr>
                 <th>股票</th>
                 <th>方向</th>
-                <th>综合分</th>
-                <th>风险</th>
-                <th>推荐理由</th>
+                <th>关联度</th>
+                <th>关联事件</th>
+                <th>关联依据</th>
               </tr>
             </thead>
             <tbody>
-              {recommendations.slice(0, 8).map((item) => (
-                <tr key={item.stock.code}>
-                  <td>
-                    <strong>{item.stock.name}</strong>
-                    <span>{item.stock.code}</span>
-                  </td>
-                  <td>{item.direction}</td>
-                  <td>{item.score}</td>
-                  <td>{item.risk}</td>
-                  <td>{item.reason}</td>
+              {linkedStocks.length ? (
+                linkedStocks.slice(0, 12).map((item) => (
+                  <tr key={item.stock.code}>
+                    <td>
+                      <button className="stock-name-link" type="button" onClick={() => openStockInfo(item.stock)}>
+                        <strong>{item.stock.name}</strong>
+                        <span>{displayStockCode(item.stock)}</span>
+                      </button>
+                    </td>
+                    <td>{item.direction}</td>
+                    <td className="sentiment-relation-score">
+                      <strong>{item.relationScore}</strong>
+                      <span>{item.relationLevel}</span>
+                    </td>
+                    <td className="sentiment-reason-cell">{item.reason}</td>
+                    <td className="sentiment-reason-cell">{item.evidence.join("、") || "接口代码关联"}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5}>暂无关联股票。只有真实新闻能关联到股票并达到最低价值分时才会显示结果。</td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </section>
@@ -2008,7 +3126,7 @@ function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
       <section className="sentiment-report">
         <div className="sentiment-panel-title">
           <h3>深度洞察报告</h3>
-          <span>{report.eventCount} 个事件，{report.longIdeas.length} 个多头线索</span>
+          <span>{report.eventCount} 个事件，{linkedStocks.length} 个关联股票</span>
         </div>
         <div className="report-grid">
           <div>
@@ -2033,6 +3151,799 @@ function SentimentWorkspace({ stocks }: { stocks: Stock[] }) {
           </div>
         </div>
       </section>
+        </>
+      ) : (
+        <NewsPage stocks={stocks} newsSourceSettings={newsSourceSettings} onOpenStockInfo={openStockInfo} />
+      )}
+      {stockInfoTarget ? <StockInfoModal target={stockInfoTarget} onClose={() => setStockInfoTarget(null)} /> : null}
+    </section>
+  );
+}
+
+
+function NewsPage({
+  stocks,
+  newsSourceSettings,
+  onOpenStockInfo
+}: {
+  stocks: Stock[];
+  newsSourceSettings: NewsSourceSettings;
+  onOpenStockInfo: (stock: StockReference) => void;
+}) {
+  const [newsFilters, setNewsFilters] = useState<NewsFilters>(defaultNewsFilters);
+  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([]);
+  const [selectedArticle, setSelectedArticle] = useState<NewsArticle | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [newsRefreshKey, setNewsRefreshKey] = useState(0);
+  const [newsLastRefreshAt, setNewsLastRefreshAt] = useState(() => new Date().toISOString());
+  const [newsRefreshStatus, setNewsRefreshStatus] = useState("等待接入真实新闻源，当前不使用本地新闻样本");
+  const [newsRefreshInterval, setNewsRefreshInterval] = useState(() => loadManualFirstRefreshInterval("newsPageRefreshInterval"));
+  const [newsFetchMode, setNewsFetchMode] = useState<NewsFetchMode>(() => loadLocal("newsPageFetchMode", "fast" as NewsFetchMode));
+  const [newsFetchStats, setNewsFetchStats] = useState<NewsFetchStats>(defaultNewsFetchStats);
+  const [newsLinkedStockCount, setNewsLinkedStockCount] = useState(0);
+  const pageSize = 10;
+
+  const articles = useMemo(() => filterNewsArticles(newsArticles, newsFilters), [newsArticles, newsFilters, newsRefreshKey]);
+  const sourceList = useMemo(() => getNewsSourceList(newsArticles), [newsArticles, newsRefreshKey]);
+  const stats = useMemo(() => getNewsStats(articles), [articles]);
+  const knownStockCodes = useMemo(() => new Set(stocks.map((stock) => stock.code)), [stocks]);
+
+  const totalPages = Math.max(1, Math.ceil(articles.length / pageSize));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const pageArticles = articles.slice((safeCurrentPage - 1) * pageSize, safeCurrentPage * pageSize);
+
+  const patchFilter = (key: keyof NewsFilters, value: string) => {
+    setNewsFilters((f) => ({ ...f, [key]: value }));
+    setCurrentPage(1);
+  };
+
+  const refreshNewsData = async (mode: "手动" | "自动" = "手动") => {
+    const fetchModeLabel = newsFetchModeOptions.find((item) => item.value === newsFetchMode)?.label ?? "快速";
+    setNewsRefreshStatus(`${mode}刷新中：正在按${fetchModeLabel}模式从真实新闻源拉取数据...`);
+    const now = new Date().toISOString();
+    const result = await fetchNewsArticlesFromSources(enabledNewsSources(newsSourceSettings), stocks, fetch, { mode: newsFetchMode });
+    setNewsLastRefreshAt(result.checkedAt || now);
+    setNewsFetchStats(result.stats);
+    if (result.ok) {
+      const linkedCodeSet = new Set(result.articles.flatMap((article) => article.linkedCodes));
+      setNewsArticles(result.articles);
+      setNewsLinkedStockCount(linkedCodeSet.size);
+      setSelectedArticle(null);
+      setCurrentPage(1);
+      setNewsRefreshKey((value) => value + 1);
+      setNewsRefreshStatus(
+        `${mode}${result.message}：扫描 ${result.stats.scannedStocks} 只股票，请求 ${result.stats.requestCount} 次，返回 ${result.stats.returnedRows} 条新闻，有效 ${result.stats.validArticles} 条，关联 ${linkedCodeSet.size} 只股票`
+      );
+      return;
+    }
+    setNewsLinkedStockCount(0);
+    setNewsRefreshStatus(`${mode}${result.message}：${result.details}`);
+  };
+
+  const updateNewsRefreshInterval = (value: number) => {
+    setNewsRefreshInterval(value);
+    saveLocal("newsPageRefreshInterval", value);
+    setNewsRefreshStatus(value > 0 ? `已设置每 ${value} 分钟自动刷新` : "已关闭自动刷新");
+  };
+
+  const updateNewsFetchMode = (value: NewsFetchMode) => {
+    setNewsFetchMode(value);
+    saveLocal("newsPageFetchMode", value);
+    const option = newsFetchModeOptions.find((item) => item.value === value);
+    setNewsRefreshStatus(`已切换为${option?.label ?? "快速"}模式，手动刷新后生效`);
+  };
+
+  useEffect(
+    function scheduleNewsAutoRefresh() {
+      if (!newsRefreshInterval) return;
+      const timer = window.setInterval(() => {
+        void refreshNewsData("自动");
+      }, newsRefreshInterval * 60 * 1000);
+      return () => window.clearInterval(timer);
+    },
+    [newsRefreshInterval, newsFetchMode, newsSourceSettings, stocks]
+  );
+
+  useEffect(
+    function loadInitialRealNewsData() {
+      if (!newsRefreshInterval) return;
+      void refreshNewsData("自动");
+    },
+    [newsRefreshInterval, newsSourceSettings, stocks]
+  );
+
+  if (selectedArticle) {
+    return (
+      <section className="news-detail-view">
+        <div className="news-detail-header">
+          <button className="btn" onClick={() => setSelectedArticle(null)}>
+            &larr; 返回新闻列表
+          </button>
+          <div className="news-detail-meta-top">
+            <span className={`news-badge sentiment-${selectedArticle.sentiment === "利好" ? "positive" : selectedArticle.sentiment === "利空" ? "negative" : "neutral"}`}>
+              {selectedArticle.sentiment}
+            </span>
+            <span className="news-badge importance">{selectedArticle.importance}</span>
+            <span className="news-badge category">{selectedArticle.category}</span>
+          </div>
+        </div>
+        <article className="news-detail-body">
+          <h2>{selectedArticle.title}</h2>
+          <div className="news-detail-info">
+            <span>{selectedArticle.source}</span>
+            <span>{selectedArticle.author}</span>
+            <span>{selectedArticle.publishedAt}</span>
+            <span>{selectedArticle.readTime} 分钟阅读</span>
+            <span>{selectedArticle.viewCount.toLocaleString()} 阅读</span>
+          </div>
+          <div className="news-detail-tags">
+            {selectedArticle.tags.map((tag) => (
+              <span className="news-tag" key={tag}>{tag}</span>
+            ))}
+          </div>
+          <div className="news-detail-content">
+            {selectedArticle.content.split("\n\n").map((paragraph, i) => (
+              <p key={i}>{paragraph}</p>
+            ))}
+          </div>
+          {selectedArticle.linkedStocks.length > 0 ? (
+          <div className="news-detail-stocks">
+              <h4>关联股票</h4>
+              <div className="news-stock-chips">
+                {selectedArticle.linkedStocks.map((stock) => (
+                  <button className={`news-stock-chip ${knownStockCodes.has(stock.code) ? "" : "missing"}`} type="button" key={stock.code} onClick={() => onOpenStockInfo(stock)}>
+                    <strong>{stock.name}</strong>
+                    <em>{displayStockCode(stock)}</em>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="news-detail-footer">
+            <span>来源：{selectedArticle.source}</span>
+            <span>采集于 {selectedArticle.fetchedAt}</span>
+          </div>
+        </article>
+      </section>
+    );
+  }
+
+  return (
+    <section className="news-page">
+      <RefreshControlBar
+        title="新闻页面刷新"
+        status={newsRefreshStatus}
+        lastRefreshAt={newsLastRefreshAt}
+        intervalMinutes={newsRefreshInterval}
+        onIntervalChange={updateNewsRefreshInterval}
+        onRefresh={() => refreshNewsData("手动")}
+      />
+      <NewsFetchModeBar mode={newsFetchMode} onModeChange={updateNewsFetchMode} />
+      <NewsFetchStatsBar
+        stats={newsFetchStats}
+        effectiveEventCount={newsFetchStats.validArticles}
+        linkedStockCount={newsLinkedStockCount}
+      />
+
+      <div className="news-stats-bar">
+        <div>
+          <span>新闻总数</span>
+          <strong>{stats.total}</strong>
+        </div>
+        <div>
+          <span>未读</span>
+          <strong>{stats.unread}</strong>
+        </div>
+        <div>
+          <span>收藏</span>
+          <strong>{stats.starred}</strong>
+        </div>
+        <div>
+          <span>利好 / 利空</span>
+          <strong>{stats.positive} / {stats.negative}</strong>
+        </div>
+        <div>
+          <span>头条</span>
+          <strong>{stats.headlines}</strong>
+        </div>
+        <div>
+          <span>热门分类</span>
+          <strong>{stats.topCategories.map(([cat, count]) => `${cat}(${count})`).join(" ")}</strong>
+        </div>
+      </div>
+
+      <div className="news-filters">
+        <label>
+          <span>分类</span>
+          <select value={newsFilters.category} onChange={(e) => patchFilter("category", e.target.value)}>
+            {newsCategoryOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>情绪</span>
+          <select value={newsFilters.sentiment} onChange={(e) => patchFilter("sentiment", e.target.value)}>
+            {newsSentimentOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>重要性</span>
+          <select value={newsFilters.importance} onChange={(e) => patchFilter("importance", e.target.value)}>
+            {newsImportanceOptions.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>来源</span>
+          <select value={newsFilters.source} onChange={(e) => patchFilter("source", e.target.value)}>
+            {sourceList.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>时间</span>
+          <select value={newsFilters.dateRange} onChange={(e) => patchFilter("dateRange", e.target.value)}>
+            {newsDateRangeOptions.map((item) => (
+              <option key={item.value} value={item.value}>{item.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="wide">
+          <span>搜索</span>
+          <input
+            value={newsFilters.query}
+            onChange={(e) => patchFilter("query", e.target.value)}
+            placeholder="搜索标题、内容、股票代码、行业、标签..."
+          />
+        </label>
+        <button className="btn" onClick={() => { setNewsFilters(defaultNewsFilters); setCurrentPage(1); }}>
+          重置筛选
+        </button>
+      </div>
+
+      <div className="news-article-list">
+        {pageArticles.length === 0 ? (
+          <div className="news-empty">
+            <p>暂无匹配的新闻文章，请调整筛选条件。</p>
+          </div>
+        ) : (
+          pageArticles.map((article) => (
+            <article
+              className={`news-article-card ${article.importance === "头条" ? "headline" : ""} ${article.status === "unread" ? "unread" : ""}`}
+              key={article.id}
+              onClick={() => setSelectedArticle(article)}
+            >
+              <div className="news-article-main">
+                <div className="news-article-head">
+                  <h3>{article.title}</h3>
+                  <div className="news-article-badges">
+                    {article.importance === "头条" ? <span className="news-badge headline-badge">头条</span> : null}
+                    <span className={`news-badge sentiment-${article.sentiment === "利好" ? "positive" : article.sentiment === "利空" ? "negative" : "neutral"}`}>
+                      {article.sentiment}
+                    </span>
+                    <span className="news-badge category">{article.category}</span>
+                    {article.status === "starred" ? <span className="news-badge starred">已收藏</span> : null}
+                  </div>
+                </div>
+                <p className="news-article-summary">{article.summary}</p>
+                <div className="news-article-footer">
+                  <span className="news-source-icon">{article.sourceIcon}</span>
+                  <span>{article.source}</span>
+                  <span>{formatNewsDate(article.publishedAt)}</span>
+                  <span>{article.readTime} 分钟</span>
+                  {article.linkedStocks.length > 0 ? (
+                    <span className="news-linked-stocks">
+                      {article.linkedStocks.map((stock) => (
+                        <button
+                          className={`stock-inline-link ${knownStockCodes.has(stock.code) ? "" : "missing"}`}
+                          type="button"
+                          key={stock.code}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenStockInfo(stock);
+                          }}
+                        >
+                          {stock.name}
+                        </button>
+                      ))}
+                    </span>
+                  ) : null}
+                </div>
+                {article.tags.length > 0 ? (
+                  <div className="news-article-tags">
+                    {article.tags.slice(0, 4).map((tag) => (
+                      <span className="news-tag" key={tag}>{tag}</span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </article>
+          ))
+        )}
+      </div>
+
+      {totalPages > 1 ? (
+        <div className="news-pagination">
+          <button
+            className="btn"
+            disabled={safeCurrentPage <= 1}
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+          >
+            上一页
+          </button>
+          <span className="news-page-info">第 {safeCurrentPage} / {totalPages} 页，共 {articles.length} 条</span>
+          <button
+            className="btn"
+            disabled={safeCurrentPage >= totalPages}
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+          >
+            下一页
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ValuationWorkspace({
+  stocks,
+  realDataStatus,
+  isRealDataReady,
+  onSyncRealData
+}: {
+  stocks: Stock[];
+  realDataStatus: string;
+  isRealDataReady: boolean;
+  onSyncRealData: () => void;
+}) {
+  const [filters, setFilters] = useState<ValuationFilters>(defaultValuationFilters);
+  const [valuationQuery, setValuationQuery] = useState("");
+  const [valuationRecalcKey, setValuationRecalcKey] = useState(0);
+  const [valuationCalculatedAt, setValuationCalculatedAt] = useState(() => new Date().toISOString());
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const [valuationDetailCollapsed, setValuationDetailCollapsed] = useState(false);
+  const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
+  const [valuationSort, setValuationSort] = useState<{ key: ValuationSortKey; direction: SortDirection }>({
+    key: "safetyMargin",
+    direction: "desc"
+  });
+  const industryOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.industry1))).sort()], [stocks]);
+  const ownershipOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.property))).sort()], [stocks]);
+  const missingRealValuationCount = useMemo(
+    () => (isRealDataReady ? stocks.filter((stock) => !hasRequiredRealValuationData(stock)).length : stocks.length),
+    [isRealDataReady, stocks]
+  );
+  const valuationInputReadyCount = isRealDataReady ? Math.max(stocks.length - missingRealValuationCount, 0) : 0;
+  const rows = useMemo(() => (isRealDataReady ? buildValuationRows(stocks, filters) : []), [isRealDataReady, stocks, filters, valuationRecalcKey]);
+  const normalizedValuationQuery = valuationQuery.trim().toLowerCase();
+  const valuationCodeQuery = useMemo(() => normalizeStockCodeInput(valuationQuery), [valuationQuery]);
+  const searchedRows = useMemo(() => {
+    if (!normalizedValuationQuery) return rows;
+    if (valuationCodeQuery.isCodeLike) {
+      const exactRows = rows.filter((row) => stockMatchesCodeQuery(row.stock, valuationQuery));
+      if (exactRows.length) return exactRows;
+      const exactStock = resolveStockByCode(stocks, valuationQuery);
+      return exactStock && isRealDataReady && hasRequiredRealValuationData(exactStock) ? [calculateValuation(exactStock, filters.style)] : [];
+    }
+    return rows.filter((row) => {
+      const stock = row.stock;
+      const searchableText = [
+        stock.code,
+        displayStockCode(stock),
+        stock.name,
+        stock.exchange,
+        stock.board,
+        stock.industry1,
+        stock.industry2,
+        stock.region,
+        stock.property,
+        row.state,
+        row.model,
+        row.action,
+        row.positionHint
+      ].join(" ").toLowerCase();
+      return searchableText.includes(normalizedValuationQuery);
+    });
+  }, [rows, normalizedValuationQuery, valuationCodeQuery.isCodeLike, valuationQuery, stocks, filters.style, isRealDataReady]);
+  const sortedRows = useMemo(() => {
+    const directionMultiplier = valuationSort.direction === "asc" ? 1 : -1;
+    return [...searchedRows].sort((a, b) => {
+      const valueDelta = valuationSortValue(a, valuationSort.key) - valuationSortValue(b, valuationSort.key);
+      if (valueDelta !== 0) return valueDelta * directionMultiplier;
+      return b.safetyMargin - a.safetyMargin || a.stock.code.localeCompare(b.stock.code);
+    });
+  }, [searchedRows, valuationSort]);
+  const summary = useMemo(() => summarizeValuationRows(searchedRows), [searchedRows]);
+  const selected = sortedRows.find((row) => row.stock.code === selectedCode) ?? sortedRows[0] ?? null;
+  const unmatchedCodeQuery = Boolean(normalizedValuationQuery && valuationCodeQuery.isCodeLike && !searchedRows.length);
+  const firstMissingRealFields = useMemo(() => {
+    if (!isRealDataReady) return "";
+    const sample = stocks.find((stock) => !hasRequiredRealValuationData(stock));
+    return sample ? missingRealValuationFields(sample).slice(0, 8).join("、") : "";
+  }, [isRealDataReady, stocks]);
+  const valuationGateMessage = !isRealDataReady
+    ? "价值核算已关闭本地样本兜底。请先点击“接入全市场股票”，系统只使用真实行情；缺少真实财报字段时不会生成核算价值。"
+    : valuationInputReadyCount === 0
+      ? `已接入 ${stocks.length} 只真实行情，但腾讯行情接口不提供完整财报、现金流和资产负债拆分，当前无法按严苛口径核算。缺少字段示例：${firstMissingRealFields || "真实财报字段"}。`
+      : "";
+
+  const patchFilters = (patch: Partial<ValuationFilters>) => {
+    setFilters((current) => ({ ...current, ...patch }));
+    setSelectedCode(null);
+  };
+  const resetValuationControls = () => {
+    setFilters(defaultValuationFilters);
+    setValuationQuery("");
+    setSelectedCode(null);
+  };
+  const recalculateValuation = () => {
+    setValuationRecalcKey((current) => current + 1);
+    setValuationCalculatedAt(new Date().toISOString());
+    setSelectedCode(null);
+  };
+
+  const formatValue = (value: number, suffix = "") => `${round(value, 2)}${suffix}`;
+  const formatMarketCap = (value: number) => `${round(value, 2)}亿`;
+  const openStockInfo = (stock: StockReference) => setStockInfoTarget(resolveStockInfoTarget(stock, stocks));
+  const updateValuationQuery = (value: string) => {
+    setValuationQuery(value);
+    setSelectedCode(null);
+  };
+  const toggleValuationSort = (key: ValuationSortKey) => {
+    setValuationSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === "desc" ? "asc" : "desc"
+    }));
+    setSelectedCode(null);
+  };
+  const sortDirectionLabel = valuationSort.direction === "desc" ? "降序" : "升序";
+
+  return (
+    <section className="valuation-workspace">
+      <div className="valuation-title-row">
+        <div>
+          <h2>股票价值核算</h2>
+          <p>按最严苛口径核算：多模型低位锚定、现金流约束、治理扣减、财务风险扣减，不用成长溢价抬高结果。</p>
+        </div>
+      </div>
+
+      <div className="valuation-data-bar">
+        <div>
+          <span>
+            {realDataStatus} · 可核算 {valuationInputReadyCount}/{stocks.length} · 缺少真实财报 {missingRealValuationCount} · 最近核算 {formatDateTime(valuationCalculatedAt)}
+          </span>
+        </div>
+        <div className="valuation-data-actions">
+          <button className="btn" type="button" onClick={recalculateValuation} disabled={!isRealDataReady}>
+            <RefreshCcw size={15} />
+            重新核算
+          </button>
+          <button className="btn primary" type="button" onClick={onSyncRealData}>
+            <RefreshCcw size={15} />
+            接入全市场股票
+          </button>
+        </div>
+      </div>
+
+      <div className="valuation-filters">
+        <label className="valuation-search-label">
+          <span>检索</span>
+          <div className="valuation-search-box">
+            <Search size={14} />
+            <input
+              type="search"
+              value={valuationQuery}
+              onChange={(event) => updateValuationQuery(event.target.value)}
+              placeholder="股票名称 / 代码 / 行业 / 地区"
+            />
+            {valuationQuery ? (
+              <button className="valuation-search-clear" type="button" onClick={() => updateValuationQuery("")}>
+                清空
+              </button>
+            ) : null}
+          </div>
+          {unmatchedCodeQuery ? (
+            <em className="valuation-query-warning">
+              已按完整代码精确查询 {valuationCodeQuery.normalized}，当前股票池未收录。可能是已退市/历史代码，系统不会用相似代码匹配，避免错配到其他股票。
+            </em>
+          ) : null}
+        </label>
+        <label>
+          <span>板块</span>
+          <select value={filters.board} onChange={(event) => patchFilters({ board: event.target.value as ValuationFilters["board"] })}>
+            {valuationBoardOptions.map((board) => (
+              <option key={board} value={board}>{board}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>行业</span>
+          <select value={filters.industry} onChange={(event) => patchFilters({ industry: event.target.value })}>
+            {industryOptions.map((industry) => (
+              <option key={industry} value={industry}>{industry}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>企业状态</span>
+          <select value={filters.state} onChange={(event) => patchFilters({ state: event.target.value as ValuationFilters["state"] })}>
+            {enterpriseStateOptions.map((state) => (
+              <option key={state} value={state}>{state}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>企业属性</span>
+          <select value={filters.ownership} onChange={(event) => patchFilters({ ownership: event.target.value })}>
+            {ownershipOptions.map((ownership) => (
+              <option key={ownership} value={ownership}>{ownership}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>核算方式</span>
+          <select value={filters.style} onChange={(event) => patchFilters({ style: event.target.value as ValuationFilters["style"] })}>
+            {valuationStyleOptions.map((style) => (
+              <option key={style} value={style}>{style}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>最低安全边际</span>
+          <input type="number" value={filters.minSafetyMargin} onChange={(event) => patchFilters({ minSafetyMargin: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>最低治理分</span>
+          <input type="number" min={0} max={100} value={filters.minGovernanceScore} onChange={(event) => patchFilters({ minGovernanceScore: Number(event.target.value) })} />
+        </label>
+        <button className="btn" onClick={resetValuationControls}>重置</button>
+      </div>
+
+      <div className="valuation-summary">
+        <div>
+          <span>低估数量</span>
+          <strong>{summary.undervalued}</strong>
+        </div>
+        <div>
+          <span>高估数量</span>
+          <strong>{summary.overvalued}</strong>
+        </div>
+        <div>
+          <span>平均安全边际</span>
+          <strong>{formatValue(summary.avgSafetyMargin, "%")}</strong>
+        </div>
+        <div>
+          <span>平均治理分</span>
+          <strong>{summary.avgGovernance}</strong>
+        </div>
+        <div>
+          <span>平均质量分</span>
+          <strong>{summary.avgQuality}</strong>
+        </div>
+        <div>
+          <span>集中行业</span>
+          <strong>{summary.topIndustry}</strong>
+        </div>
+      </div>
+
+      {valuationGateMessage ? (
+        <div className="valuation-real-data-warning">
+          <strong>{isRealDataReady ? "真实财务数据不足，无法核算" : "未接入真实数据"}</strong>
+          <p>{valuationGateMessage}</p>
+        </div>
+      ) : null}
+
+      <div className={`valuation-layout ${valuationDetailCollapsed ? "detail-collapsed" : ""}`}>
+        <section className="valuation-panel valuation-table-panel">
+          <div className="valuation-panel-title">
+            <h3>价值核算排序</h3>
+            <span>
+              {normalizedValuationQuery ? `检索 ${searchedRows.length}/${rows.length}，` : `显示 ${sortedRows.length} 只，`}
+              按{valuationSortLabels[valuationSort.key]}{sortDirectionLabel}排列
+            </span>
+          </div>
+          <table className="data-table valuation-table">
+            <thead>
+              <tr>
+                <th>股票</th>
+                <th>行业</th>
+                {(["currentPrice", "fairValue", "marketCap", "fairMarketCap", "safetyMargin", "governanceScore", "action"] as ValuationSortKey[]).map((key) => (
+                  <th key={key}>
+                    <button className={`valuation-sort-btn ${valuationSort.key === key ? "active" : ""}`} type="button" onClick={() => toggleValuationSort(key)}>
+                      {valuationSortLabels[key]}
+                      <span>{valuationSort.key === key ? (valuationSort.direction === "desc" ? "↓" : "↑") : "↕"}</span>
+                    </button>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((row) => (
+                <tr key={row.stock.code} className={selected?.stock.code === row.stock.code ? "active" : ""} onClick={() => setSelectedCode(row.stock.code)}>
+                  <td>
+                    <button
+                      className="stock-name-link"
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openStockInfo(row.stock);
+                      }}
+                    >
+                      <strong>{row.stock.name}</strong>
+                      <span>{displayStockCode(row.stock)}</span>
+                    </button>
+                  </td>
+                  <td>{row.stock.industry1}</td>
+                  <td>{formatValue(row.currentPrice)}</td>
+                  <td>{formatValue(row.fairValue)}</td>
+                  <td>{formatMarketCap(row.marketCap)}</td>
+                  <td>{formatMarketCap(valuationFairMarketCap(row))}</td>
+                  <td className={row.safetyMargin >= 0 ? "positive" : "negative"}>{formatValue(row.safetyMargin, "%")}</td>
+                  <td>{row.governanceScore}</td>
+                  <td>{row.positionHint}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!searchedRows.length ? (
+            <EmptyState>
+              {valuationGateMessage
+                ? "当前不会使用本地样本或推导财务数据生成核算结果。"
+                : rows.length
+                  ? "当前检索条件下没有匹配股票，请调整关键词。"
+                  : "当前筛选条件下没有符合要求的股票，请降低安全边际或治理分限制。"}
+            </EmptyState>
+          ) : null}
+        </section>
+
+        <section className={`valuation-panel valuation-detail-panel ${valuationDetailCollapsed ? "collapsed" : ""}`}>
+          {selected ? (
+            valuationDetailCollapsed ? (
+              <div className="valuation-side-rail">
+                <button className="valuation-side-toggle" type="button" onClick={() => setValuationDetailCollapsed(false)} aria-label="展开价值核算详情">
+                  <ChevronDown size={16} />
+                  <span>展开详情</span>
+                </button>
+                <div className="valuation-side-summary">
+                  <strong>{selected.stock.name}</strong>
+                  <span>{displayStockCode(selected.stock)}</span>
+                  <em>{selected.verdict}</em>
+                  <b className={selected.safetyMargin >= 0 ? "positive" : "negative"}>{formatValue(selected.safetyMargin, "%")}</b>
+                </div>
+              </div>
+            ) : (
+              <>
+              <div className="valuation-detail-head">
+                <div>
+                  <h3>
+                    <button className="stock-title-button" type="button" onClick={() => openStockInfo(selected.stock)}>
+                      {selected.stock.name}
+                      <span>{displayStockCode(selected.stock)}</span>
+                    </button>
+                  </h3>
+                  <p>{selected.stock.industry1} / {selected.stock.industry2} / {selected.stock.property}</p>
+                </div>
+                <div className="valuation-detail-actions">
+                  <span className={`valuation-verdict ${selected.safetyMargin >= 15 ? "good" : selected.safetyMargin < -10 ? "bad" : ""}`}>{selected.verdict}</span>
+                  <button className="valuation-collapse-button" type="button" onClick={() => setValuationDetailCollapsed(true)}>
+                    收起
+                    <ChevronDown size={15} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="valuation-price-grid">
+                <div>
+                  <span>现价</span>
+                  <strong>{formatValue(selected.currentPrice)}</strong>
+                </div>
+                <div>
+                  <span>核算价值</span>
+                  <strong>{formatValue(selected.fairValue)}</strong>
+                </div>
+                <div>
+                  <span>当前市值</span>
+                  <strong>{formatMarketCap(selected.marketCap)}</strong>
+                </div>
+                <div>
+                  <span>核算市值</span>
+                  <strong>{formatMarketCap(valuationFairMarketCap(selected))}</strong>
+                </div>
+                <div>
+                  <span>熊市估值</span>
+                  <strong>{formatValue(selected.bearValue)}</strong>
+                </div>
+                <div>
+                  <span>牛市估值</span>
+                  <strong>{formatValue(selected.bullValue)}</strong>
+                </div>
+              </div>
+              <p className="valuation-market-note">核算市值 = 当前市值 ÷ 现价 × 核算价值，沿用当前总股本口径折算，单位为亿元。</p>
+
+              <div className="valuation-action-card">
+                <div>
+                  <span>操作建议</span>
+                  <strong>{selected.action}</strong>
+                </div>
+                <div>
+                  <span>单股仓位</span>
+                  <strong>{selected.positionHint}</strong>
+                </div>
+              </div>
+
+              <div className="valuation-score-grid">
+                {[
+                  ["行业适配", selected.industryFitScore],
+                  ["企业质量", selected.qualityScore],
+                  ["成长能力", selected.growthScore],
+                  ["偿债能力", selected.solvencyScore],
+                  ["治理质量", selected.governanceScore]
+                ].map(([label, value]) => (
+                  <div className="valuation-score" key={label}>
+                    <span>{label}</span>
+                    <strong>{value}</strong>
+                    <i style={{ width: `${Math.max(4, Math.min(100, Number(value)))}%` }} />
+                  </div>
+                ))}
+              </div>
+
+              <div className="valuation-breakdown">
+                <h4>分模型核算</h4>
+                <div className="valuation-formula-list">
+                  {selected.components.formulaRows.map((row) => (
+                    <div className="valuation-formula-row" key={row.name}>
+                      <div>
+                        <strong>{row.name}</strong>
+                        <span>{row.formula}</span>
+                        <em>{row.substitution}</em>
+                      </div>
+                      <b>{formatValue(row.value)}</b>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="valuation-profile">
+                <h4>差异化口径</h4>
+                <p>{selected.profile.industry}：{selected.model}，行业倍数先压低，再取最低两项模型值做锚定；风险缓冲 {selected.profile.riskBuffer}%。</p>
+                <p>公司治理折扣 {selected.governanceModifier}x，企业状态折扣 {selected.statusModifier}x，财务扣减 {selected.financialModifier}x，综合风险折扣 {selected.riskDiscount}x。</p>
+              </div>
+
+              <div className="valuation-lists">
+                <div>
+                  <h4>核心驱动</h4>
+                  <ul>
+                    {selected.drivers.map((driver) => (
+                      <li key={driver}>{driver}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h4>风险提示</h4>
+                  {selected.warnings.length ? (
+                    <ul>
+                      {selected.warnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>暂无显著治理或财务折价项。</p>
+                  )}
+                </div>
+              </div>
+              </>
+            )
+          ) : (
+            <EmptyState>请选择一只股票查看价值核算拆解。</EmptyState>
+          )}
+        </section>
+      </div>
+      {stockInfoTarget ? <StockInfoModal target={stockInfoTarget} onClose={() => setStockInfoTarget(null)} /> : null}
     </section>
   );
 }
@@ -2044,6 +3955,8 @@ function SettingsWorkspace({
   stockCount,
   newsSettings,
   newsStatus,
+  newsAnalysisSettings,
+  newsAnalysisStatus,
   patchSettings,
   toggleModule,
   patchNewsSource,
@@ -2052,6 +3965,10 @@ function SettingsWorkspace({
   onRemoveNewsSource,
   onSaveNewsSources,
   onTestNewsSource,
+  patchNewsAnalysis,
+  toggleNewsAnalysisTask,
+  onSaveNewsAnalysis,
+  onTestNewsAnalysis,
   onSave,
   onTest,
   onSyncOpenData
@@ -2062,6 +3979,8 @@ function SettingsWorkspace({
   stockCount: number;
   newsSettings: NewsSourceSettings;
   newsStatus: string;
+  newsAnalysisSettings: NewsAnalysisModelSettings;
+  newsAnalysisStatus: string;
   patchSettings: (patch: Partial<InfoSourceSettings>) => void;
   toggleModule: (key: SourceModuleKey) => void;
   patchNewsSource: (id: string, patch: Partial<NewsSourceEndpoint>) => void;
@@ -2070,12 +3989,17 @@ function SettingsWorkspace({
   onRemoveNewsSource: (id: string) => void;
   onSaveNewsSources: () => void;
   onTestNewsSource: (id: string) => void;
+  patchNewsAnalysis: (patch: Partial<NewsAnalysisModelSettings>) => void;
+  toggleNewsAnalysisTask: (key: NewsAnalysisTaskKey) => void;
+  onSaveNewsAnalysis: () => void;
+  onTestNewsAnalysis: () => void;
   onSave: () => void;
   onTest: () => void;
   onSyncOpenData: () => void;
 }) {
   const enabledCount = enabledSourceModules(settings).length;
   const enabledNewsCount = enabledNewsSources(newsSettings).length;
+  const enabledAnalysisTaskCount = enabledNewsAnalysisTasks(newsAnalysisSettings).length;
   return (
     <section className="settings-workspace">
       <div className="settings-title-row">
@@ -2130,7 +4054,7 @@ function SettingsWorkspace({
               type="password"
               value={settings.apiToken}
               onChange={(event) => patchSettings({ apiToken: event.target.value })}
-              placeholder="未填写时使用本地样本数据"
+              placeholder="真实接口需要时填写 Token"
             />
           </label>
           <label>
@@ -2283,6 +4207,130 @@ function SettingsWorkspace({
         </div>
       </div>
 
+      <div className="settings-panel news-analysis-model-panel">
+        <div className="settings-panel-title">
+          <div>
+            <h3>新闻信息分析模型接口</h3>
+            <p>用于对新闻正文进行情绪判断、事件抽取、关联股票识别和风险摘要生成，和新闻源输入接口分开配置。</p>
+          </div>
+          <div className="settings-actions">
+            <span className={newsAnalysisStatus.includes("失败") ? "settings-status danger" : "settings-status"}>{newsAnalysisStatus}</span>
+            <button className="btn" onClick={onTestNewsAnalysis}>
+              测试模型
+            </button>
+            <button className="btn primary" onClick={onSaveNewsAnalysis}>
+              <Save size={15} />
+              保存模型
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-form-grid news-analysis-grid">
+          <label className="settings-module-row compact switch-row">
+            <input type="checkbox" checked={newsAnalysisSettings.enabled} onChange={(event) => patchNewsAnalysis({ enabled: event.target.checked })} />
+            <span>
+              <strong>启用模型分析</strong>
+              <em>{newsAnalysisSettings.enabled ? "新闻进入舆情分析时调用该模型" : "停用后仅使用本地规则，不加载样本标签"}</em>
+            </span>
+          </label>
+          <label>
+            <span>模型来源</span>
+            <select
+              value={newsAnalysisSettings.provider}
+              onChange={(event) => {
+                const provider = event.target.value as NewsAnalysisModelProvider;
+                patchNewsAnalysis({
+                  provider,
+                  baseUrl: defaultBaseUrlForNewsAnalysisProvider(provider),
+                  model: defaultModelForNewsAnalysisProvider(provider),
+                  apiKey: provider === "本地规则模型" ? "" : newsAnalysisSettings.apiKey
+                });
+              }}
+            >
+              {newsAnalysisModelProviderOptions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>分析深度</span>
+            <select value={newsAnalysisSettings.depth} onChange={(event) => patchNewsAnalysis({ depth: event.target.value as NewsAnalysisModelSettings["depth"] })}>
+              {newsAnalysisDepthOptions.map((depth) => (
+                <option key={depth} value={depth}>
+                  {depth}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="wide">
+            <span>模型接口地址</span>
+            <input value={newsAnalysisSettings.baseUrl} onChange={(event) => patchNewsAnalysis({ baseUrl: event.target.value })} />
+          </label>
+          <label>
+            <span>模型名称</span>
+            <input value={newsAnalysisSettings.model} onChange={(event) => patchNewsAnalysis({ model: event.target.value })} />
+          </label>
+          <label>
+            <span>API Key</span>
+            <input
+              type="password"
+              value={newsAnalysisSettings.apiKey}
+              onChange={(event) => patchNewsAnalysis({ apiKey: event.target.value })}
+              placeholder="本地规则模型可留空"
+            />
+          </label>
+          <label>
+            <span>超时时间（秒）</span>
+            <input
+              type="number"
+              min={3}
+              max={180}
+              value={newsAnalysisSettings.timeoutSeconds}
+              onChange={(event) => patchNewsAnalysis({ timeoutSeconds: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            <span>最大输出 Token</span>
+            <input
+              type="number"
+              min={256}
+              max={8000}
+              value={newsAnalysisSettings.maxTokens}
+              onChange={(event) => patchNewsAnalysis({ maxTokens: Number(event.target.value) })}
+            />
+          </label>
+          <label>
+            <span>温度参数</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.1}
+              value={newsAnalysisSettings.temperature}
+              onChange={(event) => patchNewsAnalysis({ temperature: Number(event.target.value) })}
+            />
+          </label>
+          <label className="wide prompt-field">
+            <span>系统提示词</span>
+            <textarea value={newsAnalysisSettings.systemPrompt} onChange={(event) => patchNewsAnalysis({ systemPrompt: event.target.value })} rows={4} />
+          </label>
+        </div>
+
+        <div className="settings-module-list news-analysis-task-list">
+          {newsAnalysisTaskLabels.map((item) => (
+            <label className="settings-module-row" key={item.key}>
+              <input type="checkbox" checked={newsAnalysisSettings.tasks[item.key]} onChange={() => toggleNewsAnalysisTask(item.key)} />
+              <span>
+                <strong>{item.label}</strong>
+                <em>{item.description}</em>
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
       <div className="settings-summary">
         <div>
           <span>已启用模块</span>
@@ -2316,6 +4364,18 @@ function SettingsWorkspace({
           <span>新闻源保存</span>
           <strong>{formatDateTime(newsSettings.lastSavedAt)}</strong>
         </div>
+        <div>
+          <span>分析模型</span>
+          <strong>{newsAnalysisSettings.enabled ? newsAnalysisSettings.model : "已停用"}</strong>
+        </div>
+        <div>
+          <span>分析任务</span>
+          <strong>{enabledAnalysisTaskCount} / {newsAnalysisTaskLabels.length}</strong>
+        </div>
+        <div>
+          <span>模型保存</span>
+          <strong>{formatDateTime(newsAnalysisSettings.lastSavedAt)}</strong>
+        </div>
       </div>
     </section>
   );
@@ -2330,7 +4390,8 @@ function TradeWorkspace({
   patchTradeConnection,
   bindTradingInterface,
   exportTradePlan,
-  submitPaperTradePlan
+  submitPaperTradePlan,
+  onOpenStockInfo
 }: {
   strategy: StrategyConfig;
   rows: SelectionRow[];
@@ -2341,6 +4402,7 @@ function TradeWorkspace({
   bindTradingInterface: () => boolean;
   exportTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string) => TradePlan;
   submitPaperTradePlan: (rows: SelectionRow[]) => TradePlan | null;
+  onOpenStockInfo: (stock: StockReference) => void;
 }) {
   const [tradeMode, setTradeMode] = useState<"strategy" | "condition">("strategy");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("manual");
@@ -2630,7 +4692,9 @@ function TradeWorkspace({
                 return (
                   <tr key={row.stock.code}>
                     <td>{index + 1}</td>
-                    <td>{row.stock.name}</td>
+                    <td>
+                      <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
+                    </td>
                     <td>{row.stock.industry1}</td>
                     <td>{shares}</td>
                     <td>{formatMoney(price * shares)}</td>
@@ -2705,9 +4769,10 @@ function TradeWorkspace({
               {planRows.map((row) => (
                 <tr key={row.stock.code}>
                   <td>
-                    {row.stock.name}
-                    <br />
-                    <a>({row.stock.code})</a>
+                    <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} className="stock-title-button">
+                      {row.stock.name}
+                      <span>{displayStockCode(row.stock)}</span>
+                    </StockNameAction>
                   </td>
                   <td>{row.stock.industry1}</td>
                   <td className="positive">买{row.shares}</td>
@@ -2787,9 +4852,11 @@ function TradeWorkspace({
                 <tr key={`${row.stock.code}-${index}`}>
                   <td>{index + 1}</td>
                   <td>{row.time}</td>
-                  <td>{row.stock.name}</td>
                   <td>
-                    <a>{row.stock.code}</a>
+                    <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
+                  </td>
+                  <td>
+                    <a>{displayStockCode(row.stock)}</a>
                   </td>
                   <td>买入{row.shares}</td>
                   <td>{row.stock.metrics.price?.toFixed(3)}</td>
@@ -2801,9 +4868,11 @@ function TradeWorkspace({
                 <tr key={fill.id}>
                   <td>{historyRows.length + index + 1}</td>
                   <td>{fill.filledAt.replace("T", " ").slice(0, 19)}</td>
-                  <td>{fill.name}</td>
                   <td>
-                    <a>{fill.code}</a>
+                    <StockNameAction stock={{ code: fill.code, name: fill.name }} onOpen={onOpenStockInfo} />
+                  </td>
+                  <td>
+                    <a>{displayStockCode(fill.code)}</a>
                   </td>
                   <td>{fill.side}{fill.shares}</td>
                   <td>{fill.price.toFixed(3)}</td>
@@ -2835,6 +4904,7 @@ function TradeWorkspace({
           tradeInterfaceBound={tradeInterfaceBound}
           bindTradeInterface={bindTradingInterface}
           exportConditionInstructions={() => exportTradePlan(rows, "manual", "条件单指令")}
+          onOpenStockInfo={onOpenStockInfo}
         />
       )}
     </section>
@@ -2848,7 +4918,8 @@ function ConditionTradePanel({
   executionMode,
   tradeInterfaceBound,
   bindTradeInterface,
-  exportConditionInstructions
+  exportConditionInstructions,
+  onOpenStockInfo
 }: {
   rows: Array<{
     id: string;
@@ -2869,6 +4940,7 @@ function ConditionTradePanel({
   tradeInterfaceBound: boolean;
   bindTradeInterface: () => boolean;
   exportConditionInstructions: () => void;
+  onOpenStockInfo: (stock: StockReference) => void;
 }) {
   const first = rows[0];
   return (
@@ -2913,7 +4985,7 @@ function ConditionTradePanel({
             </label>
             <label>
               <span>证券代码</span>
-              <input defaultValue={first?.stock.code ?? "600519"} />
+              <input defaultValue={first ? displayStockCode(first.stock) : "SH600519"} />
             </label>
             <label>
               <span>证券名称</span>
@@ -3013,9 +5085,10 @@ function ConditionTradePanel({
                     <a>{row.name}</a>
                   </td>
                   <td>
-                    {row.stock.name}
-                    <br />
-                    <a>({row.stock.code})</a>
+                    <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} className="stock-title-button">
+                      {row.stock.name}
+                      <span>{displayStockCode(row.stock)}</span>
+                    </StockNameAction>
                   </td>
                   <td>
                     最新价 {row.triggerOperator} {row.triggerPrice.toFixed(2)}
@@ -3091,7 +5164,8 @@ function BacktestPanel({
   factors,
   strategy,
   runCurrentTask,
-  openCompare
+  openCompare,
+  onOpenStockInfo
 }: {
   tab: BacktestTab;
   setTab: (tab: BacktestTab) => void;
@@ -3104,6 +5178,7 @@ function BacktestPanel({
   strategy: StrategyConfig;
   runCurrentTask: (tab?: BacktestTab) => void;
   openCompare: () => void;
+  onOpenStockInfo: (stock: StockReference) => void;
 }) {
   const [factorCorrelationPeriod, setFactorCorrelationPeriod] = useState(20);
   const tabs: Array<{ key: BacktestTab; label: string; icon: React.ReactNode }> = [
@@ -3189,19 +5264,31 @@ function BacktestPanel({
         </div>
       </div>
 
-      {tab === "backtest" ? <BacktestResultView result={result} rows={selectionRows} factors={factors} strategy={strategy} /> : null}
-      {tab === "daily" || tab === "realtime" ? <SelectionTable rows={selectionRows} factors={factors} strategy={strategy} realtime={tab === "realtime"} /> : null}
-      {tab === "rank" ? <RankingTable rows={rankRows} factors={factors} strategy={strategy} /> : null}
+      {tab === "backtest" ? <BacktestResultView result={result} rows={selectionRows} factors={factors} strategy={strategy} onOpenStockInfo={onOpenStockInfo} /> : null}
+      {tab === "daily" || tab === "realtime" ? <SelectionTable rows={selectionRows} factors={factors} strategy={strategy} realtime={tab === "realtime"} onOpenStockInfo={onOpenStockInfo} /> : null}
+      {tab === "rank" ? <RankingTable rows={rankRows} factors={factors} strategy={strategy} onOpenStockInfo={onOpenStockInfo} /> : null}
       {tab === "factorCorrelation" ? <FactorCorrelationPanel rows={rankRows} factors={factors} strategy={strategy} /> : null}
     </section>
   );
 }
 
-function BacktestResultView({ result, rows, factors, strategy }: { result: BacktestResult | null; rows: SelectionRow[]; factors: Factor[]; strategy: StrategyConfig }) {
+function BacktestResultView({
+  result,
+  rows,
+  factors,
+  strategy,
+  onOpenStockInfo
+}: {
+  result: BacktestResult | null;
+  rows: SelectionRow[];
+  factors: Factor[];
+  strategy: StrategyConfig;
+  onOpenStockInfo?: (stock: StockReference) => void;
+}) {
   if (!result) {
     return (
       <div className="preview-results">
-        <SelectionTable rows={rows} factors={factors} strategy={strategy} compact />
+        <SelectionTable rows={rows} factors={factors} strategy={strategy} compact onOpenStockInfo={onOpenStockInfo} />
       </div>
     );
   }
@@ -3217,7 +5304,7 @@ function BacktestResultView({ result, rows, factors, strategy }: { result: Backt
       </div>
       <EquityChart result={result} hedge={strategy.hedge.enabled} />
       <div className="result-grid">
-        <SelectionTable rows={result.rows} factors={factors} strategy={strategy} compact />
+        <SelectionTable rows={result.rows} factors={factors} strategy={strategy} compact onOpenStockInfo={onOpenStockInfo} />
         <div className="mini-table">
           <h3>年度收益统计</h3>
           <table>
@@ -3247,7 +5334,9 @@ function BacktestResultView({ result, rows, factors, strategy }: { result: Backt
                 <tr key={`${trade.date}-${trade.code}-${trade.action}`}>
                   <td>{trade.date}</td>
                   <td>{trade.action}</td>
-                  <td>{trade.name}</td>
+                  <td>
+                    <StockNameAction stock={{ code: trade.code, name: trade.name }} onOpen={onOpenStockInfo} />
+                  </td>
                   <td>{trade.weight}%</td>
                 </tr>
               ))}
@@ -3312,13 +5401,15 @@ function SelectionTable({
   factors,
   strategy,
   realtime = false,
-  compact = false
+  compact = false,
+  onOpenStockInfo
 }: {
   rows: SelectionRow[];
   factors: Factor[];
   strategy: StrategyConfig;
   realtime?: boolean;
   compact?: boolean;
+  onOpenStockInfo?: (stock: StockReference) => void;
 }) {
   const rankFactors = getResultFactorKeys(strategy);
   return (
@@ -3342,8 +5433,10 @@ function SelectionTable({
           {rows.map((row, index) => (
             <tr key={row.stock.code}>
               <td>{index + 1}</td>
-              <td>{row.stock.code}</td>
-              <td>{row.stock.name}</td>
+              <td>{displayStockCode(row.stock)}</td>
+              <td>
+                <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
+              </td>
               <td>{row.stock.industry1}</td>
               <td>{row.score.toFixed(2)}</td>
               <td>{row.weight}%</td>
@@ -3358,7 +5451,17 @@ function SelectionTable({
   );
 }
 
-function RankingTable({ rows, factors, strategy }: { rows: RankingRow[]; factors: Factor[]; strategy: StrategyConfig }) {
+function RankingTable({
+  rows,
+  factors,
+  strategy,
+  onOpenStockInfo
+}: {
+  rows: RankingRow[];
+  factors: Factor[];
+  strategy: StrategyConfig;
+  onOpenStockInfo?: (stock: StockReference) => void;
+}) {
   const rankFactors = strategy.ranks.map((rank) => rank.factorKey).slice(0, 5);
   if (!rows.length) {
     return <EmptyState>点击“开始分析”生成排名分析结果。</EmptyState>;
@@ -3383,8 +5486,10 @@ function RankingTable({ rows, factors, strategy }: { rows: RankingRow[]; factors
           {rows.slice(0, 30).map((row) => (
             <tr key={row.stock.code}>
               <td>{row.rank}</td>
-              <td>{row.stock.code}</td>
-              <td>{row.stock.name}</td>
+              <td>{displayStockCode(row.stock)}</td>
+              <td>
+                <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
+              </td>
               <td>{row.stock.industry1}</td>
               <td>{row.score.toFixed(2)}</td>
               {rankFactors.map((key) => (

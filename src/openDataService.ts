@@ -1,4 +1,5 @@
 import { AKSHARE_AKTOOLS_PROVIDER, ensureInfoSourceSettings, isAkShareProvider, isLocalProvider, type InfoSourceSettings } from "./integrationServices";
+import { marketDataCodeForStock } from "./stockIdentity";
 import type { Stock } from "./types";
 
 export interface OpenSourceDataSummary {
@@ -23,11 +24,11 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 type AkShareRow = Record<string, unknown>;
 
 export const defaultOpenSourceDataSummary: OpenSourceDataSummary = {
-  provider: "本地模拟数据",
+  provider: "未接入真实数据",
   matchedRows: 0,
   sourceRows: 0,
   stockCount: 0,
-  details: "尚未同步"
+  details: "尚未同步真实数据"
 };
 
 const textValue = (row: AkShareRow, keys: string[]) => {
@@ -65,6 +66,27 @@ const withMetric = (metrics: Record<string, number>, key: string, value: number 
   return { ...metrics, [key]: round(value, precision) };
 };
 
+function stockShellFromAkShareRow(row: NonNullable<ReturnType<typeof normalizeAkShareSpotRow>>): Stock {
+  const exchange = row.code.startsWith("6") ? "沪市" : row.code.startsWith("8") || row.code.startsWith("4") ? "北交所" : "深市";
+  const board = row.code.startsWith("688") ? "科创板" : row.code.startsWith("300") || row.code.startsWith("301") ? "创业板" : exchange === "北交所" ? "北交所" : "主板";
+  return {
+    code: row.code,
+    name: row.name || row.code,
+    exchange,
+    board,
+    industry1: "未分类",
+    industry2: "未分类",
+    region: "未分类",
+    property: "民企",
+    isST: row.name.includes("ST"),
+    isSuspended: false,
+    isSTAR: board === "科创板",
+    isMargin: false,
+    indexes: [],
+    metrics: {}
+  };
+}
+
 export function normalizeAkShareSpotRow(row: AkShareRow) {
   const code = textValue(row, ["代码", "code", "symbol"]).replace(/\D/g, "").padStart(6, "0").slice(-6);
   const name = textValue(row, ["名称", "name"]);
@@ -90,8 +112,9 @@ export function mergeAkShareSpotRows(baseStocks: Stock[], rows: AkShareRow[]) {
   const rowByCode = new Map(normalizedRows.map((row) => [row.code, row]));
   let matchedRows = 0;
 
-  const stocks = baseStocks.map((stock) => {
-    const row = rowByCode.get(stock.code);
+  const sourceStocks = baseStocks.length ? baseStocks : normalizedRows.map(stockShellFromAkShareRow);
+  const stocks = sourceStocks.map((stock) => {
+    const row = rowByCode.get(stock.code) ?? rowByCode.get(marketDataCodeForStock(stock));
     if (!row) return stock;
     matchedRows += 1;
 
@@ -110,6 +133,7 @@ export function mergeAkShareSpotRows(baseStocks: Stock[], rows: AkShareRow[]) {
     metrics = withMetric(metrics, "limitFlag", row.pctChange === undefined ? undefined : row.pctChange >= 9.8 ? 1 : row.pctChange <= -9.8 ? -1 : 0, 0);
     metrics = withMetric(metrics, "min15Momentum", row.pctChange === undefined ? undefined : row.pctChange / 4);
     metrics = withMetric(metrics, "intradayStrength", row.pctChange === undefined ? undefined : Math.max(0, Math.min(100, 50 + row.pctChange * 4)));
+    metrics = withMetric(metrics, "realQuoteSource", 1, 0);
 
     return {
       ...stock,
@@ -135,18 +159,16 @@ export async function syncOpenSourceMarketData(
 
   if (isLocalProvider(settings)) {
     return {
-      ok: true,
+      ok: false,
       checkedAt,
-      message: "本地样本数据已加载",
-      details: `已加载 ${baseStocks.length} 只本地样本股票`,
+      message: "开源数据同步失败",
+      details: "本地模拟数据已停用，请配置真实行情接口",
       stocks: baseStocks,
       summary: {
+        ...defaultOpenSourceDataSummary,
         provider: settings.provider,
-        lastSyncAt: checkedAt,
-        matchedRows: baseStocks.length,
-        sourceRows: baseStocks.length,
         stockCount: baseStocks.length,
-        details: "本地样本数据"
+        details: "本地模拟数据已停用"
       }
     };
   }

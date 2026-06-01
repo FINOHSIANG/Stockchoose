@@ -1,3 +1,4 @@
+﻿import type { NewsArticle, NewsCategory, NewsImportance, NewsSentiment } from "./newsPageServices";
 import type { Stock } from "./types";
 
 export type SentimentCategory = "政策监管" | "财报业绩" | "订单合同" | "产品技术" | "供需价格" | "产业链事件" | "风险负面" | "资金市场";
@@ -44,6 +45,22 @@ export interface SentimentRecommendation {
   reason: string;
   risk: "低" | "中" | "高";
   tags: string[];
+  matchScore: number;
+  matchLevel: "直接命中" | "强相关" | "中相关" | "弱相关";
+  evidence: string[];
+}
+
+export type SentimentRelationLevel = "直接命中" | "强相关" | "中相关" | "弱相关";
+
+export interface SentimentLinkedStock {
+  stock: Stock;
+  events: SentimentEvent[];
+  direction: SentimentDirection;
+  relationScore: number;
+  relationLevel: SentimentRelationLevel;
+  reason: string;
+  evidence: string[];
+  tags: string[];
 }
 
 export interface SentimentInsightReport {
@@ -52,7 +69,7 @@ export interface SentimentInsightReport {
   eventCount: number;
   topCategories: Array<{ category: SentimentCategory; count: number }>;
   topIndustries: Array<{ industry: string; count: number }>;
-  longIdeas: SentimentRecommendation[];
+  linkedStocks: SentimentLinkedStock[];
   riskEvents: SentimentEvent[];
   validationPoints: string[];
 }
@@ -77,113 +94,116 @@ export const sentimentCategories: Array<"全部" | SentimentCategory> = [
 export const sentimentDirections: Array<"全部" | SentimentDirection> = ["全部", "利好", "利空", "中性", "不确定"];
 export const sentimentSeverityLevels: Array<"全部" | SentimentSeverity> = ["全部", "特别重大", "重大", "一般", "观察"];
 
-export const sampleSentimentEvents: SentimentEvent[] = [
-  {
-    id: "policy-auto-202605",
-    title: "新一轮新能源汽车下乡与充电基础设施补贴预期升温",
-    summary: "政策端继续支持新能源汽车消费和县域充电网络建设，整车、电池和充电设备链条受益。",
-    category: "政策监管",
-    direction: "利好",
-    horizon: "中期",
-    severity: "特别重大",
-    occurredAt: "2026-05-28 09:20",
-    source: "公开政策新闻",
-    sourceWeight: 88,
-    impact: 86,
-    relevance: 84,
-    confidence: 78,
-    novelty: 64,
-    persistence: 82,
-    riskPenalty: 12,
-    industries: ["汽车", "电力设备"],
-    keywords: ["新能源汽车", "充电基础设施", "县域消费"],
-    linkedCodes: ["002594", "300750", "601012"]
-  },
-  {
-    id: "supply-chip-202605",
-    title: "先进封装产能紧张，国产设备验证节奏加快",
-    summary: "海外算力需求带动先进封装景气，国产半导体设备进入更多验证环节。",
-    category: "产业链事件",
-    direction: "利好",
-    horizon: "中期",
-    severity: "重大",
-    occurredAt: "2026-05-28 10:10",
-    source: "产业链跟踪",
-    sourceWeight: 82,
-    impact: 80,
-    relevance: 86,
-    confidence: 72,
-    novelty: 70,
-    persistence: 78,
-    riskPenalty: 18,
-    industries: ["电子"],
-    keywords: ["先进封装", "半导体设备", "国产替代"],
-    linkedCodes: ["002371", "688981", "688008"]
-  },
-  {
-    id: "risk-liquor-202605",
-    title: "高端白酒批价波动，渠道库存压力仍需观察",
-    summary: "部分区域渠道反馈动销恢复不均衡，短期估值修复需要更明确的库存改善信号。",
-    category: "风险负面",
-    direction: "利空",
-    horizon: "短期",
-    severity: "重大",
-    occurredAt: "2026-05-28 11:00",
-    source: "渠道调研摘要",
-    sourceWeight: 74,
-    impact: 68,
-    relevance: 80,
-    confidence: 70,
-    novelty: 58,
-    persistence: 55,
-    riskPenalty: 8,
-    industries: ["食品饮料"],
-    keywords: ["白酒", "渠道库存", "批价"],
-    linkedCodes: ["600519", "000858", "000568"]
-  },
-  {
-    id: "order-grid-202605",
-    title: "电网投资招标规模提升，特高压和储能配套订单增加",
-    summary: "电网侧投资节奏较快，设备、储能和功率器件企业订单可见度提升。",
-    category: "订单合同",
-    direction: "利好",
-    horizon: "长期",
-    severity: "特别重大",
-    occurredAt: "2026-05-28 13:30",
-    source: "招投标公开信息",
-    sourceWeight: 86,
-    impact: 78,
-    relevance: 82,
-    confidence: 76,
-    novelty: 62,
-    persistence: 85,
-    riskPenalty: 10,
-    industries: ["电力设备", "公用事业"],
-    keywords: ["电网投资", "储能", "特高压"],
-    linkedCodes: ["601012", "600900", "600438"]
-  },
-  {
-    id: "capital-buyback-202605",
-    title: "多家龙头公司披露回购或增持计划，稳定市场预期",
-    summary: "回购增持强化安全边际，但仍需结合估值、现金流和执行进度判断。",
-    category: "资金市场",
-    direction: "利好",
-    horizon: "短期",
-    severity: "一般",
-    occurredAt: "2026-05-28 15:05",
-    source: "上市公司公告",
-    sourceWeight: 90,
-    impact: 62,
-    relevance: 70,
-    confidence: 82,
-    novelty: 60,
-    persistence: 58,
-    riskPenalty: 8,
-    industries: ["银行", "家用电器", "非银金融"],
-    keywords: ["回购", "增持", "低估值"],
-    linkedCodes: ["600036", "000333", "601318"]
-  }
-];
+const newsCategoryToSentimentCategory: Record<NewsCategory, SentimentCategory> = {
+  宏观政策: "政策监管",
+  行业动态: "产业链事件",
+  公司公告: "资金市场",
+  财报业绩: "财报业绩",
+  市场评论: "资金市场",
+  国际财经: "资金市场",
+  产业链: "产业链事件",
+  基金持仓: "资金市场"
+};
+
+const newsSentimentToDirection: Record<NewsSentiment, SentimentDirection> = {
+  利好: "利好",
+  利空: "利空",
+  中性: "中性"
+};
+
+const newsImportanceToSeverity: Record<NewsImportance, SentimentSeverity> = {
+  头条: "特别重大",
+  重要: "重大",
+  一般: "一般"
+};
+
+const severePositiveWords = ["重大", "中标", "回购", "增持", "获批", "签约", "高增长", "分红", "突破", "创新高"];
+const severeNegativeWords = ["退市", "处罚", "调查", "减持", "亏损", "违约", "终止", "立案", "风险警示", "下修"];
+const genericIndustryLabels = new Set(["未分类", "腾讯行情", "其他", "--", ""]);
+
+function clampScore(value: number, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function inferEventHorizon(article: NewsArticle): SentimentHorizon {
+  if (article.category === "公司公告" || article.category === "市场评论") return "短期";
+  if (article.category === "宏观政策" || article.category === "产业链") return "中期";
+  if (article.category === "财报业绩" || article.category === "基金持仓") return "中期";
+  if (article.category === "国际财经") return "短期";
+  return "中期";
+}
+
+function articleText(article: NewsArticle) {
+  return `${article.title} ${article.summary} ${article.content} ${article.tags.join(" ")} ${article.industries.join(" ")}`;
+}
+
+function uniqueArticleKeywords(article: NewsArticle) {
+  const raw = [
+    article.category,
+    article.sentiment,
+    ...article.tags,
+    ...article.industries,
+    ...article.linkedStocks.map((stock) => stock.name)
+  ];
+  return uniqueTexts(raw).slice(0, 8);
+}
+
+function isSpecificIndustry(value: string) {
+  return !genericIndustryLabels.has(value.trim());
+}
+
+function resolveArticleIndustries(article: NewsArticle, stocks: Stock[]) {
+  const linkedCodes = new Set(article.linkedCodes);
+  const stockIndustries = stocks.filter((stock) => linkedCodes.has(stock.code)).flatMap((stock) => [stock.industry1, stock.industry2]);
+  return uniqueTexts([...article.industries, ...stockIndustries]).filter(isSpecificIndustry).slice(0, 6);
+}
+
+function scoreArticleSignals(article: NewsArticle) {
+  const text = articleText(article);
+  const positiveHit = severePositiveWords.some((word) => text.includes(word));
+  const negativeHit = severeNegativeWords.some((word) => text.includes(word));
+  const linkedBonus = Math.min(article.linkedCodes.length, 5) * 4;
+  const sourceWeight = article.source.includes("公告") || article.source.includes("腾讯") ? 88 : article.source.includes("GDELT") ? 70 : 76;
+  const baseImportance = article.importance === "头条" ? 88 : article.importance === "重要" ? 76 : 62;
+  const impact = clampScore(baseImportance + linkedBonus + (positiveHit || negativeHit ? 6 : 0));
+  const relevance = clampScore(52 + linkedBonus * 2 + (article.industries.length ? 12 : 0) + (article.linkedStocks.length ? 16 : 0));
+  const confidence = clampScore(sourceWeight - (article.linkedCodes.length ? 0 : 12));
+  const novelty = clampScore(article.importance === "头条" ? 72 : 58);
+  const persistence = clampScore(article.category === "宏观政策" || article.category === "产业链" ? 76 : 58);
+  const riskPenalty = article.sentiment === "利空" ? 8 : negativeHit ? 12 : 4;
+
+  return { sourceWeight, impact, relevance, confidence, novelty, persistence, riskPenalty };
+}
+
+export function buildSentimentEventsFromNewsArticles(articles: NewsArticle[], stocks: Stock[]): SentimentEvent[] {
+  return articles
+    .filter((article) => article.title.trim())
+    .map((article, index) => {
+      const signals = scoreArticleSignals(article);
+      const text = articleText(article);
+      const direction = newsSentimentToDirection[article.sentiment] ?? "不确定";
+      const hasSevereRisk = severeNegativeWords.some((word) => text.includes(word));
+      return {
+        id: `real-news-${article.id || index}`,
+        title: article.title,
+        summary: article.summary || article.title,
+        category: hasSevereRisk ? "风险负面" : newsCategoryToSentimentCategory[article.category] ?? "资金市场",
+        direction,
+        horizon: inferEventHorizon(article),
+        severity: hasSevereRisk ? "重大" : newsImportanceToSeverity[article.importance] ?? "一般",
+        occurredAt: article.publishedAt,
+        source: article.source,
+        ...signals,
+        industries: resolveArticleIndustries(article, stocks),
+        keywords: uniqueArticleKeywords(article),
+        linkedCodes: uniqueTexts(article.linkedCodes)
+      } satisfies SentimentEvent;
+    })
+    .filter((event) => event.linkedCodes.length > 0 || event.industries.length > 0)
+    .sort((a, b) => scoreSentimentEvent(b) - scoreSentimentEvent(a));
+}
+
+export const sampleSentimentEvents: SentimentEvent[] = [];
 
 export function scoreSentimentEvent(event: SentimentEvent) {
   const raw =
@@ -220,6 +240,151 @@ function stockScoreBoost(stock: Stock) {
   return quality * 0.18 + momentum * 0.08 + valuation * 0.08;
 }
 
+const industryKeywordProfiles: Record<string, string[]> = {
+  汽车: ["新能源汽车", "汽车", "整车", "乘用车", "充电", "县域消费"],
+  电力设备: ["电池", "储能", "光伏", "特高压", "电网", "充电"],
+  电子: ["半导体", "芯片", "先进封装", "国产替代", "算力", "设备"],
+  食品饮料: ["白酒", "批价", "渠道", "库存", "消费"],
+  银行: ["银行", "低估值", "回购", "增持", "分红"],
+  家用电器: ["家电", "白色家电", "回购", "增持", "消费"],
+  非银金融: ["保险", "证券", "低估值", "回购", "增持"],
+  公用事业: ["电网", "电力", "绿电", "水电", "特高压", "储能"],
+  计算机: ["软件", "人工智能", "AI", "算力", "信创", "数据"],
+  医药生物: ["创新药", "医疗", "生物", "临床", "获批", "出海"]
+};
+
+const industry2KeywordProfiles: Record<string, string[]> = {
+  乘用车: ["新能源汽车", "整车", "乘用车", "汽车", "县域消费"],
+  电池: ["动力电池", "电池", "储能", "新能源汽车"],
+  光伏设备: ["光伏", "硅片", "组件", "绿电"],
+  半导体: ["半导体", "芯片", "先进封装", "国产替代", "设备"],
+  白酒: ["白酒", "批价", "渠道库存", "动销"],
+  股份行: ["银行", "低估值", "分红", "回购", "增持"],
+  白色家电: ["家电", "白色家电", "回购", "增持"],
+  保险: ["保险", "低估值", "回购", "增持"],
+  水电: ["水电", "电力", "公用事业", "绿电"],
+  软件开发: ["软件", "信创", "人工智能", "数据"],
+  通信设备: ["通信", "算力", "设备", "国产替代"],
+  生物制品: ["生物", "疫苗", "创新药", "临床"],
+  化学制药: ["创新药", "药品", "临床", "出海"]
+};
+
+const stockKeywordProfiles: Record<string, string[]> = {
+  "002594": ["比亚迪", "新能源汽车", "整车", "电池", "乘用车"],
+  "300750": ["宁德时代", "动力电池", "电池", "储能"],
+  "000625": ["长安汽车", "新能源汽车", "整车", "乘用车"],
+  "601012": ["隆基绿能", "光伏", "硅片", "组件", "绿电"],
+  "600438": ["通威股份", "光伏", "硅料", "组件"],
+  "600900": ["长江电力", "水电", "电力", "公用事业"],
+  "002371": ["北方华创", "半导体设备", "国产替代", "设备"],
+  "688981": ["中芯国际", "半导体", "晶圆", "芯片"],
+  "688008": ["澜起科技", "半导体", "芯片", "先进封装"],
+  "600519": ["贵州茅台", "白酒", "批价", "渠道库存"],
+  "000858": ["五粮液", "白酒", "批价", "渠道库存"],
+  "000568": ["泸州老窖", "白酒", "批价", "渠道库存"],
+  "600036": ["招商银行", "银行", "低估值", "分红"],
+  "000333": ["美的集团", "家电", "白色家电", "回购"],
+  "601318": ["中国平安", "保险", "低估值", "回购"]
+};
+
+interface EventStockMatch {
+  event: SentimentEvent;
+  matchScore: number;
+  evidence: string[];
+  direct: boolean;
+}
+
+function uniqueTexts(items: string[]) {
+  return Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+}
+
+function eventSearchText(event: SentimentEvent) {
+  return `${event.title} ${event.summary} ${event.industries.join(" ")} ${event.keywords.join(" ")}`.toLowerCase();
+}
+
+function matchedTerms(text: string, terms: string[]) {
+  return uniqueTexts(terms).filter((term) => text.includes(term.toLowerCase()));
+}
+
+function stockMatchKeywords(stock: Stock) {
+  return {
+    precise: uniqueTexts([...(stockKeywordProfiles[stock.code] ?? []), ...(industry2KeywordProfiles[stock.industry2] ?? [])]),
+    broad: uniqueTexts([...(industryKeywordProfiles[stock.industry1] ?? []), stock.industry1, stock.industry2]).filter(isSpecificIndustry)
+  };
+}
+
+function calculateEventStockMatch(event: SentimentEvent, stock: Stock): EventStockMatch {
+  const text = eventSearchText(event);
+  const evidence: string[] = [];
+  let matchScore = 0;
+  const modelLinked = event.linkedCodes.includes(stock.code);
+  const strictSourceLinked = event.source.includes("腾讯证券公告") && event.linkedCodes.length > 0;
+  const textDirect = !strictSourceLinked && (text.includes(stock.name.toLowerCase()) || text.includes(stock.code));
+
+  if (modelLinked) {
+    matchScore += strictSourceLinked ? 56 : 48;
+    evidence.push("真实新闻源代码直接关联");
+  } else if (textDirect) {
+    matchScore += 50;
+    evidence.push("正文直接出现公司或代码");
+  }
+
+  if (isSpecificIndustry(stock.industry1) && event.industries.includes(stock.industry1)) {
+    matchScore += 16;
+    evidence.push(`一级行业匹配：${stock.industry1}`);
+  }
+
+  if (isSpecificIndustry(stock.industry2) && text.includes(stock.industry2.toLowerCase())) {
+    matchScore += 18;
+    evidence.push(`二级行业命中：${stock.industry2}`);
+  }
+
+  const { precise, broad } = stockMatchKeywords(stock);
+  const preciseHits = matchedTerms(text, precise);
+  if (preciseHits.length) {
+    matchScore += Math.min(28, preciseHits.length * 9);
+    evidence.push(`业务关键词：${preciseHits.slice(0, 3).join("、")}`);
+  }
+
+  const broadHits = matchedTerms(text, broad.filter((term) => !preciseHits.includes(term)));
+  if (broadHits.length) {
+    matchScore += Math.min(12, broadHits.length * 4);
+    evidence.push(`行业关键词：${broadHits.slice(0, 3).join("、")}`);
+  }
+
+  if ((event.direction === "利空" || event.category === "风险负面") && !textDirect && !modelLinked) {
+    matchScore -= 22;
+    evidence.push("负面事件仅保留直接关联标的");
+  }
+
+  if (stock.isST || stock.isSuspended) {
+    matchScore -= 16;
+    evidence.push(stock.isST ? "ST 风险降权" : "停牌风险降权");
+  }
+
+  return {
+    event,
+    matchScore: round(Math.max(0, Math.min(100, matchScore)), 1),
+    evidence: uniqueTexts(evidence).slice(0, 5),
+    direct: textDirect || modelLinked
+  };
+}
+
+function shouldKeepStockMatch(match: EventStockMatch) {
+  if (match.event.direction === "利空" || match.event.category === "风险负面") {
+    return match.direct && match.matchScore >= 38;
+  }
+  if (match.direct && match.matchScore >= 45) return true;
+  return match.matchScore >= 42 && match.evidence.length >= 2;
+}
+
+function relationMatchLevel(matchScore: number, direct: boolean): SentimentRelationLevel {
+  if (direct && matchScore >= 60) return "直接命中";
+  if (matchScore >= 62) return "强相关";
+  if (matchScore >= 48) return "中相关";
+  return "弱相关";
+}
+
 function mergeDirection(events: SentimentEvent[]): SentimentDirection {
   const positive = events.filter((event) => event.direction === "利好").length;
   const negative = events.filter((event) => event.direction === "利空").length;
@@ -229,35 +394,82 @@ function mergeDirection(events: SentimentEvent[]): SentimentDirection {
 }
 
 export function buildSentimentRecommendations(events: SentimentEvent[], stocks: Stock[]) {
-  const byCode = new Map<string, SentimentEvent[]>();
+  const byCode = new Map<string, EventStockMatch[]>();
   events.forEach((event) => {
-    event.linkedCodes.forEach((code) => {
-      byCode.set(code, [...(byCode.get(code) ?? []), event]);
+    stocks.forEach((stock) => {
+      const match = calculateEventStockMatch(event, stock);
+      if (!shouldKeepStockMatch(match)) return;
+      byCode.set(stock.code, [...(byCode.get(stock.code) ?? []), match]);
     });
   });
 
   return Array.from(byCode.entries())
-    .map(([code, linkedEvents]) => {
+    .map(([code, matches]) => {
       const stock = stocks.find((item) => item.code === code);
       if (!stock) return null;
-      const eventScore = linkedEvents.reduce((sum, event) => sum + scoreSentimentEvent(event), 0) / linkedEvents.length;
+      const linkedEvents = matches.map((match) => match.event);
+      const weightedTotal = matches.reduce((sum, match) => sum + scoreSentimentEvent(match.event) * (0.7 + match.matchScore / 100), 0);
+      const weightBase = matches.reduce((sum, match) => sum + 0.7 + match.matchScore / 100, 0);
+      const eventScore = weightedTotal / Math.max(weightBase, 1);
+      const matchScore = matches.reduce((sum, match) => sum + match.matchScore, 0) / matches.length;
       const direction = mergeDirection(linkedEvents);
       const negativeCount = linkedEvents.filter((event) => event.direction === "利空").length;
-      const score = round(Math.max(0, Math.min(100, eventScore + stockScoreBoost(stock) - negativeCount * 9)), 2);
-      const topEvent = [...linkedEvents].sort((a, b) => scoreSentimentEvent(b) - scoreSentimentEvent(a))[0];
-      const risk = negativeCount > 0 || (stock.metrics.volatility20 ?? 0) > 45 ? "高" : score >= 78 ? "低" : "中";
+      const weakMatchPenalty = matches.filter((match) => match.matchScore < 50).length * 3;
+      const score = round(Math.max(0, Math.min(100, eventScore * 0.64 + matchScore * 0.36 + stockScoreBoost(stock) * 0.5 - negativeCount * 10 - weakMatchPenalty)), 2);
+      const topMatch = [...matches].sort((a, b) => b.matchScore + scoreSentimentEvent(b.event) / 10 - (a.matchScore + scoreSentimentEvent(a.event) / 10))[0];
+      const topEvent = topMatch.event;
+      const risk = negativeCount > 0 || (stock.metrics.volatility20 ?? 0) > 45 || matchScore < 48 ? "高" : score >= 78 && matchScore >= 62 ? "低" : "中";
+      const evidence = uniqueTexts(matches.flatMap((match) => match.evidence)).slice(0, 5);
+      const roundedMatchScore = round(matchScore, 1);
       return {
         stock,
         events: linkedEvents,
         score,
         direction,
-        reason: `${topEvent.category}：${topEvent.summary}`,
+        reason: `${topEvent.category}：${topEvent.summary}｜关联证据：${evidence.slice(0, 3).join("、")}`,
         risk,
-        tags: Array.from(new Set(linkedEvents.flatMap((event) => [event.category, ...event.keywords.slice(0, 2)]))).slice(0, 4)
+        tags: Array.from(new Set(linkedEvents.flatMap((event) => [event.category, ...event.keywords.slice(0, 2)]))).slice(0, 4),
+        matchScore: roundedMatchScore,
+        matchLevel: relationMatchLevel(roundedMatchScore, matches.some((match) => match.direct)),
+        evidence
       } satisfies SentimentRecommendation;
     })
     .filter((item): item is SentimentRecommendation => Boolean(item))
     .sort((a, b) => b.score - a.score);
+}
+
+export function buildSentimentLinkedStocks(events: SentimentEvent[], stocks: Stock[]) {
+  const byCode = new Map<string, EventStockMatch[]>();
+  events.forEach((event) => {
+    stocks.forEach((stock) => {
+      const match = calculateEventStockMatch(event, stock);
+      if (!shouldKeepStockMatch(match)) return;
+      byCode.set(stock.code, [...(byCode.get(stock.code) ?? []), match]);
+    });
+  });
+
+  return Array.from(byCode.entries())
+    .map(([code, matches]) => {
+      const stock = stocks.find((item) => item.code === code);
+      if (!stock) return null;
+      const linkedEvents = matches.map((match) => match.event);
+      const relationScore = round(matches.reduce((sum, match) => sum + match.matchScore, 0) / matches.length, 1);
+      const topMatch = [...matches].sort((a, b) => b.matchScore + scoreSentimentEvent(b.event) / 10 - (a.matchScore + scoreSentimentEvent(a.event) / 10))[0];
+      const topEvent = topMatch.event;
+      const evidence = uniqueTexts(matches.flatMap((match) => match.evidence)).slice(0, 5);
+      return {
+        stock,
+        events: linkedEvents,
+        direction: mergeDirection(linkedEvents),
+        relationScore,
+        relationLevel: relationMatchLevel(relationScore, matches.some((match) => match.direct)),
+        reason: `${topEvent.category}：${topEvent.summary}`,
+        evidence,
+        tags: Array.from(new Set(linkedEvents.flatMap((event) => [event.category, ...event.keywords.slice(0, 2)]))).slice(0, 4)
+      } satisfies SentimentLinkedStock;
+    })
+    .filter((item): item is SentimentLinkedStock => Boolean(item))
+    .sort((a, b) => b.relationScore - a.relationScore || scoreSentimentEvent(b.events[0]) - scoreSentimentEvent(a.events[0]));
 }
 
 function topCounts<T extends string>(items: T[], limit: number) {
@@ -269,27 +481,28 @@ function topCounts<T extends string>(items: T[], limit: number) {
     .slice(0, limit);
 }
 
-export function buildSentimentInsightReport(events: SentimentEvent[], recommendations: SentimentRecommendation[]): SentimentInsightReport {
+export function buildSentimentInsightReport(events: SentimentEvent[], linkedStocks: SentimentLinkedStock[]): SentimentInsightReport {
   const topCategories = topCounts(events.map((event) => event.category), 3).map(({ item, count }) => ({ category: item, count }));
   const topIndustries = topCounts(events.flatMap((event) => event.industries), 5).map(({ item, count }) => ({ industry: item, count }));
-  const longIdeas = recommendations.filter((item) => item.direction === "利好").slice(0, 5);
+  const topLinkedStocks = linkedStocks.slice(0, 5);
   const riskEvents = events.filter((event) => event.direction === "利空" || event.category === "风险负面");
-  const strongest = longIdeas[0];
+  const strongest = topLinkedStocks[0];
   return {
-    title: "舆情驱动选股洞察",
+    title: "舆情关联股票洞察",
     conclusion: strongest
-      ? `当前高价值事件集中在${topIndustries[0]?.industry ?? "核心行业"}，${strongest.stock.name}因${strongest.events[0].category}事件获得最高综合分。`
-      : "当前筛选条件下没有形成明确的舆情交易线索。",
+      ? `当前高价值事件集中在${topIndustries[0]?.industry ?? "核心行业"}，${strongest.stock.name}与${strongest.events[0].category}事件存在${strongest.relationLevel}关联。`
+      : "当前筛选条件下没有形成明确的股票关联关系。",
     eventCount: events.length,
     topCategories,
     topIndustries,
-    longIdeas,
+    linkedStocks: topLinkedStocks,
     riskEvents,
     validationPoints: [
       "核对事件是否来自公告、政策原文或多家权威媒体交叉确认。",
       "观察事件后 1-3 个交易日成交额、换手率和相对强弱是否同步放大。",
-      "结合估值分位、业绩质量和行业景气度，剔除纯题材脉冲。",
-      "对利空事件设置止损或观察清单，避免把短期风险误判为低估机会。"
+      "当前列表只表达新闻与股票的关联关系，不构成买入、卖出或持仓建议。",
+      "对利空事件单独核查公告原文，避免把短期风险误判为机会。"
     ]
   };
 }
+

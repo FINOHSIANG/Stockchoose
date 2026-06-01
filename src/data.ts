@@ -263,26 +263,18 @@ const codesByIndex = (indexName: string) =>
   STOCKS.filter((stock) => stock.indexes.includes(indexName)).map((stock) => stock.code);
 
 export const SYSTEM_POOLS: StockPool[] = [
-  { id: "all", name: "全部股票", type: "system", codes: STOCKS.map((stock) => stock.code), description: "本地样本全市场。" },
-  { id: "hs300", name: "沪深300", type: "system", codes: codesByIndex("沪深300"), description: "沪深300样本。" },
-  { id: "zz500", name: "中证500", type: "system", codes: codesByIndex("中证500"), description: "中证500样本。" },
-  { id: "cyb", name: "创业板", type: "system", codes: codesByIndex("创业板指"), description: "创业板样本。" },
-  { id: "kcb50", name: "科创50", type: "system", codes: codesByIndex("科创50"), description: "科创板样本。" },
-  { id: "bse50", name: "北证50", type: "system", codes: codesByIndex("北证50"), description: "北交所样本。" },
-  { id: "dividend", name: "高股息样本", type: "system", codes: codesByIndex("高股息"), description: "偏红利资产。" },
+  { id: "all", name: "全部股票", type: "system", codes: STOCKS.map((stock) => stock.code), description: "真实数据接入后展示全市场股票。" },
+  { id: "hs300", name: "沪深300", type: "system", codes: codesByIndex("沪深300"), description: "真实数据接入后按指数成分展示。" },
+  { id: "zz500", name: "中证500", type: "system", codes: codesByIndex("中证500"), description: "真实数据接入后按指数成分展示。" },
+  { id: "cyb", name: "创业板", type: "system", codes: codesByIndex("创业板指"), description: "真实数据接入后按板块展示。" },
+  { id: "kcb50", name: "科创50", type: "system", codes: codesByIndex("科创50"), description: "真实数据接入后按板块展示。" },
+  { id: "bse50", name: "北证50", type: "system", codes: codesByIndex("北证50"), description: "真实数据接入后按板块展示。" },
+  { id: "dividend", name: "高股息", type: "system", codes: codesByIndex("高股息"), description: "真实数据接入后按红利特征展示。" },
   { id: "techGrowth", name: "科技成长", type: "system", codes: STOCKS.filter((stock) => ["电子", "计算机", "通信"].includes(stock.industry1)).map((stock) => stock.code), description: "电子、计算机、通信。" },
-  { id: "qualityValue", name: "质量价值", type: "system", codes: STOCKS.filter((stock) => stock.metrics.roe > 12 && stock.metrics.pe < 28).map((stock) => stock.code), description: "ROE较高且估值适中的样本。" }
+  { id: "qualityValue", name: "质量价值", type: "system", codes: STOCKS.filter((stock) => stock.metrics.roe > 12 && stock.metrics.pe < 28).map((stock) => stock.code), description: "真实财务数据接入后按质量和估值筛选。" }
 ];
 
-export const SAMPLE_ASSETS = [
-  { id: "strategy-quality", name: "质量价值轮动", type: "策略" as const },
-  { id: "strategy-growth", name: "成长动量组合", type: "策略" as const },
-  { id: "strategy-dividend", name: "高股息防御", type: "策略" as const },
-  { id: "510300", name: "沪深300ETF", type: "ETF" as const },
-  { id: "510500", name: "中证500ETF", type: "ETF" as const },
-  { id: "159915", name: "创业板ETF", type: "ETF" as const },
-  { id: "588000", name: "科创50ETF", type: "ETF" as const }
-];
+export const SAMPLE_ASSETS: Array<{ id: string; name: string; type: "策略" | "ETF" }> = [];
 
 export const INDEX_OPTIONS = ["全部", "沪深300", "中证500", "创业板指", "科创50", "北证50", "高股息"];
 export const BOARD_OPTIONS = ["全部", "主板", "创业板", "科创板", "北交所"];

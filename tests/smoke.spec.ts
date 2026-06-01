@@ -20,6 +20,23 @@ test("stock strategy workstation core flows", async ({ page }) => {
       ])
     });
   });
+  await page.route(/\/gdelt-news\/doc\/doc\?/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*" },
+      body: JSON.stringify({
+        articles: [
+          {
+            url: "https://mock.news/maotai-risk",
+            title: "贵州茅台、五粮液高端白酒批价波动，渠道库存风险警示",
+            seendate: "2026-05-30T11:00:00Z",
+            domain: "mock.news"
+          }
+        ]
+      })
+    });
+  });
 
   await page.goto("/");
   await expect(page.getByText("策略管理")).toBeVisible();
@@ -54,14 +71,16 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.locator(".primary-nav").getByRole("button", { name: "舆情", exact: true }).click();
   await expect(page.getByRole("heading", { name: "舆情选股" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "事件雷达" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "推荐关联股票" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "关联股票" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "深度洞察报告" })).toBeVisible();
+  await page.getByRole("button", { name: "手动刷新" }).click();
+  await expect(page.getByText("高端白酒批价波动").first()).toBeVisible();
   await page.getByLabel("事件类型").selectOption("风险负面");
   await page.getByLabel("定点行业").selectOption("食品饮料");
   await page.getByLabel("重大程度").selectOption("重大");
   await expect(page.getByText("命中行业")).toBeVisible();
   await expect(page.getByText("重大事件")).toBeVisible();
-  await expect(page.getByText("高端白酒批价波动")).toBeVisible();
+  await expect(page.getByText("高端白酒批价波动").first()).toBeVisible();
   await page.locator(".primary-nav").getByRole("button", { name: "策略", exact: true }).click();
 
   await page.getByRole("button", { name: "交易模型" }).click();
@@ -128,7 +147,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText(/AKShare\/AKTools/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();
   await expect(page.getByText(/开源数据同步完成/)).toBeVisible();
-  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(page.getByText("2 / 2").first()).toBeVisible();
 
   await expect(page.getByRole("heading", { name: "新闻源接口管理" })).toBeVisible();
   await expect(page.getByText("本地舆情样本").first()).toBeVisible();

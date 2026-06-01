@@ -22,7 +22,6 @@ export const LOCAL_SAMPLE_PROVIDER = "本地模拟数据";
 export const AKSHARE_AKTOOLS_PROVIDER = "AKShare / AKTools 免费开源数据";
 
 export const infoSourceProviderOptions = [
-  { label: LOCAL_SAMPLE_PROVIDER, value: LOCAL_SAMPLE_PROVIDER, defaultBaseUrl: "http://127.0.0.1:9000/api" },
   { label: AKSHARE_AKTOOLS_PROVIDER, value: AKSHARE_AKTOOLS_PROVIDER, defaultBaseUrl: "http://127.0.0.1:8080/api/public" },
   { label: "聚宽 JQData", value: "聚宽 JQData", defaultBaseUrl: "https://api.example.com/jqdata" },
   { label: "Tushare Pro", value: "Tushare Pro", defaultBaseUrl: "https://api.example.com/tushare" },
@@ -38,8 +37,8 @@ export const sourceModuleLabels: Array<{ key: SourceModuleKey; label: string; de
 ];
 
 export const defaultInfoSourceSettings: InfoSourceSettings = {
-  provider: LOCAL_SAMPLE_PROVIDER,
-  baseUrl: "http://127.0.0.1:9000/api",
+  provider: AKSHARE_AKTOOLS_PROVIDER,
+  baseUrl: "http://127.0.0.1:8080/api/public",
   apiToken: "",
   timeoutSeconds: 15,
   refreshInterval: 5,
@@ -52,12 +51,16 @@ export const defaultInfoSourceSettings: InfoSourceSettings = {
 };
 
 export function ensureInfoSourceSettings(settings: Partial<InfoSourceSettings> | null | undefined): InfoSourceSettings {
+  const migratedSettings =
+    !settings || settings.provider === LOCAL_SAMPLE_PROVIDER
+      ? defaultInfoSourceSettings
+      : settings;
   return {
     ...defaultInfoSourceSettings,
-    ...(settings ?? {}),
+    ...migratedSettings,
     modules: {
       ...defaultInfoSourceSettings.modules,
-      ...(settings?.modules ?? {})
+      ...(migratedSettings?.modules ?? {})
     }
   };
 }
@@ -100,10 +103,10 @@ export async function testInfoSourceConnection(
 
   if (isLocalProvider(settings)) {
     return {
-      ok: true,
+      ok: false,
       checkedAt,
-      message: "连接检测通过",
-      details: `本地样本数据可用，已启用 ${enabledSourceModules(settings).length} 个数据模块`
+      message: "连接检测失败",
+      details: "本地模拟数据已停用，请接入 AKShare/AKTools 或真实数据接口"
     };
   }
 

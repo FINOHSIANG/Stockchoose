@@ -12,7 +12,19 @@ export function loadLocal<T>(name: string, fallback: T): T {
 }
 
 export function saveLocal<T>(name: string, value: T) {
-  localStorage.setItem(key(name), JSON.stringify(value));
+  try {
+    localStorage.setItem(key(name), JSON.stringify(value));
+  } catch {
+    // Full-market quote snapshots can exceed browser storage quota; keep the current session usable.
+  }
+}
+
+export function removeLocal(name: string) {
+  try {
+    localStorage.removeItem(key(name));
+  } catch {
+    // Ignore storage cleanup failures; the app should still render with empty runtime state.
+  }
 }
 
 export function uid(prefix = "id") {

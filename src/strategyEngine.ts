@@ -10,6 +10,7 @@ import type {
   StockPool,
   StrategyConfig
 } from "./types";
+import { normalizeStockCodeKey, stockCodeCandidates } from "./stockIdentity";
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -120,6 +121,10 @@ function poolCodes(poolId: string, pools: StockPool[]): string[] {
     return Array.from(source).filter((code) => !target.has(code));
   }
   return Array.from(new Set([...source, ...target]));
+}
+
+function poolHasStock(codeSet: Set<string>, stock: Stock) {
+  return stockCodeCandidates(stock).some((code) => codeSet.has(normalizeStockCodeKey(code)));
 }
 
 function applySelector(strategy: StrategyConfig, stock: Stock) {
@@ -267,11 +272,11 @@ function applyWeights(rows: SelectionRow[], strategy: StrategyConfig) {
 }
 
 export function screenStocks(strategy: StrategyConfig, stocks: Stock[], pools: StockPool[], factors: Factor[]): SelectionRow[] {
-  const primaryCodes = new Set(poolCodes(strategy.poolId, pools));
-  const hotCodes = strategy.hotPoolId === "all" ? primaryCodes : new Set(poolCodes(strategy.hotPoolId, pools));
+  const primaryCodes = new Set(poolCodes(strategy.poolId, pools).map(normalizeStockCodeKey));
+  const hotCodes = strategy.hotPoolId === "all" ? primaryCodes : new Set(poolCodes(strategy.hotPoolId, pools).map(normalizeStockCodeKey));
   const universe = stocks
-    .filter((stock) => primaryCodes.has(stock.code))
-    .filter((stock) => hotCodes.has(stock.code) || strategy.hotPoolId === "all")
+    .filter((stock) => poolHasStock(primaryCodes, stock))
+    .filter((stock) => poolHasStock(hotCodes, stock) || strategy.hotPoolId === "all")
     .filter((stock) => applySelector(strategy, stock));
   const filtered = applyFilters(universe, strategy, factors);
   const scored = scoreRows(filtered, strategy.ranks, factors).sort((a, b) => b.score - a.score);
@@ -398,8 +403,8 @@ export function runBacktest(
 }
 
 export function rankingAnalysis(strategy: StrategyConfig, stocks: Stock[], pools: StockPool[], factors: Factor[]): RankingRow[] {
-  const codes = new Set(poolCodes(strategy.poolId, pools));
-  const universe = stocks.filter((stock) => codes.has(stock.code)).filter((stock) => applySelector(strategy, stock));
+  const codes = new Set(poolCodes(strategy.poolId, pools).map(normalizeStockCodeKey));
+  const universe = stocks.filter((stock) => poolHasStock(codes, stock)).filter((stock) => applySelector(strategy, stock));
   const rows = scoreRows(
     universe.map((stock) => ({ stock, passedFilters: 0 })),
     strategy.ranks,

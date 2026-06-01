@@ -27,12 +27,29 @@ describe("integrationServices", () => {
     expect(validateInfoSourceSettings(settings)).toEqual(expect.arrayContaining(["接口地址必须以 http:// 或 https:// 开头", "至少启用一个数据模块"]));
   });
 
-  it("checks the built-in local provider without network access", async () => {
-    const result = await testInfoSourceConnection(defaultInfoSourceSettings);
+  it("uses AKShare/AKTools as the default real data provider", () => {
+    expect(defaultInfoSourceSettings.provider).toBe(AKSHARE_AKTOOLS_PROVIDER);
+    expect(defaultInfoSourceSettings.baseUrl).toBe("http://127.0.0.1:8080/api/public");
+  });
 
-    expect(result.ok).toBe(true);
-    expect(result.message).toBe("连接检测通过");
-    expect(result.details).toContain("本地样本数据可用");
+  it("migrates the disabled local provider to AKShare/AKTools", () => {
+    const settings = ensureInfoSourceSettings({ provider: "本地模拟数据", baseUrl: "http://127.0.0.1:9000/api" });
+
+    expect(settings.provider).toBe(AKSHARE_AKTOOLS_PROVIDER);
+    expect(settings.baseUrl).toBe("http://127.0.0.1:8080/api/public");
+  });
+
+  it("checks the default real provider through a network contract", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([{ 日期: "2024-05-06", 收盘: 10.12 }]), { status: 200 }));
+    const failureMock = vi.fn<typeof fetch>(async () => new Response("not found", { status: 404 }));
+    const result = await testInfoSourceConnection(defaultInfoSourceSettings, failureMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toBe("连接检测失败");
+
+    const mocked = await testInfoSourceConnection(defaultInfoSourceSettings, fetchMock);
+    expect(mocked.ok).toBe(true);
+    expect(mocked.details).toContain("AKShare/AKTools");
   });
 
   it("checks the AKShare AKTools provider through a real endpoint contract", async () => {
