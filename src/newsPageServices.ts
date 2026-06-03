@@ -329,11 +329,6 @@ export async function fetchNewsArticlesFromSources(
   };
 }
 
-
-// --- Sample data ---
-
-export const sampleNewsArticles: NewsArticle[] = [];
-
 // --- Utility functions ---
 
 export function filterNewsArticles(articles: NewsArticle[], filters: NewsFilters): NewsArticle[] {

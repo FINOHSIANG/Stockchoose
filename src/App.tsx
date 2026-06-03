@@ -28,11 +28,8 @@ import {
   EXCHANGE_OPTIONS,
   FACTORS,
   INDEX_OPTIONS,
-  INDUSTRY_OPTIONS,
   PROPERTY_OPTIONS,
-  REGION_OPTIONS,
-  SAMPLE_ASSETS,
-  STOCKS
+  SAMPLE_ASSETS
 } from "./data";
 import {
   createCustomFactor,
@@ -375,7 +372,7 @@ type MainSection = "strategy" | "sentiment" | "valuation" | "trade" | "settings"
 type StockReference = Pick<Stock, "code" | "name">;
 type StockInfoTarget = StockReference & { stock?: Stock };
 type SortDirection = "asc" | "desc";
-type ValuationDataSource = "none" | "tencentQuote";
+type ValuationDataSource = "none" | "tencentQuote" | "akshare";
 type ValuationSortKey = "currentPrice" | "fairValue" | "marketCap" | "fairMarketCap" | "safetyMargin" | "governanceScore" | "action";
 
 const stockKlinePeriodOptions: Array<{ value: StockKlinePeriod; label: string }> = [
@@ -1494,6 +1491,21 @@ function App() {
   const [customFactorDraft, setCustomFactorDraft] = useState({ name: "质量成长合成", formula: "qualityScore * 0.6 + revenueGrowth * 0.4 - pe * 0.2" });
 
   useEffect(() => {
+    const handleClickFeedback = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target.closest("button") : null;
+      if (!(target instanceof HTMLButtonElement) || target.disabled) return;
+      target.classList.remove("button-click-feedback");
+      window.requestAnimationFrame(() => {
+        target.classList.add("button-click-feedback");
+        window.setTimeout(() => target.classList.remove("button-click-feedback"), 360);
+      });
+    };
+
+    document.addEventListener("click", handleClickFeedback);
+    return () => document.removeEventListener("click", handleClickFeedback);
+  }, []);
+
+  useEffect(() => {
     saveLocal("draftStrategy", strategy);
     saveLocal("savedStrategies", savedStrategies);
     saveLocal("infoSourceSettings", infoSourceSettings);
@@ -1514,6 +1526,8 @@ function App() {
     const list = stocks.filter((stock) => strategy.industry1 === "全部" || stock.industry1 === strategy.industry1).map((stock) => stock.industry2);
     return ["全部", ...Array.from(new Set(list))];
   }, [stocks, strategy.industry1]);
+  const availableIndustry1 = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.industry1).filter(Boolean))).sort()], [stocks]);
+  const availableRegions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.region).filter(Boolean))).sort()], [stocks]);
   const visibleFactors = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     const groupKeys = guornFactorKeysByGroup[activeFactorGroup];
@@ -1742,6 +1756,9 @@ function App() {
       setOpenSourceSummary(result.summary);
       saveLocal("openSourceStocks", result.stocks);
       saveLocal("openSourceDataSummary", result.summary);
+      setValuationDataSource("akshare");
+      saveLocal<ValuationDataSource>("valuationDataSource", "akshare");
+      setValuationRealDataStatus(result.details);
       setResult(null);
       setRankRows([]);
       setSelectionRows([]);
@@ -2002,7 +2019,9 @@ function App() {
                       setConditionTab={setConditionTab}
                       query={query}
                       setQuery={setQuery}
+                      availableIndustry1={availableIndustry1}
                       availableIndustry2={availableIndustry2}
+                      availableRegions={availableRegions}
                       onPickFactor={onPickFactor}
                       updateFilter={updateFilter}
                       updateRank={updateRank}
@@ -2042,7 +2061,10 @@ function App() {
                 <ValuationWorkspace
                   stocks={stocks}
                   realDataStatus={valuationRealDataStatus}
-                  isRealDataReady={valuationDataSource === "tencentQuote" && stocks.some((stock) => stock.metrics.realQuoteSource === 1)}
+                  isRealDataReady={
+                    valuationDataSource !== "none" &&
+                    stocks.some((stock) => stock.metrics.realQuoteSource === 1 || stock.metrics.openSourceMarketSource === 1 || stock.metrics.realAnnualReportSource === 1)
+                  }
                   onSyncRealData={syncValuationRealData}
                 />
               </main>
@@ -2264,7 +2286,9 @@ function ScreenStep({
   setConditionTab,
   query,
   setQuery,
+  availableIndustry1,
   availableIndustry2,
+  availableRegions,
   onPickFactor,
   updateFilter,
   updateRank,
@@ -2282,7 +2306,9 @@ function ScreenStep({
   setConditionTab: (tab: "filter" | "rank") => void;
   query: string;
   setQuery: (query: string) => void;
+  availableIndustry1: string[];
   availableIndustry2: string[];
+  availableRegions: string[];
   onPickFactor: (factorKey: string) => void;
   updateFilter: (id: string, patch: Partial<FilterCondition>) => void;
   updateRank: (id: string, patch: Partial<RankCondition>) => void;
@@ -2337,7 +2363,7 @@ function ScreenStep({
             options={["申万 2014", "申万 2021"]}
             onChange={(industryStandard) => patchStrategy({ industryStandard: industryStandard as StrategyConfig["industryStandard"] })}
           />
-          <SelectField label="一级行业：" value={strategy.industry1} options={INDUSTRY_OPTIONS} onChange={(industry1) => patchStrategy({ industry1, industry2: "全部" })} />
+          <SelectField label="一级行业：" value={strategy.industry1} options={availableIndustry1} onChange={(industry1) => patchStrategy({ industry1, industry2: "全部" })} />
           <SelectField label="二级行业：" value={strategy.industry2} options={availableIndustry2} onChange={(industry2) => patchStrategy({ industry2 })} />
           <SelectField
             label="ST股票："
@@ -2346,7 +2372,7 @@ function ScreenStep({
             onChange={(stMode) => patchStrategy({ stMode: stMode as StrategyConfig["stMode"] })}
           />
           <SelectField label="交易所：" value={strategy.exchange} options={EXCHANGE_OPTIONS} onChange={(exchange) => patchStrategy({ exchange })} />
-          <SelectField label="地域板块：" value={strategy.region} options={REGION_OPTIONS} onChange={(region) => patchStrategy({ region })} />
+          <SelectField label="地域板块：" value={strategy.region} options={availableRegions} onChange={(region) => patchStrategy({ region })} />
           <SelectField label="企业性质：" value={strategy.property} options={PROPERTY_OPTIONS} onChange={(property) => patchStrategy({ property })} />
           <SelectField label="融资融券：" value={strategy.marginFlag} options={["全部", "融资融券", "非融资融券"]} onChange={(marginFlag) => patchStrategy({ marginFlag })} />
           <SelectField
@@ -4985,11 +5011,11 @@ function ConditionTradePanel({
             </label>
             <label>
               <span>证券代码</span>
-              <input defaultValue={first ? displayStockCode(first.stock) : "SH600519"} />
+              <input defaultValue={first ? displayStockCode(first.stock) : ""} placeholder="接入真实选股结果后自动填入" />
             </label>
             <label>
               <span>证券名称</span>
-              <input defaultValue={first?.stock.name ?? "贵州茅台"} />
+              <input defaultValue={first?.stock.name ?? ""} placeholder="接入真实选股结果后自动填入" />
             </label>
             <label>
               <span>监控价格</span>

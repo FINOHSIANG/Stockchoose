@@ -8,6 +8,9 @@ export interface OpenSourceDataSummary {
   matchedRows: number;
   sourceRows: number;
   stockCount: number;
+  financeMatchedRows?: number;
+  financeSourceRows?: number;
+  valuationReadyRows?: number;
   details: string;
 }
 
@@ -23,6 +26,19 @@ export interface OpenSourceSyncResult {
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type AkShareRow = Record<string, unknown>;
 
+interface AkShareRowsFetchResult {
+  rows: AkShareRow[];
+  reportDate?: string;
+}
+
+interface AkShareFinancialRows {
+  performanceRows: AkShareRow[];
+  incomeRows: AkShareRow[];
+  balanceRows: AkShareRow[];
+  cashFlowRows: AkShareRow[];
+  reportDate?: string;
+}
+
 export const defaultOpenSourceDataSummary: OpenSourceDataSummary = {
   provider: "未接入真实数据",
   matchedRows: 0,
@@ -31,29 +47,50 @@ export const defaultOpenSourceDataSummary: OpenSourceDataSummary = {
   details: "尚未同步真实数据"
 };
 
+const normalizeFieldName = (value: string) => value.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+
+const rowValue = (row: AkShareRow, keys: string[]) => {
+  const exact = keys.map((key) => row[key]).find((item) => item !== undefined && item !== null && String(item).trim() !== "");
+  if (exact !== undefined && exact !== null) return exact;
+
+  const normalizedKeys = keys.map(normalizeFieldName).filter(Boolean);
+  const matched = Object.entries(row).find(([key, item]) => {
+    if (item === undefined || item === null || String(item).trim() === "") return false;
+    const normalizedKey = normalizeFieldName(key);
+    return normalizedKeys.some((target) => normalizedKey === target || normalizedKey.includes(target));
+  });
+  return matched?.[1];
+};
+
 const textValue = (row: AkShareRow, keys: string[]) => {
-  const value = keys.map((key) => row[key]).find((item) => item !== undefined && item !== null && String(item).trim() !== "");
+  const value = rowValue(row, keys);
   return value === undefined || value === null ? "" : String(value).trim();
 };
 
-const numberValue = (row: AkShareRow, keys: string[]) => {
-  const raw = keys.map((key) => row[key]).find((item) => item !== undefined && item !== null && String(item).trim() !== "");
-  if (raw === undefined || raw === null) return undefined;
-  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
-  const normalized = String(raw).replace(/[,，%]/g, "").trim();
+const parseNumber = (value: unknown) => {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  const normalized = String(value).replace(/[,，%％亿元萬万]/g, "").trim();
   if (!normalized || normalized === "-" || normalized === "--") return undefined;
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
-const round = (value: number, precision = 2) => {
-  const scale = 10 ** precision;
-  return Math.round(value * scale) / scale;
-};
+const numberValue = (row: AkShareRow, keys: string[]) => parseNumber(rowValue(row, keys));
 
 const amountToYi = (value: number | undefined) => {
   if (value === undefined) return undefined;
   return value > 100000 ? value / 100000000 : value;
+};
+
+const amountValueYi = (row: AkShareRow, keys: string[]) => {
+  const raw = rowValue(row, keys);
+  const value = parseNumber(raw);
+  if (value === undefined) return undefined;
+  const text = typeof raw === "string" ? raw : "";
+  if (text.includes("万") || text.includes("萬")) return value / 10000;
+  if (text.includes("亿")) return value;
+  return amountToYi(value);
 };
 
 const volumeToWanShou = (value: number | undefined) => {
@@ -61,13 +98,65 @@ const volumeToWanShou = (value: number | undefined) => {
   return value > 10000 ? value / 10000 : value;
 };
 
+const round = (value: number, precision = 2) => {
+  const scale = 10 ** precision;
+  return Math.round(value * scale) / scale;
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
 const withMetric = (metrics: Record<string, number>, key: string, value: number | undefined, precision = 2) => {
   if (value === undefined || !Number.isFinite(value)) return metrics;
   return { ...metrics, [key]: round(value, precision) };
 };
 
+const firstDefined = (...values: Array<number | undefined>) => values.find((value) => value !== undefined && Number.isFinite(value));
+
+const sumDefined = (values: Array<number | undefined>) => {
+  const validValues = values.filter((value): value is number => value !== undefined && Number.isFinite(value));
+  if (!validValues.length) return undefined;
+  return validValues.reduce((sum, value) => sum + value, 0);
+};
+
+const safeRatio = (numerator: number | undefined, denominator: number | undefined, scale = 100) => {
+  if (numerator === undefined || denominator === undefined || !Number.isFinite(numerator) || !Number.isFinite(denominator) || Math.abs(denominator) < 0.01) {
+    return undefined;
+  }
+  return numerator / denominator * scale;
+};
+
+const codeFromAkShareRow = (row: AkShareRow) =>
+  textValue(row, ["股票代码", "证券代码", "代码", "SECURITY_CODE", "SECURITYCODE", "code", "symbol", "浠ｇ爜"]).replace(/\D/g, "").padStart(6, "0").slice(-6);
+
+function rowsByCode(rows: AkShareRow[]) {
+  const map = new Map<string, AkShareRow>();
+  rows.forEach((row) => {
+    const code = codeFromAkShareRow(row);
+    if (code && !map.has(code)) map.set(code, row);
+  });
+  return map;
+}
+
+function valuationReady(stock: Stock) {
+  return [
+    "price",
+    "marketCap",
+    "eps",
+    "bps",
+    "revenue",
+    "netProfit",
+    "operatingCashflow",
+    "totalAssets",
+    "totalLiabilities",
+    "investmentAssets",
+    "productionAssets",
+    "interestBearingDebt",
+    "nonInterestBearingDebt"
+  ].every((key) => Number.isFinite(stock.metrics[key]) && (["price", "marketCap", "totalAssets"].includes(key) ? stock.metrics[key] > 0 : true));
+}
+
 function stockShellFromAkShareRow(row: NonNullable<ReturnType<typeof normalizeAkShareSpotRow>>): Stock {
-  const exchange = row.code.startsWith("6") ? "沪市" : row.code.startsWith("8") || row.code.startsWith("4") ? "北交所" : "深市";
+  const exchange = row.code.startsWith("6") ? "沪市" : row.code.startsWith("8") || row.code.startsWith("4") || row.code.startsWith("9") ? "北交所" : "深市";
   const board = row.code.startsWith("688") ? "科创板" : row.code.startsWith("300") || row.code.startsWith("301") ? "创业板" : exchange === "北交所" ? "北交所" : "主板";
   return {
     code: row.code,
@@ -88,22 +177,22 @@ function stockShellFromAkShareRow(row: NonNullable<ReturnType<typeof normalizeAk
 }
 
 export function normalizeAkShareSpotRow(row: AkShareRow) {
-  const code = textValue(row, ["代码", "code", "symbol"]).replace(/\D/g, "").padStart(6, "0").slice(-6);
-  const name = textValue(row, ["名称", "name"]);
+  const code = codeFromAkShareRow(row);
+  const name = textValue(row, ["名称", "股票简称", "简称", "name", "鍚嶇О"]);
   if (!code) return null;
   return {
     code,
     name,
-    price: numberValue(row, ["最新价", "收盘", "close", "price", "latest"]),
-    pctChange: numberValue(row, ["涨跌幅", "pctChange", "changePercent"]),
-    amountYi: amountToYi(numberValue(row, ["成交额", "amount", "turnoverAmount"])),
-    volumeWanShou: volumeToWanShou(numberValue(row, ["成交量", "volume"])),
-    turnover: numberValue(row, ["换手率", "turnover", "turnoverRate"]),
-    marketCapYi: amountToYi(numberValue(row, ["总市值", "marketCap", "totalMarketCap"])),
-    floatMarketCapYi: amountToYi(numberValue(row, ["流通市值", "floatMarketCap", "circulatingMarketCap"])),
-    pe: numberValue(row, ["市盈率-动态", "市盈率", "pe", "peDynamic"]),
-    pb: numberValue(row, ["市净率", "pb"]),
-    amplitude: numberValue(row, ["振幅", "amplitude"])
+    price: numberValue(row, ["最新价", "收盘", "close", "price", "latest", "鏈€鏂颁环", "鏀剁洏"]),
+    pctChange: numberValue(row, ["涨跌幅", "pctChange", "changePercent", "娑ㄨ穼骞?"]),
+    amountYi: amountValueYi(row, ["成交额", "amount", "turnoverAmount", "鎴愪氦棰?"]),
+    volumeWanShou: volumeToWanShou(numberValue(row, ["成交量", "volume", "鎴愪氦閲?"])),
+    turnover: numberValue(row, ["换手率", "turnover", "turnoverRate", "鎹㈡墜鐜?"]),
+    marketCapYi: amountValueYi(row, ["总市值", "marketCap", "totalMarketCap", "鎬诲競鍊?"]),
+    floatMarketCapYi: amountValueYi(row, ["流通市值", "floatMarketCap", "circulatingMarketCap", "娴侀€氬競鍊?"]),
+    pe: numberValue(row, ["市盈率-动态", "市盈率", "pe", "peDynamic", "甯傜泩鐜?鍔ㄦ€?", "甯傜泩鐜?"]),
+    pb: numberValue(row, ["市净率", "pb", "甯傚噣鐜?"]),
+    amplitude: numberValue(row, ["振幅", "amplitude", "鎸箙"])
   };
 }
 
@@ -134,6 +223,7 @@ export function mergeAkShareSpotRows(baseStocks: Stock[], rows: AkShareRow[]) {
     metrics = withMetric(metrics, "min15Momentum", row.pctChange === undefined ? undefined : row.pctChange / 4);
     metrics = withMetric(metrics, "intradayStrength", row.pctChange === undefined ? undefined : Math.max(0, Math.min(100, 50 + row.pctChange * 4)));
     metrics = withMetric(metrics, "realQuoteSource", 1, 0);
+    metrics = withMetric(metrics, "openSourceMarketSource", 1, 0);
 
     return {
       ...stock,
@@ -146,6 +236,191 @@ export function mergeAkShareSpotRows(baseStocks: Stock[], rows: AkShareRow[]) {
     stocks,
     matchedRows,
     sourceRows: normalizedRows.length
+  };
+}
+
+const incomeRevenueKeys = ["营业总收入", "营业收入", "营收", "OPERATE_INCOME", "TOTAL_OPERATE_INCOME"];
+const incomeNetProfitKeys = ["归属于母公司股东的净利润", "归母净利润", "净利润", "NETPROFIT", "PARENT_NETPROFIT"];
+const incomeCostKeys = ["营业总成本", "营业成本", "OPERATE_COST", "TOTAL_OPERATE_COST"];
+const cashFlowKeys = ["经营活动产生的现金流量净额", "经营现金流量净额", "经营现金流", "NETCASH_OPERATE", "NET_CASH_FLOWS_OPERATE"];
+const totalAssetsKeys = ["资产总计", "总资产", "TOTAL_ASSETS"];
+const totalLiabilitiesKeys = ["负债合计", "总负债", "TOTAL_LIABILITIES"];
+const inventoryKeys = ["存货", "INVENTORY"];
+const receivablesKeys = ["应收账款", "ACCOUNTS_RECE"];
+const currentAssetsKeys = ["流动资产合计", "TOTAL_CURRENT_ASSETS"];
+const currentLiabilitiesKeys = ["流动负债合计", "TOTAL_CURRENT_LIAB"];
+const moneyAssetKeys = ["货币资金", "MONETARYFUNDS"];
+const tradingAssetKeys = ["交易性金融资产", "TRADING_FINANCIAL_ASSETS"];
+const availableSaleAssetKeys = ["可供出售金融资产", "AVAILABLE_SALE_FINASSET"];
+const longEquityAssetKeys = ["长期股权投资", "LONG_EQUITY_INVEST"];
+const shortDebtKeys = ["短期借款", "SHORT_LOAN"];
+const longDebtKeys = ["长期借款", "LONG_LOAN"];
+const bondDebtKeys = ["应付债券", "BOND_PAYABLE"];
+const nonCurrentDebtDueKeys = ["一年内到期的非流动负债", "NONCURRENT_LIAB_1YEAR"];
+
+function mergeFinancialMetrics(stock: Stock, performance: AkShareRow | undefined, income: AkShareRow | undefined, balance: AkShareRow | undefined, cashFlow: AkShareRow | undefined) {
+  const revenue = firstDefined(amountValueYi(income ?? {}, incomeRevenueKeys), amountValueYi(performance ?? {}, incomeRevenueKeys));
+  const netProfit = firstDefined(amountValueYi(income ?? {}, incomeNetProfitKeys), amountValueYi(performance ?? {}, incomeNetProfitKeys));
+  const operatingCashflow = amountValueYi(cashFlow ?? {}, cashFlowKeys);
+  const totalAssets = amountValueYi(balance ?? {}, totalAssetsKeys);
+  const totalLiabilities = amountValueYi(balance ?? {}, totalLiabilitiesKeys);
+  const inventory = amountValueYi(balance ?? {}, inventoryKeys);
+  const receivables = amountValueYi(balance ?? {}, receivablesKeys);
+  const currentAssets = amountValueYi(balance ?? {}, currentAssetsKeys);
+  const currentLiabilities = amountValueYi(balance ?? {}, currentLiabilitiesKeys);
+  const operatingCost = firstDefined(amountValueYi(income ?? {}, incomeCostKeys), amountValueYi(performance ?? {}, incomeCostKeys));
+  const netAssets = totalAssets !== undefined && totalLiabilities !== undefined ? totalAssets - totalLiabilities : undefined;
+  const shareBase = stock.metrics.marketCap && stock.metrics.price ? stock.metrics.marketCap / Math.max(stock.metrics.price, 0.01) : undefined;
+  const eps = firstDefined(numberValue(performance ?? {}, ["基本每股收益", "每股收益", "EPS"]), shareBase ? safeRatio(netProfit, shareBase, 1) : undefined);
+  const bps = firstDefined(numberValue(performance ?? {}, ["每股净资产", "BPS"]), shareBase ? safeRatio(netAssets, shareBase, 1) : undefined);
+  const roe = firstDefined(numberValue(performance ?? {}, ["净资产收益率", "ROE"]), safeRatio(netProfit, netAssets));
+  const roa = firstDefined(numberValue(performance ?? {}, ["总资产收益率", "ROA"]), safeRatio(netProfit, totalAssets));
+  const grossMargin = firstDefined(numberValue(performance ?? {}, ["销售毛利率", "毛利率", "GROSS_PROFIT_RATIO"]), revenue !== undefined && operatingCost !== undefined ? safeRatio(revenue - operatingCost, revenue) : undefined);
+  const netMargin = firstDefined(numberValue(performance ?? {}, ["销售净利率", "净利率", "NET_PROFIT_RATIO"]), safeRatio(netProfit, revenue));
+  const revenueGrowth = numberValue(performance ?? {}, ["营业总收入同比增长", "营业收入同比增长", "营收同比", "营业收入增长率", "TOTAL_OPERATE_INCOME_YOY"]);
+  const profitGrowth = numberValue(performance ?? {}, ["净利润同比增长", "归母净利润同比增长", "净利润增长率", "NETPROFIT_YOY"]);
+  const debtRatio = firstDefined(numberValue(performance ?? {}, ["资产负债率", "DEBT_ASSET_RATIO"]), safeRatio(totalLiabilities, totalAssets));
+  const currentRatio = currentAssets !== undefined && currentLiabilities !== undefined ? safeRatio(currentAssets, currentLiabilities, 1) : undefined;
+  const assetTurnover = safeRatio(revenue, totalAssets, 1);
+  const investmentAssets = firstDefined(
+    amountValueYi(balance ?? {}, ["投资性资产", "INVESTMENT_ASSETS"]),
+    sumDefined([
+      amountValueYi(balance ?? {}, moneyAssetKeys),
+      amountValueYi(balance ?? {}, tradingAssetKeys),
+      amountValueYi(balance ?? {}, availableSaleAssetKeys),
+      amountValueYi(balance ?? {}, longEquityAssetKeys)
+    ])
+  );
+  const productionAssets = totalAssets !== undefined && investmentAssets !== undefined ? Math.max(totalAssets - investmentAssets, 0) : undefined;
+  const interestBearingDebt = firstDefined(
+    amountValueYi(balance ?? {}, ["有息负债", "INTEREST_BEARING_DEBT"]),
+    sumDefined([
+      amountValueYi(balance ?? {}, shortDebtKeys),
+      amountValueYi(balance ?? {}, longDebtKeys),
+      amountValueYi(balance ?? {}, bondDebtKeys),
+      amountValueYi(balance ?? {}, nonCurrentDebtDueKeys)
+    ])
+  );
+  const nonInterestBearingDebt = totalLiabilities !== undefined && interestBearingDebt !== undefined ? Math.max(totalLiabilities - interestBearingDebt, 0) : undefined;
+
+  let metrics = { ...stock.metrics };
+  metrics = withMetric(metrics, "revenue", revenue);
+  metrics = withMetric(metrics, "netProfit", netProfit);
+  metrics = withMetric(metrics, "operatingCashflow", operatingCashflow);
+  metrics = withMetric(metrics, "totalAssets", totalAssets);
+  metrics = withMetric(metrics, "totalLiabilities", totalLiabilities);
+  metrics = withMetric(metrics, "inventory", inventory);
+  metrics = withMetric(metrics, "receivables", receivables);
+  metrics = withMetric(metrics, "eps", eps);
+  metrics = withMetric(metrics, "bps", bps);
+  metrics = withMetric(metrics, "roe", roe);
+  metrics = withMetric(metrics, "roa", roa);
+  metrics = withMetric(metrics, "grossMargin", grossMargin);
+  metrics = withMetric(metrics, "netMargin", netMargin);
+  metrics = withMetric(metrics, "revenueGrowth", revenueGrowth);
+  metrics = withMetric(metrics, "profitGrowth", profitGrowth);
+  metrics = withMetric(metrics, "debtRatio", debtRatio);
+  metrics = withMetric(metrics, "currentRatio", currentRatio);
+  metrics = withMetric(metrics, "assetTurnover", assetTurnover);
+  metrics = withMetric(metrics, "investmentAssets", investmentAssets);
+  metrics = withMetric(metrics, "productionAssets", productionAssets);
+  metrics = withMetric(metrics, "interestBearingDebt", interestBearingDebt);
+  metrics = withMetric(metrics, "nonInterestBearingDebt", nonInterestBearingDebt);
+  metrics = withMetric(metrics, "qualityScore", roe !== undefined && netMargin !== undefined && debtRatio !== undefined ? clamp(roe * 1.5 + netMargin * 0.8 - debtRatio * 0.2 + 50, 0, 100) : undefined);
+
+  const hasReportData = [revenue, netProfit, operatingCashflow, totalAssets, totalLiabilities].some((value) => value !== undefined && Number.isFinite(value));
+  metrics = withMetric(metrics, "realAnnualReportSource", hasReportData ? 1 : undefined, 0);
+
+  return {
+    ...stock,
+    metrics
+  };
+}
+
+export function mergeAkShareFinancialRows(stocks: Stock[], rows: AkShareFinancialRows) {
+  const performanceByCode = rowsByCode(rows.performanceRows);
+  const incomeByCode = rowsByCode(rows.incomeRows);
+  const balanceByCode = rowsByCode(rows.balanceRows);
+  const cashFlowByCode = rowsByCode(rows.cashFlowRows);
+  let matchedRows = 0;
+
+  const mergedStocks = stocks.map((stock) => {
+    const code = marketDataCodeForStock(stock);
+    const performance = performanceByCode.get(stock.code) ?? performanceByCode.get(code);
+    const income = incomeByCode.get(stock.code) ?? incomeByCode.get(code);
+    const balance = balanceByCode.get(stock.code) ?? balanceByCode.get(code);
+    const cashFlow = cashFlowByCode.get(stock.code) ?? cashFlowByCode.get(code);
+    if (!performance && !income && !balance && !cashFlow) return stock;
+
+    const merged = mergeFinancialMetrics(stock, performance, income, balance, cashFlow);
+    if (merged.metrics.realAnnualReportSource === 1) matchedRows += 1;
+    return merged;
+  });
+
+  return {
+    stocks: mergedStocks,
+    matchedRows,
+    sourceRows: rows.performanceRows.length + rows.incomeRows.length + rows.balanceRows.length + rows.cashFlowRows.length,
+    reportDate: rows.reportDate
+  };
+}
+
+function rowsFromPayload(payload: unknown): AkShareRow[] {
+  if (Array.isArray(payload)) return payload.filter((row): row is AkShareRow => row && typeof row === "object" && !Array.isArray(row));
+  const data = (payload as { data?: unknown })?.data;
+  if (Array.isArray(data)) return data.filter((row): row is AkShareRow => row && typeof row === "object" && !Array.isArray(row));
+  return [];
+}
+
+async function fetchAkShareRows(baseUrl: string, endpoint: string, params: Record<string, string>, signal: AbortSignal, fetchImpl: FetchLike): Promise<AkShareRow[]> {
+  const query = new URLSearchParams(params).toString();
+  const url = `${baseUrl.replace(/\/$/, "")}/${endpoint}${query ? `?${query}` : ""}`;
+  const response = await fetchImpl(url, { method: "GET", signal });
+  if (!response.ok) return [];
+  return rowsFromPayload(await response.json());
+}
+
+function financialReportDateCandidates(now = new Date()) {
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const latestAnnualYear = month >= 5 ? year - 1 : year - 2;
+  return Array.from(
+    new Set([
+      `${latestAnnualYear}1231`,
+      month >= 5 ? `${year}0331` : "",
+      `${year - 1}0930`,
+      `${year - 1}0630`,
+      `${latestAnnualYear - 1}1231`
+    ].filter(Boolean))
+  );
+}
+
+async function fetchFirstFinancialRows(baseUrl: string, endpoint: string, signal: AbortSignal, fetchImpl: FetchLike): Promise<AkShareRowsFetchResult> {
+  for (const reportDate of financialReportDateCandidates()) {
+    try {
+      const rows = await fetchAkShareRows(baseUrl, endpoint, { date: reportDate }, signal, fetchImpl);
+      if (rows.length) return { rows, reportDate };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+    }
+  }
+  return { rows: [] };
+}
+
+async function fetchAkShareFinancialRows(baseUrl: string, signal: AbortSignal, fetchImpl: FetchLike): Promise<AkShareFinancialRows> {
+  const [performance, income, balance, cashFlow] = await Promise.all([
+    fetchFirstFinancialRows(baseUrl, "stock_yjbb_em", signal, fetchImpl),
+    fetchFirstFinancialRows(baseUrl, "stock_lrb_em", signal, fetchImpl),
+    fetchFirstFinancialRows(baseUrl, "stock_zcfz_em", signal, fetchImpl),
+    fetchFirstFinancialRows(baseUrl, "stock_xjll_em", signal, fetchImpl)
+  ]);
+
+  return {
+    performanceRows: performance.rows,
+    incomeRows: income.rows,
+    balanceRows: balance.rows,
+    cashFlowRows: cashFlow.rows,
+    reportDate: performance.reportDate ?? income.reportDate ?? balance.reportDate ?? cashFlow.reportDate
   };
 }
 
@@ -191,24 +466,9 @@ export async function syncOpenSourceMarketData(
 
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(settings.timeoutSeconds, 3) * 1000);
+  const baseUrl = settings.baseUrl.replace(/\/$/, "");
   try {
-    const response = await fetchImpl(`${settings.baseUrl.replace(/\/$/, "")}/stock_zh_a_spot_em`, {
-      method: "GET",
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      return {
-        ok: false,
-        checkedAt,
-        message: "开源数据同步失败",
-        details: `AKTools 返回 HTTP ${response.status}`,
-        stocks: baseStocks,
-        summary: { ...defaultOpenSourceDataSummary, provider: settings.provider, stockCount: baseStocks.length, details: "同步失败" }
-      };
-    }
-
-    const payload = await response.json();
-    const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : [];
+    const rows = await fetchAkShareRows(baseUrl, "stock_zh_a_spot_em", {}, controller.signal, fetchImpl);
     const merged = mergeAkShareSpotRows(baseStocks, rows);
     if (!merged.matchedRows) {
       return {
@@ -221,19 +481,32 @@ export async function syncOpenSourceMarketData(
       };
     }
 
+    const financial = settings.modules.finance
+      ? mergeAkShareFinancialRows(merged.stocks, await fetchAkShareFinancialRows(baseUrl, controller.signal, fetchImpl))
+      : { stocks: merged.stocks, matchedRows: 0, sourceRows: 0, reportDate: undefined };
+    const stocks = financial.stocks;
+    const valuationReadyRows = stocks.filter(valuationReady).length;
+    const financeDetail = settings.modules.finance
+      ? `；财报字段匹配 ${financial.matchedRows} 只，估值可用 ${valuationReadyRows} 只${financial.reportDate ? `，报告期 ${financial.reportDate}` : ""}`
+      : "";
+    const details = `匹配 ${merged.matchedRows}/${merged.sourceRows} 条 AKShare A 股实时行情${financeDetail}`;
+
     return {
       ok: true,
       checkedAt,
       message: "开源数据同步完成",
-      details: `匹配 ${merged.matchedRows}/${merged.sourceRows} 条 AKShare A 股实时行情`,
-      stocks: merged.stocks,
+      details,
+      stocks,
       summary: {
         provider: settings.provider,
         lastSyncAt: checkedAt,
         matchedRows: merged.matchedRows,
         sourceRows: merged.sourceRows,
-        stockCount: merged.stocks.length,
-        details: "AKShare A 股实时行情"
+        financeMatchedRows: financial.matchedRows,
+        financeSourceRows: financial.sourceRows,
+        valuationReadyRows,
+        stockCount: stocks.length,
+        details
       }
     };
   } catch (error) {

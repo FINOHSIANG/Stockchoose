@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { STOCKS } from "./data";
+import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { createDefaultStrategy } from "./storage";
 import type { SelectionRow } from "./types";
 import {

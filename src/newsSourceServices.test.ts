@@ -12,8 +12,9 @@ describe("newsSourceServices", () => {
   it("migrates missing news source settings with defaults", () => {
     const settings = ensureNewsSourceSettings(null);
 
-    expect(settings.sources.length).toBeGreaterThan(1);
-    expect(enabledNewsSources(settings).map((source) => source.provider)).toEqual(expect.arrayContaining(["本地舆情样本", "GDELT 2.1"]));
+    expect(settings.sources.length).toBeGreaterThanOrEqual(1);
+    expect(enabledNewsSources(settings).map((source) => source.provider)).toEqual(expect.arrayContaining(["GDELT 2.1"]));
+    expect(enabledNewsSources(settings).some((source) => source.provider === "本地舆情样本")).toBe(false);
     expect(enabledNewsSources(settings).some((source) => source.provider === "腾讯证券公告")).toBe(false);
   });
 
@@ -53,11 +54,21 @@ describe("newsSourceServices", () => {
     );
   });
 
-  it("checks the local news source without network access", async () => {
-    const result = await testNewsSourceConnection(defaultNewsSourceSettings.sources[0]);
+  it("migrates disabled local news samples to GDELT", async () => {
+    const localSource = {
+      ...defaultNewsSourceSettings.sources[0],
+      id: "news-local-sample",
+      name: "本地舆情样本",
+      provider: "本地舆情样本" as const,
+      baseUrl: "local://sentiment-sample"
+    };
+    const settings = ensureNewsSourceSettings({ sources: [localSource] });
+    const result = await testNewsSourceConnection(localSource);
 
-    expect(result.ok).toBe(true);
-    expect(result.details).toContain("本地舆情样本可用");
+    expect(settings.sources[0].provider).toBe("GDELT 2.1");
+    expect(enabledNewsSources({ sources: [localSource] })).toEqual([]);
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("本地舆情样本已清空");
   });
 
   it("does not test or enable Tencent notice sources", async () => {

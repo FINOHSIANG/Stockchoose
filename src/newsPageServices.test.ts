@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { STOCKS } from "./data";
+import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { fetchNewsArticlesFromSources } from "./newsPageServices";
 import type { NewsSourceEndpoint } from "./newsSourceServices";
 

@@ -203,8 +203,6 @@ export function buildSentimentEventsFromNewsArticles(articles: NewsArticle[], st
     .sort((a, b) => scoreSentimentEvent(b) - scoreSentimentEvent(a));
 }
 
-export const sampleSentimentEvents: SentimentEvent[] = [];
-
 export function scoreSentimentEvent(event: SentimentEvent) {
   const raw =
     event.impact * 0.24 +
@@ -269,24 +267,6 @@ const industry2KeywordProfiles: Record<string, string[]> = {
   化学制药: ["创新药", "药品", "临床", "出海"]
 };
 
-const stockKeywordProfiles: Record<string, string[]> = {
-  "002594": ["比亚迪", "新能源汽车", "整车", "电池", "乘用车"],
-  "300750": ["宁德时代", "动力电池", "电池", "储能"],
-  "000625": ["长安汽车", "新能源汽车", "整车", "乘用车"],
-  "601012": ["隆基绿能", "光伏", "硅片", "组件", "绿电"],
-  "600438": ["通威股份", "光伏", "硅料", "组件"],
-  "600900": ["长江电力", "水电", "电力", "公用事业"],
-  "002371": ["北方华创", "半导体设备", "国产替代", "设备"],
-  "688981": ["中芯国际", "半导体", "晶圆", "芯片"],
-  "688008": ["澜起科技", "半导体", "芯片", "先进封装"],
-  "600519": ["贵州茅台", "白酒", "批价", "渠道库存"],
-  "000858": ["五粮液", "白酒", "批价", "渠道库存"],
-  "000568": ["泸州老窖", "白酒", "批价", "渠道库存"],
-  "600036": ["招商银行", "银行", "低估值", "分红"],
-  "000333": ["美的集团", "家电", "白色家电", "回购"],
-  "601318": ["中国平安", "保险", "低估值", "回购"]
-};
-
 interface EventStockMatch {
   event: SentimentEvent;
   matchScore: number;
@@ -308,7 +288,7 @@ function matchedTerms(text: string, terms: string[]) {
 
 function stockMatchKeywords(stock: Stock) {
   return {
-    precise: uniqueTexts([...(stockKeywordProfiles[stock.code] ?? []), ...(industry2KeywordProfiles[stock.industry2] ?? [])]),
+    precise: uniqueTexts([stock.name, stock.code, stock.industry2, ...(industry2KeywordProfiles[stock.industry2] ?? [])]),
     broad: uniqueTexts([...(industryKeywordProfiles[stock.industry1] ?? []), stock.industry1, stock.industry2]).filter(isSpecificIndustry)
   };
 }

@@ -1,14 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { STOCKS } from "./data";
+import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import type { NewsArticle } from "./newsPageServices";
 import {
   buildSentimentEventsFromNewsArticles,
   buildSentimentInsightReport,
   buildSentimentLinkedStocks,
   filterSentimentEvents,
-  sampleSentimentEvents,
-  scoreSentimentEvent
+  scoreSentimentEvent,
+  type SentimentEvent
 } from "./sentimentServices";
+
+const testSentimentEvents: SentimentEvent[] = [
+  {
+    id: "real-policy-auto",
+    title: "新能源汽车真实政策新闻推动充电设施建设",
+    summary: "真实新闻源返回政策信息，汽车和电力设备产业链受益。",
+    category: "政策监管",
+    direction: "利好",
+    horizon: "中期",
+    severity: "特别重大",
+    occurredAt: "2026-05-28 09:20",
+    source: "GDELT 全球新闻",
+    sourceWeight: 82,
+    impact: 86,
+    relevance: 84,
+    confidence: 76,
+    novelty: 64,
+    persistence: 82,
+    riskPenalty: 10,
+    industries: ["汽车", "电力设备"],
+    keywords: ["新能源汽车", "充电设施"],
+    linkedCodes: ["002594", "300750"]
+  },
+  {
+    id: "real-grid-order",
+    title: "电网投资真实新闻显示储能订单增加",
+    summary: "真实新闻源返回订单信息，电力设备行业受益。",
+    category: "订单合同",
+    direction: "利好",
+    horizon: "长期",
+    severity: "特别重大",
+    occurredAt: "2026-05-28 13:30",
+    source: "GDELT 全球新闻",
+    sourceWeight: 80,
+    impact: 78,
+    relevance: 82,
+    confidence: 74,
+    novelty: 62,
+    persistence: 85,
+    riskPenalty: 10,
+    industries: ["电力设备"],
+    keywords: ["电网投资", "储能"],
+    linkedCodes: ["601012", "600438"]
+  }
+];
 
 describe("sentimentServices", () => {
   it("turns real news articles into sentiment events for stock picking", () => {
@@ -51,14 +96,14 @@ describe("sentimentServices", () => {
   });
 
   it("scores high value events within a normalized range", () => {
-    const scores = sampleSentimentEvents.map(scoreSentimentEvent);
+    const scores = testSentimentEvents.map(scoreSentimentEvent);
 
     expect(scores.every((score) => score >= 0 && score <= 100)).toBe(true);
     expect(Math.max(...scores)).toBeGreaterThan(60);
   });
 
   it("filters events by category, direction and query", () => {
-    const events = filterSentimentEvents(sampleSentimentEvents, {
+    const events = filterSentimentEvents(testSentimentEvents, {
       category: "政策监管",
       direction: "利好",
       industry: "全部",
@@ -72,7 +117,7 @@ describe("sentimentServices", () => {
   });
 
   it("filters event radar by target industry and severity", () => {
-    const events = filterSentimentEvents(sampleSentimentEvents, {
+    const events = filterSentimentEvents(testSentimentEvents, {
       category: "全部",
       direction: "全部",
       industry: "电力设备",
@@ -87,7 +132,7 @@ describe("sentimentServices", () => {
   });
 
   it("builds linked stocks and a report from matched events without recommendations", () => {
-    const events = filterSentimentEvents(sampleSentimentEvents, {
+    const events = filterSentimentEvents(testSentimentEvents, {
       category: "全部",
       direction: "全部",
       industry: "全部",

@@ -133,7 +133,7 @@ export function ensureNewsSourceSettings(settings: Partial<NewsSourceSettings> |
 }
 
 export function enabledNewsSources(settings: NewsSourceSettings) {
-  return settings.sources.filter((source) => source.enabled && !isAnnouncementNewsSource(source));
+  return settings.sources.filter((source) => source.enabled && !isAnnouncementNewsSource(source) && !isLocalSampleNewsSource(source));
 }
 
 export function validateNewsSourceEndpoint(source: NewsSourceEndpoint) {

@@ -1,13 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { STOCKS } from "./data";
+import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { buildAnnualFinancialReports, buildFinancialReportSourceCsv } from "./financialReportServices";
 
 describe("financialReportServices", () => {
-  it("builds yearly financial reports with a downloadable source file", () => {
+  it("does not build reports from local sample financial fields", () => {
     const stock = STOCKS.find((item) => item.code === "600519");
     expect(stock).toBeDefined();
 
     const reports = buildAnnualFinancialReports(stock!);
+
+    expect(reports).toEqual([]);
+  });
+
+  it("builds yearly financial reports only when a real annual report source is marked", () => {
+    const stock = STOCKS.find((item) => item.code === "600519");
+    expect(stock).toBeDefined();
+
+    const reports = buildAnnualFinancialReports({
+      ...stock!,
+      metrics: { ...stock!.metrics, realAnnualReportSource: 1 }
+    });
 
     expect(reports.map((report) => report.year)).toEqual(["2025", "2024", "2023"]);
     expect(reports[0].sourceFileName).toContain("600519");
