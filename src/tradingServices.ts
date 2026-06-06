@@ -34,19 +34,24 @@ export interface TradePlan {
   status: "draft" | "confirmed" | "submitted" | "filled";
 }
 
+export interface PaperTradeFill {
+  id: string;
+  planId: string;
+  strategyId: string;
+  strategyName: string;
+  clientOrderId: string;
+  code: string;
+  name: string;
+  side: PlannedOrder["side"];
+  shares: number;
+  price: number;
+  amount: number;
+  filledAt: string;
+}
+
 export interface PaperTradeState {
   plans: TradePlan[];
-  fills: Array<{
-    id: string;
-    clientOrderId: string;
-    code: string;
-    name: string;
-    side: PlannedOrder["side"];
-    shares: number;
-    price: number;
-    amount: number;
-    filledAt: string;
-  }>;
+  fills: PaperTradeFill[];
 }
 
 export const defaultTradeConnectionSettings: TradeConnectionSettings = {
@@ -67,9 +72,18 @@ export function ensureTradeConnectionSettings(settings: Partial<TradeConnectionS
 }
 
 export function ensurePaperTradeState(state: Partial<PaperTradeState> | null | undefined): PaperTradeState {
+  const plans = state?.plans ?? [];
   return {
-    plans: state?.plans ?? [],
-    fills: state?.fills ?? []
+    plans,
+    fills: (state?.fills ?? []).map((fill) => {
+      const relatedPlan = plans.find((plan) => plan.orders.some((order) => order.clientOrderId === fill.clientOrderId));
+      return {
+        ...fill,
+        planId: fill.planId ?? relatedPlan?.id ?? "",
+        strategyId: fill.strategyId ?? relatedPlan?.strategyId ?? "",
+        strategyName: fill.strategyName ?? relatedPlan?.strategyName ?? ""
+      };
+    })
   };
 }
 
@@ -140,6 +154,7 @@ export function createTradePlan({
 }
 
 export function submitPaperTradePlan(state: PaperTradeState, plan: TradePlan): PaperTradeState {
+  const currentState = ensurePaperTradeState(state);
   const submittedAt = new Date().toISOString();
   const submittedPlan: TradePlan = {
     ...plan,
@@ -148,6 +163,9 @@ export function submitPaperTradePlan(state: PaperTradeState, plan: TradePlan): P
   };
   const fills = submittedPlan.orders.map((order) => ({
     id: `fill-${order.clientOrderId}`,
+    planId: submittedPlan.id,
+    strategyId: submittedPlan.strategyId,
+    strategyName: submittedPlan.strategyName,
     clientOrderId: order.clientOrderId,
     code: order.code,
     name: order.name,
@@ -158,8 +176,8 @@ export function submitPaperTradePlan(state: PaperTradeState, plan: TradePlan): P
     filledAt: submittedAt
   }));
   return {
-    plans: [submittedPlan, ...state.plans.filter((item) => item.id !== submittedPlan.id)].slice(0, 30),
-    fills: [...fills, ...state.fills].slice(0, 200)
+    plans: [submittedPlan, ...currentState.plans.filter((item) => item.id !== submittedPlan.id)].slice(0, 30),
+    fills: [...fills, ...currentState.fills].slice(0, 200)
   };
 }
 

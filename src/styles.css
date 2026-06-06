@@ -149,7 +149,7 @@ main {
 }
 
 .manager-current span,
-.manager-list button span {
+.strategy-row-main span {
   color: #777;
   font-size: 12px;
 }
@@ -202,6 +202,15 @@ main {
   gap: 4px;
 }
 
+.manager-actions .manager-add-strategy {
+  grid-column: 1 / -1;
+  height: 32px;
+  background: var(--blue);
+  border-color: var(--blue-dark);
+  color: #fff;
+  font-weight: 700;
+}
+
 .manager-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -252,21 +261,54 @@ main {
   gap: 6px;
 }
 
-.manager-list button {
+.manager-list-item {
   border: 1px solid #ddd;
   background: #fff;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: stretch;
+}
+
+.strategy-row-main {
+  border: 0;
+  background: transparent;
   text-align: left;
   padding: 8px;
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
-.manager-list button.active {
+.strategy-row-delete {
+  border: 0;
+  border-left: 1px solid #e4e4e4;
+  background: transparent;
+  color: #a4a4a4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.strategy-row-delete:hover {
+  color: var(--danger);
+  background: #fff5f5;
+}
+
+.strategy-row-draft {
+  border-left: 1px solid #e4e4e4;
+  color: #2870b8;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.manager-list-item.active {
   border-color: var(--blue);
   background: #edf6fc;
 }
 
-.manager-list button .strategy-updated {
+.strategy-row-main .strategy-updated {
   color: #999;
 }
 
@@ -346,6 +388,16 @@ main {
 .title-actions button:disabled {
   color: #bbb;
   cursor: default;
+}
+
+.title-actions .title-add-strategy {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #0d5fc8;
+  border-radius: 4px;
+  background: #1466f2;
+  color: #fff;
+  font-weight: 700;
 }
 
 .title-actions .primary-text {
@@ -3234,6 +3286,45 @@ textarea {
   font-size: 12px;
 }
 
+.trade-strategy-link {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.25fr) repeat(3, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 10px 18px;
+  padding: 10px 12px;
+  border: 1px solid #cfe0f3;
+  background: #f7fbff;
+}
+
+.trade-strategy-link > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.trade-strategy-link span {
+  color: #5d6f82;
+  font-size: 12px;
+}
+
+.trade-strategy-link strong {
+  color: #143c63;
+  font-size: 15px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trade-strategy-link em {
+  color: #718499;
+  font-size: 12px;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .instruction-mode-tabs {
   display: inline-flex;
 }
@@ -4323,7 +4414,7 @@ main,
 
 .manager-current,
 .manager-stats,
-.manager-list button,
+.manager-list-item,
 .settings-module-row,
 .news-source-panel,
 .factor-help,
@@ -4334,7 +4425,7 @@ main,
   border-color: var(--border-soft);
 }
 
-.manager-list button.active,
+.manager-list-item.active,
 .manager-collapsed-stack button.active,
 .manager-switch button.active {
   border-color: rgba(20, 102, 242, 0.5);
@@ -4359,7 +4450,7 @@ main,
 
 .manager-switch button:hover,
 .manager-actions button:hover,
-.manager-list button:hover,
+.manager-list-item:hover,
 .manager-collapsed-stack button:hover,
 .icon-action:hover,
 .icon-btn:hover,
@@ -4379,6 +4470,14 @@ main,
   border-color: #0d5fc8;
   color: #fff;
   box-shadow: 0 8px 16px rgba(20, 102, 242, 0.16);
+}
+
+.manager-actions .manager-add-strategy,
+.manager-actions .manager-add-strategy:hover,
+.title-actions .title-add-strategy:hover {
+  background: #1466f2;
+  border-color: #0d5fc8;
+  color: #fff;
 }
 
 .btn.danger {
@@ -5009,6 +5108,7 @@ button {
 .live-title-row,
 .live-section-title,
 .instruction-mode-panel,
+.trade-strategy-link,
 .rebalance-toolbar > div,
 .history-toolbar {
   min-width: 0;
@@ -5056,6 +5156,11 @@ button {
   .live-section-title {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .trade-strategy-link {
+    grid-template-columns: 1fr;
+    margin: 10px 12px;
   }
 
   .stock-kline-head,

@@ -1333,12 +1333,13 @@ function StrategyManagerSidebar({
   onNew: () => void;
   onSave: () => void;
   onOptimize: () => void;
-  onDelete: () => void;
+  onDelete: (strategyId?: string) => void;
   onExport: () => void;
   onSectionChange: (section: MainSection) => void;
 }) {
   const strategies = [strategy, ...savedStrategies.filter((item) => item.id !== strategy.id)];
   const currentSaved = savedStrategies.some((item) => item.id === strategy.id);
+  const savedStrategyIds = new Set(savedStrategies.map((item) => item.id));
   return (
     <aside className={`strategy-manager ${collapsed ? "collapsed" : ""}`}>
       <div className="manager-title">
@@ -1382,9 +1383,9 @@ function StrategyManagerSidebar({
           </div>
 
           <div className="manager-actions">
-            <button onClick={onNew}>
+            <button className="manager-add-strategy" onClick={onNew}>
               <Plus size={14} />
-              新建
+              新增策略
             </button>
             <button onClick={onSave}>
               <Save size={14} />
@@ -1417,21 +1418,33 @@ function StrategyManagerSidebar({
 
           <div className="manager-list-title">
             <span>我的策略</span>
-            <button onClick={onDelete} disabled={!currentSaved} title="删除当前策略">
+            <button onClick={() => onDelete(strategy.id)} disabled={!currentSaved} title="删除当前策略">
               <Trash2 size={14} />
             </button>
           </div>
 
           <div className="manager-list">
-            {strategies.map((item) => (
-              <button className={item.id === strategy.id ? "active" : ""} key={item.id} onClick={() => onSelect(item)}>
-                <strong>{item.name}</strong>
-                <span>
-                  {item.filters.length}筛选 / {item.ranks.length}排名
-                </span>
-                <span className="strategy-updated">{formatStrategyUpdatedAt(item.updatedAt)}</span>
-              </button>
-            ))}
+            {strategies.map((item) => {
+              const isSaved = savedStrategyIds.has(item.id);
+              return (
+                <div className={`manager-list-item ${item.id === strategy.id ? "active" : ""}`} key={item.id}>
+                  <button className="strategy-row-main" onClick={() => onSelect(item)}>
+                    <strong>{item.name}</strong>
+                    <span>
+                      {item.filters.length}筛选 / {item.ranks.length}排名
+                    </span>
+                    <span className="strategy-updated">{formatStrategyUpdatedAt(item.updatedAt)}</span>
+                  </button>
+                  {isSaved ? (
+                    <button className="strategy-row-delete" onClick={() => onDelete(item.id)} title={`删除策略 ${item.name}`}>
+                      <Trash2 size={14} />
+                    </button>
+                  ) : (
+                    <span className="strategy-row-draft">草稿</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -1647,6 +1660,7 @@ function App() {
     setResult(null);
     setRankRows([]);
     setSelectionRows([]);
+    setTopSection("strategy");
     persistStrategy(next, false);
   };
 
@@ -1657,11 +1671,21 @@ function App() {
     persistStrategy(next, false);
   };
 
-  const deleteStrategy = () => {
-    const list = savedStrategies.filter((item) => item.id !== strategy.id);
+  const deleteStrategy = (strategyId = strategy.id) => {
+    const target = savedStrategies.find((item) => item.id === strategyId);
+    if (!target) return;
+    const confirmed = window.confirm(`确认删除策略「${target.name}」？删除后不可恢复。`);
+    if (!confirmed) return;
+
+    const list = savedStrategies.filter((item) => item.id !== strategyId);
     setSavedStrategies(list);
     saveLocal("savedStrategies", list);
-    newStrategy();
+    if (strategyId === strategy.id) {
+      setResult(null);
+      setRankRows([]);
+      setSelectionRows([]);
+      persistStrategy(list[0] ?? createDefaultStrategy(), false);
+    }
   };
 
   const exportStrategy = () => {
@@ -1988,9 +2012,12 @@ function App() {
                     {strategy.description ? <span>{strategy.description}</span> : null}
                   </div>
                   <div className="title-actions">
-                    <button onClick={newStrategy}>新建</button>
+                    <button className="title-add-strategy" onClick={newStrategy}>
+                      <Plus size={14} />
+                      新增策略
+                    </button>
                     <button onClick={() => setModal("optimization")}>智能调优</button>
-                    <button onClick={deleteStrategy} disabled={!savedStrategies.some((item) => item.id === strategy.id)}>
+                    <button onClick={() => deleteStrategy(strategy.id)} disabled={!savedStrategies.some((item) => item.id === strategy.id)}>
                       删除
                     </button>
                     <button onClick={() => saveStrategy(true)}>另存</button>
@@ -4469,7 +4496,15 @@ function TradeWorkspace({
         ? `开始执行买入指令，买入${row.stock.name}${row.shares}股。`
         : `订单 ${1531451296800 + index} 已全部成交：买入${row.shares}股${row.stock.name}，成交均价：${row.stock.metrics.price?.toFixed(3)}。`
   }));
-  const paperFills = paperTradeState.fills.slice(0, 8);
+  const strategyPlans = paperTradeState.plans.filter((plan) => plan.strategyId === strategy.id);
+  const strategyFills = paperTradeState.fills.filter((fill) => fill.strategyId === strategy.id);
+  const paperFills = strategyFills.slice(0, 8);
+  const strategyHistoryRows = paperFills.length ? [] : historyRows;
+  const latestStrategyPlan = strategyPlans[0];
+  const shortStrategyId = strategy.id.length > 8 ? strategy.id.slice(-8) : strategy.id;
+  const latestPlanText = latestStrategyPlan
+    ? `${latestStrategyPlan.generatedAt.replace("T", " ").slice(0, 16)} ${latestStrategyPlan.mode === "auto" ? "自动" : "手动"}`
+    : "尚未生成";
   const conditionRows = holdings.slice(0, 5).map((row, index) => {
     const price = row.stock.metrics.price ?? 0;
     const direction = index % 2 === 0 ? "买入" : "卖出";
@@ -4538,6 +4573,29 @@ function TradeWorkspace({
         ) : (
           <button className="btn" onClick={() => exportTradePlan(rows, "manual", "指令模板")}>导出指令模板</button>
         )}
+      </div>
+
+      <div className="trade-strategy-link" aria-label="当前绑定策略">
+        <div className="trade-strategy-link-main">
+          <span>当前绑定策略</span>
+          <strong>{strategy.name}</strong>
+          <em>策略ID：{shortStrategyId}</em>
+        </div>
+        <div>
+          <span>候选持仓</span>
+          <strong>{holdings.length}只</strong>
+          <em>目标持仓：{strategy.trading.maxHoldings}只</em>
+        </div>
+        <div>
+          <span>交易计划</span>
+          <strong>{strategyPlans.length}个</strong>
+          <em>{latestPlanText}</em>
+        </div>
+        <div>
+          <span>当前策略成交</span>
+          <strong>{strategyFills.length}笔</strong>
+          <em>资金账号：{tradeConnection.accountId}</em>
+        </div>
       </div>
 
       {executionMode === "auto" ? (
@@ -4858,7 +4916,7 @@ function TradeWorkspace({
             <SelectField label="选择策略：" value={strategy.name} options={[strategy.name, "策略外资产"]} onChange={() => undefined} />
             <button className="btn primary">查看历史记录</button>
             <a>导出</a>
-            <span>纸面成交：{paperFills.length}笔</span>
+            <span>当前策略成交：{strategyFills.length}笔</span>
           </div>
           <table className="live-table">
             <thead>
@@ -4874,7 +4932,7 @@ function TradeWorkspace({
               </tr>
             </thead>
             <tbody>
-              {historyRows.map((row, index) => (
+              {strategyHistoryRows.map((row, index) => (
                 <tr key={`${row.stock.code}-${index}`}>
                   <td>{index + 1}</td>
                   <td>{row.time}</td>
@@ -4892,7 +4950,7 @@ function TradeWorkspace({
               ))}
               {paperFills.map((fill, index) => (
                 <tr key={fill.id}>
-                  <td>{historyRows.length + index + 1}</td>
+                  <td>{strategyHistoryRows.length + index + 1}</td>
                   <td>{fill.filledAt.replace("T", " ").slice(0, 19)}</td>
                   <td>
                     <StockNameAction stock={{ code: fill.code, name: fill.name }} onOpen={onOpenStockInfo} />
@@ -4907,7 +4965,7 @@ function TradeWorkspace({
                 </tr>
               ))}
               <tr>
-                <td>{historyRows.length + 1}</td>
+                <td>{strategyHistoryRows.length + paperFills.length + 1}</td>
                 <td>2026-05-22 17:49:53</td>
                 <td>现金</td>
                 <td />

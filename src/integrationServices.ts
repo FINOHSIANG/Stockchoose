@@ -21,8 +21,11 @@ export interface ConnectionTestResult {
 export const LOCAL_SAMPLE_PROVIDER = "本地模拟数据";
 export const AKSHARE_AKTOOLS_PROVIDER = "AKShare / AKTools 免费开源数据";
 
+export const AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:18080/api/public";
+const LEGACY_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:8080/api/public";
+
 export const infoSourceProviderOptions = [
-  { label: AKSHARE_AKTOOLS_PROVIDER, value: AKSHARE_AKTOOLS_PROVIDER, defaultBaseUrl: "http://127.0.0.1:8080/api/public" },
+  { label: AKSHARE_AKTOOLS_PROVIDER, value: AKSHARE_AKTOOLS_PROVIDER, defaultBaseUrl: AKTOOLS_DEFAULT_BASE_URL },
   { label: "聚宽 JQData", value: "聚宽 JQData", defaultBaseUrl: "https://api.example.com/jqdata" },
   { label: "Tushare Pro", value: "Tushare Pro", defaultBaseUrl: "https://api.example.com/tushare" },
   { label: "Wind 数据服务", value: "Wind 数据服务", defaultBaseUrl: "https://api.example.com/wind" },
@@ -38,7 +41,7 @@ export const sourceModuleLabels: Array<{ key: SourceModuleKey; label: string; de
 
 export const defaultInfoSourceSettings: InfoSourceSettings = {
   provider: AKSHARE_AKTOOLS_PROVIDER,
-  baseUrl: "http://127.0.0.1:8080/api/public",
+  baseUrl: AKTOOLS_DEFAULT_BASE_URL,
   apiToken: "",
   timeoutSeconds: 15,
   refreshInterval: 5,
@@ -55,9 +58,16 @@ export function ensureInfoSourceSettings(settings: Partial<InfoSourceSettings> |
     !settings || settings.provider === LOCAL_SAMPLE_PROVIDER
       ? defaultInfoSourceSettings
       : settings;
-  return {
+  const mergedSettings = {
     ...defaultInfoSourceSettings,
-    ...migratedSettings,
+    ...migratedSettings
+  };
+  const shouldUseCurrentAkToolsBaseUrl =
+    mergedSettings.provider === AKSHARE_AKTOOLS_PROVIDER &&
+    (!mergedSettings.baseUrl || mergedSettings.baseUrl === LEGACY_AKTOOLS_DEFAULT_BASE_URL);
+  return {
+    ...mergedSettings,
+    baseUrl: shouldUseCurrentAkToolsBaseUrl ? AKTOOLS_DEFAULT_BASE_URL : mergedSettings.baseUrl,
     modules: {
       ...defaultInfoSourceSettings.modules,
       ...(migratedSettings?.modules ?? {})

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
-import { AKSHARE_AKTOOLS_PROVIDER, ensureInfoSourceSettings } from "./integrationServices";
+import { AKSHARE_AKTOOLS_PROVIDER, AKTOOLS_DEFAULT_BASE_URL, ensureInfoSourceSettings } from "./integrationServices";
 import { mergeAkShareFinancialRows, mergeAkShareSpotRows, normalizeAkShareSpotRow, syncOpenSourceMarketData } from "./openDataService";
 
 const akshareRows = [
@@ -109,6 +109,33 @@ describe("openDataService", () => {
     expect(maotai?.metrics.openSourceMarketSource).toBe(1);
   });
 
+  it("adds AKShare-only spot rows to the stock universe", () => {
+    const result = mergeAkShareSpotRows(STOCKS, [
+      ...akshareRows,
+      {
+        代码: "605499",
+        名称: "东鹏饮料",
+        最新价: 250.5,
+        涨跌幅: 1.25,
+        成交量: 50000,
+        成交额: 100000000,
+        换手率: 0.82,
+        总市值: 120000000000,
+        市盈率: 32.1
+      }
+    ]);
+    const appended = result.stocks.find((stock) => stock.code === "605499");
+
+    expect(result.matchedRows).toBe(3);
+    expect(result.sourceRows).toBe(3);
+    expect(result.stocks.length).toBe(STOCKS.length + 1);
+    expect(appended?.name).toBe("东鹏饮料");
+    expect(appended?.exchange).toBe("沪市");
+    expect(appended?.board).toBe("主板");
+    expect(appended?.metrics.price).toBe(250.5);
+    expect(appended?.metrics.marketCap).toBe(1200);
+  });
+
   it("merges AKShare financial report rows into valuation-required metrics", () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
     const result = mergeAkShareFinancialRows(quoteMerged.stocks, akshareFinancialRows);
@@ -131,7 +158,7 @@ describe("openDataService", () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(akshareRows), { status: 200 }));
     const settings = ensureInfoSourceSettings({
       provider: AKSHARE_AKTOOLS_PROVIDER,
-      baseUrl: "http://127.0.0.1:8080/api/public"
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL
     });
 
     const result = await syncOpenSourceMarketData(settings, STOCKS, fetchMock);
@@ -140,7 +167,78 @@ describe("openDataService", () => {
     expect(result.message).toBe("开源数据同步完成");
     expect(result.summary.matchedRows).toBe(2);
     expect(result.stocks.find((stock) => stock.code === "000858")?.metrics.price).toBe(138.12);
-    expect(String(fetchMock.mock.calls[0][0])).toBe("http://127.0.0.1:8080/api/public/stock_zh_a_spot_em");
+    expect(String(fetchMock.mock.calls[0][0])).toBe(`${AKTOOLS_DEFAULT_BASE_URL}/stock_zh_a_spot_em`);
+  });
+
+  it("falls back to the non-EM AKShare spot endpoint when Eastmoney spot fails", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("stock_zh_a_spot_em")) return new Response("upstream failed", { status: 500 });
+      if (url.includes("stock_zh_a_spot")) return new Response(JSON.stringify(akshareRows), { status: 200 });
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL
+    });
+
+    const result = await syncOpenSourceMarketData(settings, STOCKS, fetchMock);
+    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
+
+    expect(result.ok).toBe(true);
+    expect(result.summary.matchedRows).toBe(2);
+    expect(result.details).toContain("stock_zh_a_spot");
+    expect(requestedUrls[0]).toBe(`${AKTOOLS_DEFAULT_BASE_URL}/stock_zh_a_spot_em`);
+    expect(requestedUrls[1]).toBe(`${AKTOOLS_DEFAULT_BASE_URL}/stock_zh_a_spot`);
+  });
+
+  it("continues with financial data when AKShare spot endpoints are temporarily unavailable", async () => {
+    const financialRowsWithNewStock = {
+      ...akshareFinancialRows,
+      performanceRows: [
+        ...akshareFinancialRows.performanceRows,
+        {
+          股票代码: "605499",
+          股票简称: "东鹏饮料",
+          营业收入: 11200000000,
+          净利润: 2040000000,
+          每股收益: 3.22
+        },
+        {
+          股票代码: "874976",
+          股票简称: "澳维科技",
+          营业收入: 480000000,
+          净利润: 89000000
+        }
+      ]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("stock_zh_a_spot")) return new Response("upstream failed", { status: 500 });
+      if (url.includes("stock_yjbb_em")) return new Response(JSON.stringify(financialRowsWithNewStock.performanceRows), { status: 200 });
+      if (url.includes("stock_lrb_em")) return new Response(JSON.stringify(financialRowsWithNewStock.incomeRows), { status: 200 });
+      if (url.includes("stock_zcfz_em")) return new Response(JSON.stringify(financialRowsWithNewStock.balanceRows), { status: 200 });
+      if (url.includes("stock_xjll_em")) return new Response(JSON.stringify(financialRowsWithNewStock.cashFlowRows), { status: 200 });
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL
+    });
+
+    const result = await syncOpenSourceMarketData(settings, STOCKS, fetchMock);
+    const maotai = result.stocks.find((stock) => stock.code === "600519");
+    const appended = result.stocks.find((stock) => stock.code === "605499");
+
+    expect(result.ok).toBe(true);
+    expect(result.summary.matchedRows).toBe(0);
+    expect(result.summary.financeMatchedRows).toBe(2);
+    expect(result.stocks.length).toBe(STOCKS.length + 1);
+    expect(maotai?.metrics.realAnnualReportSource).toBe(1);
+    expect(maotai?.metrics.revenue).toBe(1275);
+    expect(appended?.name).toBe("东鹏饮料");
+    expect(appended?.metrics.revenue).toBe(112);
+    expect(result.stocks.find((stock) => stock.code === "874976")).toBeUndefined();
   });
 
   it("syncs AKShare market and financial bulk endpoints through AKTools", async () => {
@@ -155,7 +253,7 @@ describe("openDataService", () => {
     });
     const settings = ensureInfoSourceSettings({
       provider: AKSHARE_AKTOOLS_PROVIDER,
-      baseUrl: "http://127.0.0.1:8080/api/public"
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL
     });
 
     const result = await syncOpenSourceMarketData(settings, STOCKS, fetchMock);

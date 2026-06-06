@@ -7,6 +7,7 @@ import {
   createTradePlan,
   defaultPaperTradeState,
   defaultTradeConnectionSettings,
+  ensurePaperTradeState,
   submitPaperTradePlan,
   tradePlanToCsv
 } from "./tradingServices";
@@ -56,5 +57,36 @@ describe("tradingServices", () => {
     expect(csv).toContain(rows[0].stock.code);
     expect(nextState.plans[0].status).toBe("filled");
     expect(nextState.fills).toHaveLength(plan.orders.length);
+    expect(nextState.fills[0]).toMatchObject({
+      planId: plan.id,
+      strategyId: strategy.id,
+      strategyName: strategy.name
+    });
+  });
+
+  it("migrates legacy paper fills to the matching strategy plan", () => {
+    const strategy = createDefaultStrategy();
+    const plan = createTradePlan({ strategy, rows, mode: "auto", accountId: "PAPER-0001" });
+    const order = plan.orders[0];
+    const state = ensurePaperTradeState({
+      plans: [plan],
+      fills: [
+        {
+          id: `legacy-${order.clientOrderId}`,
+          clientOrderId: order.clientOrderId,
+          code: order.code,
+          name: order.name,
+          side: order.side,
+          shares: order.shares,
+          price: order.price,
+          amount: order.amount,
+          filledAt: plan.generatedAt
+        } as never
+      ]
+    });
+
+    expect(state.fills[0].planId).toBe(plan.id);
+    expect(state.fills[0].strategyId).toBe(strategy.id);
+    expect(state.fills[0].strategyName).toBe(strategy.name);
   });
 });

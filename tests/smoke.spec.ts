@@ -20,6 +20,14 @@ test("stock strategy workstation core flows", async ({ page }) => {
       ])
     });
   });
+  await page.route(/\/stock_(yjbb|lrb|zcfz|xjll)_em\?date=/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*" },
+      body: JSON.stringify([])
+    });
+  });
   await page.route(/\/gdelt-news\/doc\/doc\?/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -44,7 +52,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
   const bootstrapInfoSourcePanel = page.locator(".settings-panel").filter({ hasText: "信息来源接口" });
   await expect(bootstrapInfoSourcePanel.getByLabel("接口来源")).toHaveValue("AKShare / AKTools 免费开源数据");
-  await expect(bootstrapInfoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:8080/api/public");
+  await expect(bootstrapInfoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:18080/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/AKShare\/AKTools/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();
@@ -59,6 +67,17 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByRole("button", { name: "择股设置" })).toBeVisible();
   await expect(page.getByText("股票策略").first()).toBeVisible();
   await expect(page.getByText(/最新更新时间/).first()).toBeVisible();
+  await page.locator(".strategy-title").getByRole("button", { name: "保存" }).click();
+  await expect(page.getByText("已保存").first()).toBeVisible();
+  await expect(page.locator(".strategy-title").getByRole("button", { name: "新增策略" })).toBeVisible();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("确认删除策略");
+    await dialog.accept();
+  });
+  await page.locator(".strategy-title").getByRole("button", { name: "删除" }).click();
+  await expect(page.getByText("草稿").first()).toBeVisible();
+  await page.locator(".strategy-title").getByRole("button", { name: "新增策略" }).click();
+  await expect(page.getByText("草稿").first()).toBeVisible();
   await page.locator(".strategy-title").getByRole("button", { name: "保存" }).click();
   await expect(page.getByText("已保存").first()).toBeVisible();
 
@@ -108,6 +127,8 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("交易指令模式")).toBeVisible();
   await expect(page.getByRole("button", { name: "手动模式" })).toBeVisible();
   await expect(page.getByRole("button", { name: "自动模式" })).toBeVisible();
+  await expect(page.getByLabel("当前绑定策略")).toContainText("当前绑定策略");
+  await expect(page.getByLabel("当前绑定策略")).toContainText("交易计划");
   await expect(page.getByText("持仓总结")).toBeVisible();
   await expect(page.getByText("持仓策略")).toBeVisible();
 
@@ -126,12 +147,14 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("交易接口已绑定").first()).toBeVisible();
   await page.getByRole("button", { name: "确认自动交易计划" }).click();
   await expect(page.getByText(/纸面交易已成交/)).toBeVisible();
+  await expect(page.getByLabel("当前绑定策略")).toContainText(/当前策略成交\s*\d+笔/);
 
   await page.getByRole("button", { name: "日志" }).click();
   await expect(page.getByRole("button", { name: "查看日志" })).toBeVisible();
 
   await page.getByRole("button", { name: "历史" }).click();
   await expect(page.getByRole("button", { name: "查看历史记录" })).toBeVisible();
+  await expect(page.getByText(/当前策略成交：\d+笔/)).toBeVisible();
 
   await page.getByRole("button", { name: "条件单交易" }).click();
   await expect(page.getByText("条件单设置")).toBeVisible();
@@ -152,7 +175,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/连接检测通过/)).toBeVisible();
   await infoSourcePanel.getByLabel("接口来源").selectOption("AKShare / AKTools 免费开源数据");
-  await expect(infoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:8080/api/public");
+  await expect(infoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:18080/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/AKShare\/AKTools/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AKSHARE_AKTOOLS_PROVIDER,
+  AKTOOLS_DEFAULT_BASE_URL,
   defaultInfoSourceSettings,
   ensureInfoSourceSettings,
   testInfoSourceConnection,
@@ -29,14 +30,23 @@ describe("integrationServices", () => {
 
   it("uses AKShare/AKTools as the default real data provider", () => {
     expect(defaultInfoSourceSettings.provider).toBe(AKSHARE_AKTOOLS_PROVIDER);
-    expect(defaultInfoSourceSettings.baseUrl).toBe("http://127.0.0.1:8080/api/public");
+    expect(defaultInfoSourceSettings.baseUrl).toBe(AKTOOLS_DEFAULT_BASE_URL);
   });
 
   it("migrates the disabled local provider to AKShare/AKTools", () => {
     const settings = ensureInfoSourceSettings({ provider: "本地模拟数据", baseUrl: "http://127.0.0.1:9000/api" });
 
     expect(settings.provider).toBe(AKSHARE_AKTOOLS_PROVIDER);
-    expect(settings.baseUrl).toBe("http://127.0.0.1:8080/api/public");
+    expect(settings.baseUrl).toBe(AKTOOLS_DEFAULT_BASE_URL);
+  });
+
+  it("migrates the legacy AKTools default port away from local port conflicts", () => {
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: "http://127.0.0.1:8080/api/public"
+    });
+
+    expect(settings.baseUrl).toBe(AKTOOLS_DEFAULT_BASE_URL);
   });
 
   it("checks the default real provider through a network contract", async () => {

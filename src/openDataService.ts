@@ -39,6 +39,14 @@ interface AkShareFinancialRows {
   reportDate?: string;
 }
 
+interface AkShareMarketRowsFetchResult {
+  rows: AkShareRow[];
+  endpoint: string;
+}
+
+const AKSHARE_SPOT_ENDPOINTS = ["stock_zh_a_spot_em", "stock_zh_a_spot"] as const;
+const LISTED_ASHARE_CODE_PATTERN = /^(60[0-5]|688|689|000|001|002|003|300|301|302|920)\d{3}$/;
+
 export const defaultOpenSourceDataSummary: OpenSourceDataSummary = {
   provider: "未接入真实数据",
   matchedRows: 0,
@@ -196,12 +204,35 @@ export function normalizeAkShareSpotRow(row: AkShareRow) {
   };
 }
 
+type NormalizedAkShareStockRow = NonNullable<ReturnType<typeof normalizeAkShareSpotRow>>;
+
+function addStockIdentityKeys(keys: Set<string>, stock: Pick<Stock, "code" | "exchange">) {
+  keys.add(stock.code);
+  keys.add(marketDataCodeForStock(stock));
+}
+
+function expandStocksFromAkShareRows(baseStocks: Stock[], rows: NormalizedAkShareStockRow[], listedAshareOnly = false) {
+  const knownCodes = new Set<string>();
+  baseStocks.forEach((stock) => addStockIdentityKeys(knownCodes, stock));
+
+  const appendedStocks: Stock[] = [];
+  rows.forEach((row) => {
+    if (listedAshareOnly && !LISTED_ASHARE_CODE_PATTERN.test(row.code)) return;
+    if (knownCodes.has(row.code)) return;
+    const stock = stockShellFromAkShareRow(row);
+    appendedStocks.push(stock);
+    addStockIdentityKeys(knownCodes, stock);
+  });
+
+  return [...baseStocks, ...appendedStocks];
+}
+
 export function mergeAkShareSpotRows(baseStocks: Stock[], rows: AkShareRow[]) {
   const normalizedRows = rows.map(normalizeAkShareSpotRow).filter((row): row is NonNullable<ReturnType<typeof normalizeAkShareSpotRow>> => Boolean(row));
   const rowByCode = new Map(normalizedRows.map((row) => [row.code, row]));
   let matchedRows = 0;
 
-  const sourceStocks = baseStocks.length ? baseStocks : normalizedRows.map(stockShellFromAkShareRow);
+  const sourceStocks = expandStocksFromAkShareRows(baseStocks, normalizedRows);
   const stocks = sourceStocks.map((stock) => {
     const row = rowByCode.get(stock.code) ?? rowByCode.get(marketDataCodeForStock(stock));
     if (!row) return stock;
@@ -337,14 +368,22 @@ function mergeFinancialMetrics(stock: Stock, performance: AkShareRow | undefined
   };
 }
 
-export function mergeAkShareFinancialRows(stocks: Stock[], rows: AkShareFinancialRows) {
+export function mergeAkShareFinancialRows(stocks: Stock[], rows: AkShareFinancialRows, expandUniverse = true) {
+  const sourceStocks = expandUniverse
+    ? expandStocksFromAkShareRows(stocks, [
+      ...rows.performanceRows,
+      ...rows.incomeRows,
+      ...rows.balanceRows,
+      ...rows.cashFlowRows
+    ].map(normalizeAkShareSpotRow).filter((row): row is NormalizedAkShareStockRow => Boolean(row)), true)
+    : stocks;
   const performanceByCode = rowsByCode(rows.performanceRows);
   const incomeByCode = rowsByCode(rows.incomeRows);
   const balanceByCode = rowsByCode(rows.balanceRows);
   const cashFlowByCode = rowsByCode(rows.cashFlowRows);
   let matchedRows = 0;
 
-  const mergedStocks = stocks.map((stock) => {
+  const mergedStocks = sourceStocks.map((stock) => {
     const code = marketDataCodeForStock(stock);
     const performance = performanceByCode.get(stock.code) ?? performanceByCode.get(code);
     const income = incomeByCode.get(stock.code) ?? incomeByCode.get(code);
@@ -378,6 +417,18 @@ async function fetchAkShareRows(baseUrl: string, endpoint: string, params: Recor
   const response = await fetchImpl(url, { method: "GET", signal });
   if (!response.ok) return [];
   return rowsFromPayload(await response.json());
+}
+
+async function fetchAkShareSpotRows(baseUrl: string, signal: AbortSignal, fetchImpl: FetchLike): Promise<AkShareMarketRowsFetchResult> {
+  for (const endpoint of AKSHARE_SPOT_ENDPOINTS) {
+    try {
+      const rows = await fetchAkShareRows(baseUrl, endpoint, {}, signal, fetchImpl);
+      if (rows.length) return { rows, endpoint };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+    }
+  }
+  return { rows: [], endpoint: AKSHARE_SPOT_ENDPOINTS.join(",") };
 }
 
 function financialReportDateCandidates(now = new Date()) {
@@ -468,9 +519,15 @@ export async function syncOpenSourceMarketData(
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(settings.timeoutSeconds, 3) * 1000);
   const baseUrl = settings.baseUrl.replace(/\/$/, "");
   try {
-    const rows = await fetchAkShareRows(baseUrl, "stock_zh_a_spot_em", {}, controller.signal, fetchImpl);
-    const merged = mergeAkShareSpotRows(baseStocks, rows);
-    if (!merged.matchedRows) {
+    const marketRows = await fetchAkShareSpotRows(baseUrl, controller.signal, fetchImpl);
+    const merged = mergeAkShareSpotRows(baseStocks, marketRows.rows);
+    const marketStocks = merged.matchedRows ? merged.stocks : baseStocks;
+    const shouldExpandFinancialUniverse = !merged.matchedRows;
+    const financial = settings.modules.finance
+      ? mergeAkShareFinancialRows(marketStocks, await fetchAkShareFinancialRows(baseUrl, controller.signal, fetchImpl), shouldExpandFinancialUniverse)
+      : { stocks: marketStocks, matchedRows: 0, sourceRows: 0, reportDate: undefined };
+
+    if (!merged.matchedRows && !financial.matchedRows) {
       return {
         ok: false,
         checkedAt,
@@ -481,15 +538,15 @@ export async function syncOpenSourceMarketData(
       };
     }
 
-    const financial = settings.modules.finance
-      ? mergeAkShareFinancialRows(merged.stocks, await fetchAkShareFinancialRows(baseUrl, controller.signal, fetchImpl))
-      : { stocks: merged.stocks, matchedRows: 0, sourceRows: 0, reportDate: undefined };
     const stocks = financial.stocks;
     const valuationReadyRows = stocks.filter(valuationReady).length;
     const financeDetail = settings.modules.finance
       ? `；财报字段匹配 ${financial.matchedRows} 只，估值可用 ${valuationReadyRows} 只${financial.reportDate ? `，报告期 ${financial.reportDate}` : ""}`
       : "";
-    const details = `匹配 ${merged.matchedRows}/${merged.sourceRows} 条 AKShare A 股实时行情${financeDetail}`;
+    const marketDetail = merged.matchedRows
+      ? `匹配 ${merged.matchedRows}/${merged.sourceRows} 条 AKShare A 股实时行情`
+      : `AKShare 行情未匹配，保留当前股票池（源行 ${merged.sourceRows} 条）`;
+    const details = `${marketDetail}${financeDetail}；行情接口 ${marketRows.endpoint}`;
 
     return {
       ok: true,
