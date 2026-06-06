@@ -3325,6 +3325,40 @@ textarea {
   white-space: nowrap;
 }
 
+.holding-strategy-tag {
+  display: inline-flex;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid #cfe0f3;
+  background: #edf6ff;
+  color: #2870b8;
+  font-size: 11px;
+}
+
+.live-table td.holding-strategy-empty {
+  padding: 14px 8px;
+  color: #718499;
+  text-align: center;
+}
+
+.holding-strategy-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #a34f4f;
+  font-size: 12px;
+}
+
+.holding-strategy-delete:hover {
+  border-color: rgba(196, 61, 61, 0.28);
+  background: #fff5f5;
+  color: var(--danger);
+}
+
 .instruction-mode-tabs {
   display: inline-flex;
 }
@@ -3607,28 +3641,44 @@ textarea {
 
 .condition-layout {
   display: grid;
-  grid-template-columns: minmax(310px, 0.42fr) minmax(620px, 1fr);
-  gap: 14px;
+  grid-template-columns: minmax(520px, 0.95fr) minmax(0, 1.05fr);
+  gap: 16px;
   align-items: start;
 }
 
 .condition-editor,
 .condition-list,
 .condition-log {
+  min-width: 0;
   border: 1px solid #ddd;
   background: #fff;
   padding: 12px;
 }
 
+.condition-list {
+  overflow-x: auto;
+}
+
+.condition-list .live-table {
+  min-width: 760px;
+}
+
 .condition-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 9px 12px;
 }
 
 .condition-form-grid label {
+  min-width: 0;
   display: grid;
   gap: 5px;
+}
+
+.condition-form-grid input,
+.condition-form-grid select {
+  width: 100%;
+  min-width: 0;
 }
 
 .condition-form-grid label span {
@@ -3638,8 +3688,9 @@ textarea {
 
 .condition-inline {
   display: grid;
-  grid-template-columns: 78px 1fr;
+  grid-template-columns: minmax(76px, 0.34fr) minmax(0, 1fr);
   gap: 6px;
+  min-width: 0;
 }
 
 .condition-actions {

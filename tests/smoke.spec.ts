@@ -52,7 +52,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
   const bootstrapInfoSourcePanel = page.locator(".settings-panel").filter({ hasText: "信息来源接口" });
   await expect(bootstrapInfoSourcePanel.getByLabel("接口来源")).toHaveValue("AKShare / AKTools 免费开源数据");
-  await expect(bootstrapInfoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:18080/api/public");
+  await expect(bootstrapInfoSourcePanel.getByLabel("接口地址")).toHaveValue("/aktools/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/AKShare\/AKTools/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();
@@ -130,7 +130,19 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByLabel("当前绑定策略")).toContainText("当前绑定策略");
   await expect(page.getByLabel("当前绑定策略")).toContainText("交易计划");
   await expect(page.getByText("持仓总结")).toBeVisible();
-  await expect(page.getByText("持仓策略")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "持仓策略" })).toBeVisible();
+  await expect(page.getByText("暂无持仓策略，请先导入当前选股策略。")).toBeVisible();
+  await page.getByRole("button", { name: "导入策略" }).click();
+  await expect(page.getByRole("button", { name: "导入策略" })).toBeVisible();
+  await expect(page.getByText("当前选股策略")).toBeVisible();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("确认从持仓策略中移除");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: /删除持仓策略/ }).click();
+  await expect(page.getByText("暂无持仓策略，请先导入当前选股策略。")).toBeVisible();
+  await page.getByRole("button", { name: "导入策略" }).click();
+  await expect(page.getByText("当前选股策略")).toBeVisible();
 
   await page.getByRole("button", { name: /调仓/ }).click();
   await expect(page.getByRole("button", { name: "生成手动交易指令" })).toBeVisible();
@@ -161,6 +173,9 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("我的条件单")).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "执行模式" })).toBeVisible();
   await expect(page.getByRole("button", { name: "保存条件单" })).toBeVisible();
+  const conditionEditorBox = await page.locator(".condition-editor").boundingBox();
+  const conditionListBox = await page.locator(".condition-list").boundingBox();
+  expect(conditionEditorBox && conditionListBox ? conditionEditorBox.x + conditionEditorBox.width : 0).toBeLessThanOrEqual(conditionListBox ? conditionListBox.x : 0);
 
   await page.locator(".primary-nav").getByRole("button", { name: "设置", exact: true }).click();
   const navBox = await page.locator(".primary-nav").boundingBox();
@@ -175,7 +190,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/连接检测通过/)).toBeVisible();
   await infoSourcePanel.getByLabel("接口来源").selectOption("AKShare / AKTools 免费开源数据");
-  await expect(infoSourcePanel.getByLabel("接口地址")).toHaveValue("http://127.0.0.1:18080/api/public");
+  await expect(infoSourcePanel.getByLabel("接口地址")).toHaveValue("/aktools/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
   await expect(page.getByText(/AKShare\/AKTools/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();

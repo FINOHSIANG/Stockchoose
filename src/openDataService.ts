@@ -475,6 +475,26 @@ async function fetchAkShareFinancialRows(baseUrl: string, signal: AbortSignal, f
   };
 }
 
+async function withAkShareTimeout<T>(timeoutSeconds: number, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(timeoutSeconds, 3) * 1000);
+  try {
+    return await task(controller.signal);
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
+const syncErrorDetail = (error: unknown) =>
+  error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";
+
+const emptyFinancialMerge = (stocks: Stock[]) => ({
+  stocks,
+  matchedRows: 0,
+  sourceRows: 0,
+  reportDate: undefined as string | undefined
+});
+
 export async function syncOpenSourceMarketData(
   rawSettings: InfoSourceSettings,
   baseStocks: Stock[],
@@ -515,37 +535,53 @@ export async function syncOpenSourceMarketData(
     };
   }
 
-  const controller = new AbortController();
-  const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(settings.timeoutSeconds, 3) * 1000);
   const baseUrl = settings.baseUrl.replace(/\/$/, "");
   try {
-    const marketRows = await fetchAkShareSpotRows(baseUrl, controller.signal, fetchImpl);
+    const marketRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchAkShareSpotRows(baseUrl, signal, fetchImpl));
     const merged = mergeAkShareSpotRows(baseStocks, marketRows.rows);
     const marketStocks = merged.matchedRows ? merged.stocks : baseStocks;
     const shouldExpandFinancialUniverse = !merged.matchedRows;
-    const financial = settings.modules.finance
-      ? mergeAkShareFinancialRows(marketStocks, await fetchAkShareFinancialRows(baseUrl, controller.signal, fetchImpl), shouldExpandFinancialUniverse)
-      : { stocks: marketStocks, matchedRows: 0, sourceRows: 0, reportDate: undefined };
+    let financeErrorDetail = "";
+    let financial = emptyFinancialMerge(marketStocks);
+
+    if (settings.modules.finance) {
+      try {
+        const financialRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchAkShareFinancialRows(baseUrl, signal, fetchImpl));
+        financial = mergeAkShareFinancialRows(marketStocks, financialRows, shouldExpandFinancialUniverse);
+      } catch (error) {
+        financeErrorDetail = syncErrorDetail(error);
+      }
+    }
 
     if (!merged.matchedRows && !financial.matchedRows) {
+      const failureDetails = [
+        merged.sourceRows
+          ? "AKShare 行情已返回，但没有匹配到当前股票池代码"
+          : "AKShare 行情接口未返回可用 A 股行情",
+        financeErrorDetail ? `财报接口未完成：${financeErrorDetail}` : ""
+      ].filter(Boolean).join("；");
       return {
         ok: false,
         checkedAt,
         message: "开源数据同步失败",
-        details: "AKShare 行情已返回，但没有匹配到当前股票池代码",
+        details: failureDetails,
         stocks: baseStocks,
-        summary: { ...defaultOpenSourceDataSummary, provider: settings.provider, sourceRows: merged.sourceRows, stockCount: baseStocks.length, details: "未匹配到股票代码" }
+        summary: { ...defaultOpenSourceDataSummary, provider: settings.provider, sourceRows: merged.sourceRows, stockCount: baseStocks.length, details: failureDetails }
       };
     }
 
     const stocks = financial.stocks;
     const valuationReadyRows = stocks.filter(valuationReady).length;
     const financeDetail = settings.modules.finance
-      ? `；财报字段匹配 ${financial.matchedRows} 只，估值可用 ${valuationReadyRows} 只${financial.reportDate ? `，报告期 ${financial.reportDate}` : ""}`
+      ? financeErrorDetail
+        ? `；财报接口未完成：${financeErrorDetail}`
+        : `；财报字段匹配 ${financial.matchedRows} 只，估值可用 ${valuationReadyRows} 只${financial.reportDate ? `，报告期 ${financial.reportDate}` : ""}`
       : "";
     const marketDetail = merged.matchedRows
       ? `匹配 ${merged.matchedRows}/${merged.sourceRows} 条 AKShare A 股实时行情`
-      : `AKShare 行情未匹配，保留当前股票池（源行 ${merged.sourceRows} 条）`;
+      : financial.matchedRows
+        ? `AKShare 行情未匹配，已使用财报接口补齐股票池（行情源行 ${merged.sourceRows} 条）`
+        : `AKShare 行情未匹配，保留当前股票池（源行 ${merged.sourceRows} 条）`;
     const details = `${marketDetail}${financeDetail}；行情接口 ${marketRows.endpoint}`;
 
     return {
@@ -567,7 +603,7 @@ export async function syncOpenSourceMarketData(
       }
     };
   } catch (error) {
-    const detail = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";
+    const detail = syncErrorDetail(error);
     return {
       ok: false,
       checkedAt,
@@ -576,7 +612,5 @@ export async function syncOpenSourceMarketData(
       stocks: baseStocks,
       summary: { ...defaultOpenSourceDataSummary, provider: settings.provider, stockCount: baseStocks.length, details: "同步失败" }
     };
-  } finally {
-    globalThis.clearTimeout(timeout);
   }
 }

@@ -268,4 +268,27 @@ describe("openDataService", () => {
     expect(requestedUrls.some((url) => url.includes("stock_yjbb_em?date="))).toBe(true);
     expect(requestedUrls.some((url) => url.includes("stock_zcfz_em?date="))).toBe(true);
   });
+
+  it("keeps market data when financial endpoints time out", async () => {
+    const abortError = new Error("aborted");
+    abortError.name = "AbortError";
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("stock_zh_a_spot_em")) return new Response(JSON.stringify(akshareRows), { status: 200 });
+      if (url.includes("stock_zh_a_spot")) return new Response(JSON.stringify([]), { status: 200 });
+      throw abortError;
+    });
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL
+    });
+
+    const result = await syncOpenSourceMarketData(settings, STOCKS, fetchMock);
+
+    expect(result.ok).toBe(true);
+    expect(result.summary.matchedRows).toBe(2);
+    expect(result.summary.financeMatchedRows).toBe(0);
+    expect(result.details).toContain("财报接口未完成：请求超时");
+    expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.price).toBe(1688.88);
+  });
 });

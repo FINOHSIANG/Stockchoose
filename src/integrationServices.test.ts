@@ -25,7 +25,16 @@ describe("integrationServices", () => {
       modules: { market: false, finance: false, filing: false, news: false }
     });
 
-    expect(validateInfoSourceSettings(settings)).toEqual(expect.arrayContaining(["接口地址必须以 http:// 或 https:// 开头", "至少启用一个数据模块"]));
+    expect(validateInfoSourceSettings(settings)).toEqual(expect.arrayContaining(["接口地址必须以 http://、https:// 或本地代理 / 开头", "至少启用一个数据模块"]));
+  });
+
+  it("accepts same-origin proxy endpoints", () => {
+    const settings = ensureInfoSourceSettings({
+      ...defaultInfoSourceSettings,
+      baseUrl: "/aktools/api/public"
+    });
+
+    expect(validateInfoSourceSettings(settings)).toEqual([]);
   });
 
   it("uses AKShare/AKTools as the default real data provider", () => {
@@ -44,6 +53,15 @@ describe("integrationServices", () => {
     const settings = ensureInfoSourceSettings({
       provider: AKSHARE_AKTOOLS_PROVIDER,
       baseUrl: "http://127.0.0.1:8080/api/public"
+    });
+
+    expect(settings.baseUrl).toBe(AKTOOLS_DEFAULT_BASE_URL);
+  });
+
+  it("migrates the direct AKTools default URL to the app proxy", () => {
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: "http://127.0.0.1:18080/api/public"
     });
 
     expect(settings.baseUrl).toBe(AKTOOLS_DEFAULT_BASE_URL);

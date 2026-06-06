@@ -21,7 +21,8 @@ export interface ConnectionTestResult {
 export const LOCAL_SAMPLE_PROVIDER = "本地模拟数据";
 export const AKSHARE_AKTOOLS_PROVIDER = "AKShare / AKTools 免费开源数据";
 
-export const AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:18080/api/public";
+export const AKTOOLS_DEFAULT_BASE_URL = "/aktools/api/public";
+const DIRECT_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:18080/api/public";
 const LEGACY_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:8080/api/public";
 
 export const infoSourceProviderOptions = [
@@ -64,7 +65,9 @@ export function ensureInfoSourceSettings(settings: Partial<InfoSourceSettings> |
   };
   const shouldUseCurrentAkToolsBaseUrl =
     mergedSettings.provider === AKSHARE_AKTOOLS_PROVIDER &&
-    (!mergedSettings.baseUrl || mergedSettings.baseUrl === LEGACY_AKTOOLS_DEFAULT_BASE_URL);
+    (!mergedSettings.baseUrl ||
+      mergedSettings.baseUrl === DIRECT_AKTOOLS_DEFAULT_BASE_URL ||
+      mergedSettings.baseUrl === LEGACY_AKTOOLS_DEFAULT_BASE_URL);
   return {
     ...mergedSettings,
     baseUrl: shouldUseCurrentAkToolsBaseUrl ? AKTOOLS_DEFAULT_BASE_URL : mergedSettings.baseUrl,
@@ -94,7 +97,9 @@ export function isAkShareProvider(settings: InfoSourceSettings) {
 export function validateInfoSourceSettings(settings: InfoSourceSettings) {
   const errors: string[] = [];
   if (!settings.provider.trim()) errors.push("接口来源不能为空");
-  if (!/^https?:\/\/.+/i.test(settings.baseUrl.trim())) errors.push("接口地址必须以 http:// 或 https:// 开头");
+  if (!/^https?:\/\/.+/i.test(settings.baseUrl.trim()) && !settings.baseUrl.trim().startsWith("/")) {
+    errors.push("接口地址必须以 http://、https:// 或本地代理 / 开头");
+  }
   if (!enabledSourceModules(settings).length) errors.push("至少启用一个数据模块");
   if (!Number.isFinite(settings.timeoutSeconds) || settings.timeoutSeconds < 3) errors.push("超时时间不能小于 3 秒");
   if (!Number.isFinite(settings.refreshInterval) || settings.refreshInterval < 1) errors.push("刷新周期不能小于 1 分钟");

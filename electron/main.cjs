@@ -25,6 +25,11 @@ const mimeTypes = {
 
 const proxyRules = [
   {
+    prefix: "/aktools",
+    target: "http://127.0.0.1:18080",
+    rewrite: (url) => url.replace(/^\/aktools/, "")
+  },
+  {
     prefix: "/tencent-quote",
     target: "https://qt.gtimg.cn",
     rewrite: (url) => url.replace(/^\/tencent-quote/, "")

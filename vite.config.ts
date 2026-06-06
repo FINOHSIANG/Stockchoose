@@ -8,6 +8,12 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5173,
     proxy: {
+      "/aktools": {
+        target: "http://127.0.0.1:18080",
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/aktools/, "")
+      },
       "/tencent-quote": {
         target: "https://qt.gtimg.cn",
         changeOrigin: true,

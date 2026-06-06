@@ -313,7 +313,7 @@ function downloadTextFile(filename: string, content: string, type = "text/plain;
 const mojibakeTextPattern = /[\uFFFD]|锟|Ã|Â|ŵ|˼/;
 
 function hasRealRuntimeStockData(stock: Stock) {
-  return stock.metrics.realQuoteSource === 1 || stock.metrics.openSourceMarketSource === 1;
+  return stock.metrics.realQuoteSource === 1 || stock.metrics.openSourceMarketSource === 1 || stock.metrics.realAnnualReportSource === 1;
 }
 
 function ensureStockData(value: Stock[]) {
@@ -1457,6 +1457,7 @@ function App() {
   const [strategy, setStrategy] = useState<StrategyConfig>(() => ensureStrategyUpdatedAt(loadLocal("draftStrategy", createDefaultStrategy())));
   const [backtestConfig, setBacktestConfig] = useState<BacktestConfig>(() => loadLocal("backtestConfig", createDefaultBacktestConfig()));
   const [savedStrategies, setSavedStrategies] = useState<StrategyConfig[]>(() => loadLocal<StrategyConfig[]>("savedStrategies", []).map(ensureStrategyUpdatedAt));
+  const [holdingStrategies, setHoldingStrategies] = useState<StrategyConfig[]>(() => loadLocal<StrategyConfig[]>("holdingStrategies", []).map(ensureStrategyUpdatedAt));
   const [customPools, setCustomPools] = useState<StockPool[]>(() => loadLocal("customPools", []));
   const [customFactors, setCustomFactors] = useState<Factor[]>(() => loadLocal("customFactors", []));
   const [activeStep, setActiveStep] = useState<StepKey>("screen");
@@ -1521,6 +1522,7 @@ function App() {
   useEffect(() => {
     saveLocal("draftStrategy", strategy);
     saveLocal("savedStrategies", savedStrategies);
+    saveLocal("holdingStrategies", holdingStrategies);
     saveLocal("infoSourceSettings", infoSourceSettings);
     saveLocal("newsSourceSettings", newsSourceSettings);
     saveLocal("newsAnalysisModelSettings", newsAnalysisModelSettings);
@@ -1671,6 +1673,30 @@ function App() {
     persistStrategy(next, false);
   };
 
+  const importStrategyToHoldings = () => {
+    const imported = touchStrategyUpdatedAt(strategy);
+    const existingIndex = holdingStrategies.findIndex((item) => item.id === imported.id);
+    const list =
+      existingIndex >= 0
+        ? holdingStrategies.map((item, index) => (index === existingIndex ? imported : item))
+        : [imported, ...holdingStrategies].slice(0, 20);
+    setHoldingStrategies(list);
+    saveLocal("holdingStrategies", list);
+    setTradeConnectionStatus(existingIndex >= 0 ? `已更新持仓策略：${imported.name}` : `已导入持仓策略：${imported.name}`);
+  };
+
+  const removeHoldingStrategy = (strategyId: string) => {
+    const target = holdingStrategies.find((item) => item.id === strategyId);
+    if (!target) return;
+    const confirmed = window.confirm(`确认从持仓策略中移除「${target.name}」？选股策略本身不会删除。`);
+    if (!confirmed) return;
+
+    const list = holdingStrategies.filter((item) => item.id !== strategyId);
+    setHoldingStrategies(list);
+    saveLocal("holdingStrategies", list);
+    setTradeConnectionStatus(`已从持仓策略移除：${target.name}`);
+  };
+
   const deleteStrategy = (strategyId = strategy.id) => {
     const target = savedStrategies.find((item) => item.id === strategyId);
     if (!target) return;
@@ -1680,6 +1706,9 @@ function App() {
     const list = savedStrategies.filter((item) => item.id !== strategyId);
     setSavedStrategies(list);
     saveLocal("savedStrategies", list);
+    const nextHoldingStrategies = holdingStrategies.filter((item) => item.id !== strategyId);
+    setHoldingStrategies(nextHoldingStrategies);
+    saveLocal("holdingStrategies", nextHoldingStrategies);
     if (strategyId === strategy.id) {
       setResult(null);
       setRankRows([]);
@@ -2103,8 +2132,11 @@ function App() {
                   tradeConnection={tradeConnection}
                   tradeConnectionStatus={tradeConnectionStatus}
                   paperTradeState={paperTradeState}
+                  holdingStrategies={holdingStrategies}
                   patchTradeConnection={patchTradeConnection}
                   bindTradingInterface={bindTradingInterface}
+                  importStrategyToHoldings={importStrategyToHoldings}
+                  removeHoldingStrategy={removeHoldingStrategy}
                   exportTradePlan={exportTradePlan}
                   submitPaperTradePlan={submitPaperTradePlan}
                   onOpenStockInfo={openStockInfo}
@@ -4440,8 +4472,11 @@ function TradeWorkspace({
   tradeConnection,
   tradeConnectionStatus,
   paperTradeState,
+  holdingStrategies,
   patchTradeConnection,
   bindTradingInterface,
+  importStrategyToHoldings,
+  removeHoldingStrategy,
   exportTradePlan,
   submitPaperTradePlan,
   onOpenStockInfo
@@ -4451,8 +4486,11 @@ function TradeWorkspace({
   tradeConnection: TradeConnectionSettings;
   tradeConnectionStatus: string;
   paperTradeState: PaperTradeState;
+  holdingStrategies: StrategyConfig[];
   patchTradeConnection: (patch: Partial<TradeConnectionSettings>) => void;
   bindTradingInterface: () => boolean;
+  importStrategyToHoldings: () => void;
+  removeHoldingStrategy: (strategyId: string) => void;
   exportTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string) => TradePlan;
   submitPaperTradePlan: (rows: SelectionRow[]) => TradePlan | null;
   onOpenStockInfo: (stock: StockReference) => void;
@@ -4505,6 +4543,28 @@ function TradeWorkspace({
   const latestPlanText = latestStrategyPlan
     ? `${latestStrategyPlan.generatedAt.replace("T", " ").slice(0, 16)} ${latestStrategyPlan.mode === "auto" ? "自动" : "手动"}`
     : "尚未生成";
+  const isCurrentStrategyImported = holdingStrategies.some((item) => item.id === strategy.id);
+  const holdingStrategyRows = holdingStrategies.map((item) => {
+    const isCurrent = item.id === strategy.id;
+    const itemPlans = paperTradeState.plans.filter((plan) => plan.strategyId === item.id);
+    return {
+      strategy: item,
+      isCurrent,
+      holdingValue: isCurrent ? holdingValue : 0,
+      strategyCash: isCurrent ? strategyCash : 0,
+      dailyReturn: isCurrent ? dailyReturn : 0,
+      nextRebalanceDate: isCurrent ? nextRebalanceDate : "待同步",
+      tradeTime: isCurrent ? tradeTime : item.trading.orderTime,
+      planCount: itemPlans.length
+    };
+  });
+  const holdingStrategyValueTotal = round(holdingStrategyRows.reduce((sum, row) => sum + row.holdingValue, 0), 2);
+  const holdingStrategyCashTotal = round(holdingStrategyRows.reduce((sum, row) => sum + row.strategyCash, 0), 2);
+  const outsideCashForTable = round(accountAsset - holdingStrategyValueTotal - holdingStrategyCashTotal, 2);
+  const holdingStrategyDailyReturn = holdingStrategyRows.length
+    ? round(holdingStrategyRows.reduce((sum, row) => sum + row.dailyReturn, 0) / holdingStrategyRows.length, 2)
+    : 0;
+  const holdingDetailRows = isCurrentStrategyImported ? holdings.slice(0, 8) : [];
   const conditionRows = holdings.slice(0, 5).map((row, index) => {
     const price = row.stock.metrics.price ?? 0;
     const direction = index % 2 === 0 ? "买入" : "卖出";
@@ -4662,17 +4722,19 @@ function TradeWorkspace({
             </div>
             <div>
               <span>持仓市值</span>
-              <strong>{formatMoney(holdingValue)}</strong>
+              <strong>{formatMoney(holdingStrategyValueTotal)}</strong>
             </div>
             <div>
               <span>可用现金</span>
-              <strong>{formatMoney(strategyCash + outsideCash)}</strong>
+              <strong>{formatMoney(holdingStrategyCashTotal + outsideCashForTable)}</strong>
             </div>
           </div>
 
           <div className="live-section-title">
             <h3>持仓策略</h3>
-            <button className="btn primary">新增策略</button>
+            <button className="btn primary" onClick={importStrategyToHoldings}>
+              导入策略
+            </button>
           </div>
           <table className="live-table">
             <thead>
@@ -4689,37 +4751,62 @@ function TradeWorkspace({
               </tr>
             </thead>
             <tbody>
-              <tr>
-                <td>
-                  <a>{strategy.name}</a>
-                </td>
-                <td>{formatMoney(holdingValue)}</td>
-                <td>{formatMoney(strategyCash)}</td>
-                <td className={dailyReturn >= 0 ? "positive" : "negative"}>{pct(dailyReturn)}</td>
-                <td>{nextRebalanceDate}</td>
-                <td>{tradeTime}</td>
-                <td>0次</td>
-                <td>
-                  {executionMode === "manual" ? (
-                    <>
-                      <button className="text-link">手动确认</button>
-                      <button className="text-link" onClick={() => exportTradePlan(rows, "manual", "交易指令")}>生成指令</button>
-                    </>
-                  ) : (
-                    <>
-                      <button className="text-link">{tradeInterfaceBound ? "自动执行" : "待绑定"}</button>
-                      <button className="text-link" onClick={bindTradingInterface}>
-                        绑定接口
+              {holdingStrategyRows.length ? (
+                holdingStrategyRows.map((row) => (
+                  <tr key={row.strategy.id}>
+                    <td>
+                      <a>{row.strategy.name}</a>
+                      {row.isCurrent ? <span className="holding-strategy-tag">当前选股策略</span> : null}
+                    </td>
+                    <td>{formatMoney(row.holdingValue)}</td>
+                    <td>{formatMoney(row.strategyCash)}</td>
+                    <td className={row.dailyReturn >= 0 ? "positive" : "negative"}>{pct(row.dailyReturn)}</td>
+                    <td>{row.nextRebalanceDate}</td>
+                    <td>{row.tradeTime}</td>
+                    <td>{row.planCount}次</td>
+                    <td>
+                      {row.isCurrent ? (
+                        executionMode === "manual" ? (
+                          <>
+                            <button className="text-link">手动确认</button>
+                            <button className="text-link" onClick={() => exportTradePlan(rows, "manual", "交易指令")}>生成指令</button>
+                          </>
+                        ) : (
+                          <>
+                            <button className="text-link">{tradeInterfaceBound ? "自动执行" : "待绑定"}</button>
+                            <button className="text-link" onClick={bindTradingInterface}>
+                              绑定接口
+                            </button>
+                          </>
+                        )
+                      ) : (
+                        "导入待同步"
+                      )}
+                    </td>
+                    <td className="live-ops">
+                      <button
+                        className="holding-strategy-delete"
+                        onClick={() => removeHoldingStrategy(row.strategy.id)}
+                        aria-label={`删除持仓策略 ${row.strategy.name}`}
+                        title={`删除持仓策略 ${row.strategy.name}`}
+                      >
+                        <Trash2 size={13} />
+                        删除
                       </button>
-                    </>
-                  )}
-                </td>
-                <td className="live-ops">S × ×</td>
-              </tr>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td className="holding-strategy-empty" colSpan={9}>
+                    暂无持仓策略，请先导入当前选股策略。
+                  </td>
+                </tr>
+              )}
               <tr>
                 <td>策略外资产</td>
                 <td>0.00</td>
-                <td>{formatMoney(outsideCash)}</td>
+                <td>{formatMoney(outsideCashForTable)}</td>
                 <td>0.00%</td>
                 <td />
                 <td />
@@ -4729,9 +4816,9 @@ function TradeWorkspace({
               </tr>
               <tr>
                 <td>总计</td>
-                <td>{formatMoney(holdingValue)}</td>
-                <td>{formatMoney(strategyCash + outsideCash)}</td>
-                <td className={dailyReturn >= 0 ? "positive" : "negative"}>{pct(dailyReturn)}</td>
+                <td>{formatMoney(holdingStrategyValueTotal)}</td>
+                <td>{formatMoney(holdingStrategyCashTotal + outsideCashForTable)}</td>
+                <td className={holdingStrategyDailyReturn >= 0 ? "positive" : "negative"}>{pct(holdingStrategyDailyReturn)}</td>
                 <td />
                 <td />
                 <td />
@@ -4748,7 +4835,9 @@ function TradeWorkspace({
               <span>选择策略：</span>
               <select>
                 <option>全部</option>
-                <option>{strategy.name}</option>
+                {holdingStrategies.map((item) => (
+                  <option key={item.id}>{item.name}</option>
+                ))}
               </select>
             </label>
             <div className="live-title-links">
@@ -4770,7 +4859,7 @@ function TradeWorkspace({
               </tr>
             </thead>
             <tbody>
-              {holdings.slice(0, 8).map((row, index) => {
+              {holdingDetailRows.map((row, index) => {
                 const shares = planRows[index]?.shares ?? 0;
                 const price = row.stock.metrics.price ?? 0;
                 return (
@@ -4789,14 +4878,14 @@ function TradeWorkspace({
                 );
               })}
               <tr>
-                <td>{holdings.length + 1}</td>
+                <td>{holdingDetailRows.length + 1}</td>
                 <td>现金</td>
                 <td />
-                <td>{formatMoney(strategyCash + outsideCash)}</td>
-                <td>{formatMoney(strategyCash + outsideCash)}</td>
+                <td>{formatMoney(holdingStrategyCashTotal + outsideCashForTable)}</td>
+                <td>{formatMoney(holdingStrategyCashTotal + outsideCashForTable)}</td>
                 <td>1.00</td>
                 <td>0.00%</td>
-                <td>{formatMoney(outsideCash)}</td>
+                <td>{formatMoney(outsideCashForTable)}</td>
               </tr>
             </tbody>
           </table>
