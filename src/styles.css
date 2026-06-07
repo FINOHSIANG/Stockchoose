@@ -3224,6 +3224,15 @@ textarea {
   text-decoration: none;
 }
 
+button.text-link {
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #2870b8;
+  cursor: pointer;
+}
+
 .live-notice {
   color: #8a8a8a;
   font-size: 12px;
@@ -3357,6 +3366,115 @@ textarea {
   border-color: rgba(196, 61, 61, 0.28);
   background: #fff5f5;
   color: var(--danger);
+}
+
+.holding-import-modal {
+  display: grid;
+  gap: 14px;
+}
+
+.holding-import-head,
+.holding-import-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.holding-import-actions,
+.holding-import-footer div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.holding-import-list {
+  display: grid;
+  gap: 8px;
+}
+
+.holding-import-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #d9e4ef;
+  background: #fff;
+}
+
+.holding-import-row.imported {
+  background: #f6f9fc;
+  color: #6f7f90;
+}
+
+.holding-import-row span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.holding-import-row strong,
+.holding-import-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.holding-import-row small,
+.holding-import-footer span {
+  color: #718499;
+  font-size: 12px;
+}
+
+.holding-import-row em {
+  padding: 2px 7px;
+  border: 1px solid #cfe0f3;
+  background: #edf6ff;
+  color: #2870b8;
+  font-size: 11px;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.holding-import-row.imported em:last-child {
+  border-color: #d9dfe6;
+  background: #eef2f6;
+  color: #718499;
+}
+
+.asset-sync-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  align-items: end;
+  margin: 10px 0 12px;
+  padding: 12px;
+  border: 1px solid #d9e4ef;
+  background: #f8fbff;
+}
+
+.asset-sync-editor label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.asset-sync-editor span,
+.asset-sync-editor p {
+  color: #607489;
+  font-size: 12px;
+}
+
+.asset-sync-editor input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+}
+
+.asset-sync-editor p {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .instruction-mode-tabs {
@@ -3580,6 +3698,87 @@ textarea {
   color: #666;
   margin: 0 0 8px;
   font-size: 12px;
+}
+
+.instruction-status {
+  margin: 8px 0;
+  color: #0f7b52;
+  font-size: 12px;
+}
+
+.rebalance-advanced-panel {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid #d8e6f3;
+  background: #f7fbff;
+  color: #415d78;
+  font-size: 12px;
+}
+
+.rebalance-advanced-panel span {
+  color: #0d4f8f;
+  font-weight: 700;
+}
+
+.rebalance-advanced-panel em {
+  color: #718499;
+  font-style: normal;
+}
+
+.instruction-input,
+.instruction-side-select {
+  width: 86px;
+  height: 28px;
+  font-size: 12px;
+}
+
+.instruction-side-select {
+  width: 72px;
+}
+
+.instruction-empty {
+  color: #718499;
+  text-align: center;
+}
+
+.trade-client-copy-panel {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 10px;
+  border: 1px solid #d8e6f3;
+  background: #fbfdff;
+}
+
+.trade-client-copy-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.trade-client-copy-head strong {
+  color: #0d3d6b;
+}
+
+.trade-client-copy-head span {
+  color: #718499;
+  font-size: 12px;
+  margin-right: auto;
+}
+
+.trade-client-copy-panel textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  font-family: "Cascadia Mono", "Consolas", "SFMono-Regular", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
 }
 
 .trade-alarm {

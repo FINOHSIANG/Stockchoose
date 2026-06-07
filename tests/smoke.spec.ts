@@ -1,6 +1,52 @@
 import { expect, test } from "@playwright/test";
 
 test("stock strategy workstation core flows", async ({ page }) => {
+  const financialReportPayloads: Record<string, unknown[]> = {
+    stock_yjbb_em: [
+      {
+        股票代码: "600519",
+        股票简称: "贵州茅台",
+        营业收入: 127500000000,
+        净利润: 74700000000,
+        基本每股收益: 59.49,
+        每股净资产: 230.5,
+        净资产收益率: 31.2,
+        营业收入同比增长: 15.8,
+        净利润同比增长: 19.2
+      }
+    ],
+    stock_lrb_em: [
+      {
+        股票代码: "600519",
+        营业总收入: 127500000000,
+        营业成本: 11800000000,
+        净利润: 74700000000
+      }
+    ],
+    stock_zcfz_em: [
+      {
+        股票代码: "600519",
+        资产总计: 255000000000,
+        负债合计: 42000000000,
+        存货: 38800000000,
+        应收账款: 1200000000,
+        流动资产合计: 210000000000,
+        流动负债合计: 35000000000,
+        货币资金: 120000000000,
+        交易性金融资产: 5000000000,
+        长期股权投资: 1000000000,
+        短期借款: 6000000000,
+        长期借款: 4000000000
+      }
+    ],
+    stock_xjll_em: [
+      {
+        股票代码: "600519",
+        经营活动产生的现金流量净额: 65000000000
+      }
+    ]
+  };
+
   await page.route(/\/stock_zh_a_hist\?/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -21,11 +67,12 @@ test("stock strategy workstation core flows", async ({ page }) => {
     });
   });
   await page.route(/\/stock_(yjbb|lrb|zcfz|xjll)_em\?date=/, async (route) => {
+    const endpoint = route.request().url().match(/\/(stock_(?:yjbb|lrb|zcfz|xjll)_em)\?date=/)?.[1] ?? "";
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*" },
-      body: JSON.stringify([])
+      body: JSON.stringify(financialReportPayloads[endpoint] ?? [])
     });
   });
   await page.route(/\/gdelt-news\/doc\/doc\?/, async (route) => {
@@ -58,6 +105,13 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.getByRole("button", { name: "同步开源数据" }).click();
   await expect(page.getByText(/开源数据同步完成/)).toBeVisible();
   await expect(page.getByText("2 / 2").first()).toBeVisible();
+  await page.locator(".primary-nav").getByRole("button", { name: "价值核算", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "股票价值核算" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "同步真实财报" })).toBeVisible();
+  await page.getByRole("button", { name: "同步真实财报" }).click();
+  await expect(page.getByText(/真实财报同步完成/)).toBeVisible();
+  await expect(page.getByText(/财报匹配 1\/4/)).toBeVisible();
+  await expect(page.getByText(/可核算 1\/2/)).toBeVisible();
   await page.locator(".primary-nav").getByRole("button", { name: "策略", exact: true }).click();
   await expect(page.getByText("策略管理")).toBeVisible();
   await page.getByTitle("收起策略管理").click();
@@ -133,8 +187,20 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "持仓策略" })).toBeVisible();
   await expect(page.getByText("暂无持仓策略，请先导入当前选股策略。")).toBeVisible();
   await page.getByRole("button", { name: "导入策略" }).click();
-  await expect(page.getByRole("button", { name: "导入策略" })).toBeVisible();
+  let importDialog = page.locator(".modal-panel").filter({ hasText: "导入持仓策略" });
+  await expect(importDialog).toBeVisible();
+  await expect(importDialog.getByLabel("选择持仓策略 股票策略")).toBeChecked();
+  await importDialog.getByRole("button", { name: "确认导入" }).click();
   await expect(page.getByText("当前选股策略")).toBeVisible();
+  await page.getByLabel("手动当前净值").fill("1.125");
+  await page.getByLabel("手动持仓市值").fill("260000");
+  await page.getByLabel("手动策略现金").fill("140000");
+  await page.getByLabel("手动策略外资产").fill("500000");
+  await page.getByRole("button", { name: "资产同步" }).click();
+  await expect(page.getByText("1.1250")).toBeVisible();
+  await expect(page.getByText("900,000.00").first()).toBeVisible();
+  await expect(page.getByText("260,000.00").first()).toBeVisible();
+  await expect(page.getByText("640,000.00").first()).toBeVisible();
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("确认从持仓策略中移除");
     await dialog.accept();
@@ -142,15 +208,38 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.getByRole("button", { name: /删除持仓策略/ }).click();
   await expect(page.getByText("暂无持仓策略，请先导入当前选股策略。")).toBeVisible();
   await page.getByRole("button", { name: "导入策略" }).click();
+  importDialog = page.locator(".modal-panel").filter({ hasText: "导入持仓策略" });
+  await expect(importDialog).toBeVisible();
+  await importDialog.getByRole("button", { name: "确认导入" }).click();
   await expect(page.getByText("当前选股策略")).toBeVisible();
 
   await page.getByRole("button", { name: /调仓/ }).click();
   await expect(page.getByRole("button", { name: "生成手动交易指令" })).toBeVisible();
   await expect(page.getByRole("button", { name: "导出交易指令" })).toBeVisible();
+  await page.getByRole("button", { name: "生成手动交易指令" }).click();
+  await expect(page.getByText(/已生成 \d+ 条手动交易指令/)).toBeVisible();
+  await expect(page.getByLabel("交易客户端复制文本")).toBeVisible();
+  await expect(page.getByLabel("交易客户端复制文本")).toHaveValue(/^\d{6}\t买入\t\d+\.\d{3}\t\d+/);
+  await page.getByRole("button", { name: "切换到高级操作" }).click();
+  await expect(page.getByRole("button", { name: "切换到普通操作" })).toBeVisible();
+  await expect(page.locator(".rebalance-advanced-panel")).toContainText("高级操作");
+  await expect(page.getByLabel(/实际股数/).first()).toBeVisible();
+  await page.getByLabel("最小买卖金额").fill("5000");
+  await page.locator(".rebalance-toolbar").getByRole("button", { name: "保存" }).click();
+  await expect(page.getByText("最小买卖金额已保存为 5,000.00")).toBeVisible();
+  await page.getByRole("button", { name: "复制到交易客户端" }).click();
+  await expect(page.getByText(/已复制 \d+ 条交易客户端指令|浏览器未允许自动复制/)).toBeVisible();
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "导出交易指令" }).click();
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toContain("交易指令");
+  expect(download.suggestedFilename()).toContain("交易客户端指令");
+  await expect(page.getByText(/已导出.*交易客户端指令/)).toBeVisible();
+  const statusDownloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "生成交易状态表" }).click();
+  const statusDownload = await statusDownloadPromise;
+  expect(statusDownload.suggestedFilename()).toContain("交易状态表");
+  await page.getByRole("button", { name: "解除指令" }).click();
+  await expect(page.getByText(/已解除|已清空当前页面指令草稿/)).toBeVisible();
   await page.getByRole("button", { name: "自动模式" }).click();
   await expect(page.getByLabel("交易接口")).toHaveValue("本地纸面交易接口");
   await expect(page.getByRole("button", { name: "确认自动交易计划" })).toBeVisible();

@@ -495,6 +495,130 @@ const emptyFinancialMerge = (stocks: Stock[]) => ({
   reportDate: undefined as string | undefined
 });
 
+export async function syncOpenSourceFinancialReports(
+  rawSettings: InfoSourceSettings,
+  baseStocks: Stock[],
+  fetchImpl: FetchLike = fetch
+): Promise<OpenSourceSyncResult> {
+  const settings = ensureInfoSourceSettings(rawSettings);
+  const checkedAt = new Date().toISOString();
+
+  if (isLocalProvider(settings)) {
+    const details = "本地模拟数据已停用，请配置 AKShare / AKTools 真实财报接口";
+    return {
+      ok: false,
+      checkedAt,
+      message: "真实财报同步失败",
+      details,
+      stocks: baseStocks,
+      summary: {
+        ...defaultOpenSourceDataSummary,
+        provider: settings.provider,
+        stockCount: baseStocks.length,
+        details
+      }
+    };
+  }
+
+  if (!isAkShareProvider(settings)) {
+    const details = `当前来源不是 ${AKSHARE_AKTOOLS_PROVIDER}`;
+    return {
+      ok: false,
+      checkedAt,
+      message: "真实财报同步失败",
+      details,
+      stocks: baseStocks,
+      summary: {
+        ...defaultOpenSourceDataSummary,
+        provider: settings.provider,
+        stockCount: baseStocks.length,
+        details
+      }
+    };
+  }
+
+  if (!settings.modules.finance) {
+    const details = "请先在信息来源接口中启用财务指标接口";
+    return {
+      ok: false,
+      checkedAt,
+      message: "真实财报同步失败",
+      details,
+      stocks: baseStocks,
+      summary: {
+        ...defaultOpenSourceDataSummary,
+        provider: settings.provider,
+        stockCount: baseStocks.length,
+        details
+      }
+    };
+  }
+
+  const baseUrl = settings.baseUrl.replace(/\/$/, "");
+  try {
+    const financialRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchAkShareFinancialRows(baseUrl, signal, fetchImpl));
+    const financial = mergeAkShareFinancialRows(baseStocks, financialRows, false);
+    const valuationReadyRows = financial.stocks.filter(valuationReady).length;
+    const reportDateDetail = financial.reportDate ? `，报告期 ${financial.reportDate}` : "";
+    const details = `财报字段匹配 ${financial.matchedRows}/${financial.sourceRows} 行，估值可用 ${valuationReadyRows} 只${reportDateDetail}`;
+
+    if (!financial.matchedRows) {
+      const failureDetails = financial.sourceRows
+        ? `财报接口已返回 ${financial.sourceRows} 行，但没有匹配到当前股票池代码。请先接入全市场股票或确认代码格式。`
+        : "AKShare 财报接口未返回可用数据";
+      return {
+        ok: false,
+        checkedAt,
+        message: "真实财报同步失败",
+        details: failureDetails,
+        stocks: baseStocks,
+        summary: {
+          ...defaultOpenSourceDataSummary,
+          provider: settings.provider,
+          financeMatchedRows: financial.matchedRows,
+          financeSourceRows: financial.sourceRows,
+          valuationReadyRows,
+          stockCount: baseStocks.length,
+          details: failureDetails
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      checkedAt,
+      message: "真实财报同步完成",
+      details,
+      stocks: financial.stocks,
+      summary: {
+        ...defaultOpenSourceDataSummary,
+        provider: settings.provider,
+        lastSyncAt: checkedAt,
+        financeMatchedRows: financial.matchedRows,
+        financeSourceRows: financial.sourceRows,
+        valuationReadyRows,
+        stockCount: financial.stocks.length,
+        details
+      }
+    };
+  } catch (error) {
+    const detail = syncErrorDetail(error);
+    return {
+      ok: false,
+      checkedAt,
+      message: "真实财报同步失败",
+      details: detail,
+      stocks: baseStocks,
+      summary: {
+        ...defaultOpenSourceDataSummary,
+        provider: settings.provider,
+        stockCount: baseStocks.length,
+        details: "同步失败"
+      }
+    };
+  }
+}
+
 export async function syncOpenSourceMarketData(
   rawSettings: InfoSourceSettings,
   baseStocks: Stock[],

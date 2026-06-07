@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { AKSHARE_AKTOOLS_PROVIDER, AKTOOLS_DEFAULT_BASE_URL, ensureInfoSourceSettings } from "./integrationServices";
-import { mergeAkShareFinancialRows, mergeAkShareSpotRows, normalizeAkShareSpotRow, syncOpenSourceMarketData } from "./openDataService";
+import { mergeAkShareFinancialRows, mergeAkShareSpotRows, normalizeAkShareSpotRow, syncOpenSourceFinancialReports, syncOpenSourceMarketData } from "./openDataService";
 
 const akshareRows = [
   {
@@ -267,6 +267,36 @@ describe("openDataService", () => {
     expect(maotai?.metrics.currentRatio).toBe(6);
     expect(requestedUrls.some((url) => url.includes("stock_yjbb_em?date="))).toBe(true);
     expect(requestedUrls.some((url) => url.includes("stock_zcfz_em?date="))).toBe(true);
+  });
+
+  it("syncs financial reports without requesting market endpoints", async () => {
+    const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("stock_yjbb_em")) return new Response(JSON.stringify(akshareFinancialRows.performanceRows), { status: 200 });
+      if (url.includes("stock_lrb_em")) return new Response(JSON.stringify(akshareFinancialRows.incomeRows), { status: 200 });
+      if (url.includes("stock_zcfz_em")) return new Response(JSON.stringify(akshareFinancialRows.balanceRows), { status: 200 });
+      if (url.includes("stock_xjll_em")) return new Response(JSON.stringify(akshareFinancialRows.cashFlowRows), { status: 200 });
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL
+    });
+
+    const result = await syncOpenSourceFinancialReports(settings, quoteMerged.stocks, fetchMock);
+    const maotai = result.stocks.find((stock) => stock.code === "600519");
+    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe("真实财报同步完成");
+    expect(result.summary.financeMatchedRows).toBe(1);
+    expect(result.summary.valuationReadyRows).toBeGreaterThanOrEqual(1);
+    expect(maotai?.metrics.realAnnualReportSource).toBe(1);
+    expect(maotai?.metrics.operatingCashflow).toBe(650);
+    expect(requestedUrls.some((url) => url.includes("stock_zh_a_spot"))).toBe(false);
+    expect(requestedUrls.some((url) => url.includes("stock_yjbb_em?date="))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("stock_xjll_em?date="))).toBe(true);
   });
 
   it("keeps market data when financial endpoints time out", async () => {
