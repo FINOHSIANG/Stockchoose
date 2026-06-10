@@ -2,7 +2,9 @@ pub mod eastmoney;
 pub mod news;
 pub mod tencent;
 
-pub use eastmoney::{AnnouncementRow, EastmoneyClient, FinancialMetricRow, FinancialStatementRows};
+pub use eastmoney::{
+    AnnouncementRow, EastmoneyClient, FinancialMetricRow, FinancialStatementRows, StockProfileRow,
+};
 pub use news::GdeltClient;
 pub use tencent::TencentClient;
 

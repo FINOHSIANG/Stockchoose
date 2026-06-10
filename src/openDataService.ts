@@ -107,6 +107,66 @@ const textValue = (row: AkShareRow, keys: string[]) => {
   return value === undefined || value === null ? "" : String(value).trim();
 };
 
+const compactTextList = (values: Array<string | undefined>) =>
+  Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+
+const textListValue = (row: AkShareRow, keys: string[]) => {
+  const value = rowValue(row, keys);
+  if (Array.isArray(value)) return compactTextList(value.map((item) => String(item)));
+  if (value === undefined || value === null) return [];
+  return compactTextList(
+    String(value)
+      .split(/[、,，;；|/]+/)
+      .map((item) => item.trim())
+  );
+};
+
+const normalizeWebsiteValue = (value: string) => {
+  const token = value.split(/[\s,，;；|]+/).find((item) => item.includes(".")) ?? value;
+  const trimmed = token.trim().replace(/[。；;，,]+$/g, "");
+  if (!trimmed || ["-", "--", "暂无", "未披露"].includes(trimmed)) return undefined;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(\/.*)?$/i.test(trimmed)) return `https://${trimmed}`;
+  return undefined;
+};
+
+const websiteFromRow = (row: AkShareRow | undefined) =>
+  normalizeWebsiteValue(
+    textValue(row ?? {}, [
+      "website",
+      "webSite",
+      "homepage",
+      "homePage",
+      "officialWebsite",
+      "official_site",
+      "web_site",
+      "companyWebsite",
+      "公司网址",
+      "官网",
+      "官方网站"
+    ])
+  );
+
+const industryTagsFromRow = (row: AkShareRow | undefined) =>
+  textListValue(row ?? {}, [
+    "industryTags",
+    "industry_tags",
+    "conceptTags",
+    "concepts",
+    "concept",
+    "concept_name",
+    "theme",
+    "themes",
+    "sector",
+    "sectors",
+    "行业标签",
+    "概念题材",
+    "所属概念",
+    "题材"
+  ]);
+
+const mergeTextLists = (...lists: Array<string[] | undefined>) => compactTextList(lists.flatMap((items) => items ?? []));
+
 const parseNumber = (value: unknown) => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
@@ -249,6 +309,8 @@ function stockShellFromAkShareRow(row: NonNullable<ReturnType<typeof normalizeAk
     isSTAR: board === "科创板",
     isMargin: false,
     indexes: [],
+    website: row.website,
+    industryTags: row.industryTags,
     metrics: {}
   };
 }
@@ -280,7 +342,9 @@ export function normalizeAkShareSpotRow(row: AkShareRow, now = new Date()) {
     netInflowRatio: numberValue(row, ["netInflowRatio", "mainNetInflowRatio", "主力净占比"]),
     listingDate,
     listingDays,
-    newStockScore: newStockScore(listingDays, turnover, pctChange, amountYi)
+    newStockScore: newStockScore(listingDays, turnover, pctChange, amountYi),
+    website: websiteFromRow(row),
+    industryTags: industryTagsFromRow(row)
   };
 }
 
@@ -345,6 +409,8 @@ export function mergeAkShareSpotRows(baseStocks: Stock[], rows: AkShareRow[], no
     return {
       ...stock,
       name: row.name && row.name !== row.code ? row.name : stock.name,
+      website: row.website || stock.website,
+      industryTags: mergeTextLists(stock.industryTags, row.industryTags),
       metrics
     };
   });
@@ -401,6 +467,7 @@ function stockShellFromFinancialMetricRow(row: NormalizedRustFinancialMetricRow)
     isSTAR: board === "科创板",
     isMargin: false,
     indexes: [],
+    industryTags: [],
     metrics: {}
   };
 }
@@ -910,6 +977,7 @@ function buildAshareHubMarketRows(referenceRows: AkShareRow[], dailyRows: AkShar
     const area = textValue(reference ?? {}, ["area", "region"]);
     const industry1 = textValue(industry ?? {}, ["industry1", "l1_name", "level1_name"]) || textValue(reference ?? {}, ["industry"]);
     const industry2 = textValue(industry ?? {}, ["industry2", "l2_name", "level2_name"]);
+    const industryTags = mergeTextLists(industryTagsFromRow(reference), industryTagsFromRow(industry), [industry1, industry2].filter(Boolean));
     row.name = name || code;
     row.price = price;
     row.pctChange = pctChange;
@@ -926,6 +994,8 @@ function buildAshareHubMarketRows(referenceRows: AkShareRow[], dailyRows: AkShar
     row.region = area;
     row.industry1 = industry1;
     row.industry2 = industry2;
+    row.website = websiteFromRow(reference);
+    row.industryTags = industryTags;
     row.tradeDate = rowDateScore(daily ?? fundamental ?? {}, ["trade_date"]);
     return [row];
   });
@@ -940,12 +1010,16 @@ function enrichStocksFromAshareHubRows(stocks: Stock[], rows: AkShareRow[]) {
     const region = textValue(row, ["region", "area"]);
     const industry1 = textValue(row, ["industry1", "industry"]);
     const industry2 = textValue(row, ["industry2"]);
+    const website = websiteFromRow(row);
+    const industryTags = industryTagsFromRow(row);
     return {
       ...stock,
       name: name || stock.name,
       region: region || stock.region,
       industry1: industry1 || stock.industry1,
       industry2: industry2 || industry1 || stock.industry2,
+      website: website || stock.website,
+      industryTags: mergeTextLists(stock.industryTags, industryTags),
       isST: name ? name.includes("ST") : stock.isST
     };
   });

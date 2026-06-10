@@ -4,21 +4,27 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ValuationFilters {
-    pub board: String,
-    pub industry: String,
+    #[serde(default = "default_all_filter_values")]
+    pub boards: Vec<String>,
+    #[serde(default = "default_all_filter_values")]
+    pub industries: Vec<String>,
     pub state: String,
     pub ownership: String,
     pub style: String,
+    #[serde(default = "default_stock_risk_exclusions")]
+    pub stock_risk_exclusions: Vec<String>,
     #[serde(default)]
     pub min_safety_margin: f64,
     #[serde(default)]
     pub min_governance_score: f64,
-    #[serde(default = "default_display_limit")]
-    pub display_limit: usize,
 }
 
-fn default_display_limit() -> usize {
-    50
+fn default_all_filter_values() -> Vec<String> {
+    vec!["全部".to_string()]
+}
+
+fn default_stock_risk_exclusions() -> Vec<String> {
+    vec!["ST".to_string(), "*ST".to_string(), "退市".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -828,13 +834,45 @@ fn matches_board(stock: &Stock, board: &str) -> bool {
     stock.exchange == board || stock.board == board
 }
 
+fn matches_any_board(stock: &Stock, boards: &[String]) -> bool {
+    boards.is_empty() || boards.iter().any(|board| matches_board(stock, board))
+}
+
+fn matches_any_industry(stock: &Stock, industries: &[String]) -> bool {
+    industries.is_empty()
+        || industries
+            .iter()
+            .any(|industry| is_all(industry) || stock.industry1 == *industry)
+}
+
+fn is_star_st_stock(stock: &Stock) -> bool {
+    stock.name.contains("*ST") || stock.name.contains("＊ST")
+}
+
+fn is_delisted_stock(stock: &Stock) -> bool {
+    stock.name.contains("退市") || stock.name.ends_with('退')
+}
+
+fn is_plain_st_stock(stock: &Stock) -> bool {
+    (stock.is_st || stock.name.contains("ST"))
+        && !is_star_st_stock(stock)
+        && !is_delisted_stock(stock)
+}
+
+fn matches_stock_risk_exclusions(stock: &Stock, exclusions: &[String]) -> bool {
+    !((exclusions.iter().any(|item| item == "ST") && is_plain_st_stock(stock))
+        || (exclusions.iter().any(|item| item == "*ST") && is_star_st_stock(stock))
+        || (exclusions.iter().any(|item| item == "退市") && is_delisted_stock(stock)))
+}
+
 pub fn build_valuation_rows(stocks: &[Stock], filters: &ValuationFilters) -> Vec<ValuationRow> {
     let mut rows = stocks
         .iter()
         .filter(|stock| has_required_real_valuation_data(stock))
+        .filter(|stock| matches_stock_risk_exclusions(stock, &filters.stock_risk_exclusions))
         .map(|stock| calculate_valuation(stock, &filters.style))
-        .filter(|row| matches_board(&row.stock, &filters.board))
-        .filter(|row| is_all(&filters.industry) || row.stock.industry1 == filters.industry)
+        .filter(|row| matches_any_board(&row.stock, &filters.boards))
+        .filter(|row| matches_any_industry(&row.stock, &filters.industries))
         .filter(|row| is_all(&filters.state) || row.state == filters.state)
         .filter(|row| is_all(&filters.ownership) || row.stock.property == filters.ownership)
         .filter(|row| row.safety_margin >= filters.min_safety_margin)
@@ -845,7 +883,6 @@ pub fn build_valuation_rows(stocks: &[Stock], filters: &ValuationFilters) -> Vec
             .partial_cmp(&a.safety_margin)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    rows.truncate(filters.display_limit.clamp(1, 500));
     rows
 }
 
@@ -891,18 +928,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn builds_strict_valuation_rows_from_real_fields() {
-        let filters = ValuationFilters {
-            board: "全部".to_string(),
-            industry: "全部".to_string(),
+    fn valuation_filters() -> ValuationFilters {
+        ValuationFilters {
+            boards: vec!["全部".to_string()],
+            industries: vec!["全部".to_string()],
             state: "全部".to_string(),
             ownership: "全部".to_string(),
             style: "严苛核算".to_string(),
+            stock_risk_exclusions: default_stock_risk_exclusions(),
             min_safety_margin: -999.0,
             min_governance_score: 0.0,
-            display_limit: 50,
-        };
+        }
+    }
+
+    #[test]
+    fn builds_strict_valuation_rows_from_real_fields() {
+        let filters = valuation_filters();
         let rows = build_valuation_rows(&[stock("600519", "主板", "沪市", 20.0)], &filters);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].fair_value > 0.0);
@@ -917,16 +958,10 @@ mod tests {
     }
 
     #[test]
-    fn filters_valuation_rows_by_board_and_required_fields() {
+    fn filters_valuation_rows_by_multiple_boards_and_required_fields() {
         let filters = ValuationFilters {
-            board: "科创板".to_string(),
-            industry: "全部".to_string(),
-            state: "全部".to_string(),
-            ownership: "全部".to_string(),
-            style: "严苛核算".to_string(),
-            min_safety_margin: -999.0,
-            min_governance_score: 0.0,
-            display_limit: 50,
+            boards: vec!["科创板".to_string(), "创业板".to_string()],
+            ..valuation_filters()
         };
         let missing = Stock {
             metrics: HashMap::from([
@@ -938,28 +973,21 @@ mod tests {
         let rows = build_valuation_rows(
             &[
                 stock("688001", "科创板", "沪市", 18.0),
+                stock("300001", "创业板", "深市", 18.0),
                 stock("600001", "主板", "沪市", 18.0),
                 missing,
             ],
             &filters,
         );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].stock.code, "688001");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.stock.code == "688001"));
+        assert!(rows.iter().any(|row| row.stock.code == "300001"));
         assert!(missing_real_valuation_fields(&rows[0].stock).is_empty());
     }
 
     #[test]
-    fn limits_valuation_rows_by_display_limit_after_sorting() {
-        let filters = ValuationFilters {
-            board: "全部".to_string(),
-            industry: "全部".to_string(),
-            state: "全部".to_string(),
-            ownership: "全部".to_string(),
-            style: "严苛核算".to_string(),
-            min_safety_margin: -999.0,
-            min_governance_score: 0.0,
-            display_limit: 2,
-        };
+    fn returns_all_filtered_valuation_rows_after_sorting() {
+        let filters = valuation_filters();
         let rows = build_valuation_rows(
             &[
                 stock("600001", "主板", "沪市", 18.0),
@@ -968,7 +996,53 @@ mod tests {
             ],
             &filters,
         );
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert!(rows[0].safety_margin >= rows[1].safety_margin);
+        assert!(rows[1].safety_margin >= rows[2].safety_margin);
+    }
+
+    #[test]
+    fn filters_valuation_rows_by_stock_risk_exclusions() {
+        let exclude_filters = valuation_filters();
+        let include_filters = ValuationFilters {
+            stock_risk_exclusions: Vec::new(),
+            ..valuation_filters()
+        };
+        let partial_filters = ValuationFilters {
+            stock_risk_exclusions: vec!["ST".to_string(), "退市".to_string()],
+            ..valuation_filters()
+        };
+        let plain_st_stock = Stock {
+            name: "ST风险".to_string(),
+            is_st: true,
+            ..stock("600004", "主板", "沪市", 18.0)
+        };
+        let star_st_stock = Stock {
+            name: "*ST风险".to_string(),
+            is_st: true,
+            ..stock("600006", "主板", "沪市", 18.0)
+        };
+        let delisted_stock = Stock {
+            name: "搜特退".to_string(),
+            ..stock("002503", "主板", "深市", 18.0)
+        };
+        let normal_stock = stock("600005", "主板", "沪市", 18.0);
+
+        let stocks = [
+            normal_stock.clone(),
+            plain_st_stock.clone(),
+            star_st_stock.clone(),
+            delisted_stock.clone(),
+        ];
+        let excluded_rows = build_valuation_rows(&stocks, &exclude_filters);
+        let included_rows = build_valuation_rows(&stocks, &include_filters);
+        let partial_rows = build_valuation_rows(&stocks, &partial_filters);
+
+        assert_eq!(excluded_rows.len(), 1);
+        assert_eq!(excluded_rows[0].stock.code, "600005");
+        assert_eq!(included_rows.len(), 4);
+        assert_eq!(partial_rows.len(), 2);
+        assert!(partial_rows.iter().any(|row| row.stock.code == "600005"));
+        assert!(partial_rows.iter().any(|row| row.stock.code == "600006"));
     }
 }

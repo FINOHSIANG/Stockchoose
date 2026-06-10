@@ -16,7 +16,7 @@ use std::{
 use stockchoose_collectors::tencent::{TencentKlinePoint, TencentQuoteRow};
 use stockchoose_collectors::{
     AnnouncementRow, CollectorError, EastmoneyClient, FinancialMetricRow, GdeltClient,
-    TencentClient,
+    StockProfileRow, TencentClient,
 };
 use stockchoose_core::{
     build_annual_financial_reports, build_valuation_rows, create_trade_plan,
@@ -597,6 +597,13 @@ struct TechnicalIndicatorQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct StockProfileQuery {
+    name: Option<String>,
+    industry1: Option<String>,
+    industry2: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StockUniverseQuery {
     #[serde(default = "default_true_bool")]
@@ -735,6 +742,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/market/stock/:code/kline-points",
             get(market_kline_points),
         )
+        .route("/api/market/stock/:code/profile", get(market_stock_profile))
         .route("/api/finance/statements/:date", get(finance_statements))
         .route("/api/finance/metrics/:date", get(finance_metrics))
         .route(
@@ -1657,6 +1665,24 @@ async fn market_kline_points(
     Ok(Json(json!(
         state.tencent.kline_points(&symbol, period, limit).await?
     )))
+}
+
+async fn market_stock_profile(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Query(query): Query<StockProfileQuery>,
+) -> Result<Json<StockProfileRow>, ApiError> {
+    Ok(Json(
+        state
+            .eastmoney
+            .fetch_stock_profile(
+                &code,
+                query.name.as_deref(),
+                query.industry1.as_deref(),
+                query.industry2.as_deref(),
+            )
+            .await?,
+    ))
 }
 
 async fn fetch_technical_indicator_metrics(

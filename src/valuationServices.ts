@@ -8,6 +8,7 @@ export type ValuationModel = "DCF现金流" | "PE盈利" | "PB-ROE" | "PS成长"
 export type ValuationStyle = "严苛核算" | "均衡核算" | "保守核算" | "成长核算" | "资产核算";
 export type EnterpriseState = "高速成长" | "稳定成熟" | "周期修复" | "困境承压" | "资产防御";
 export type ValuationVerdict = "深度低估" | "低估" | "合理" | "偏高" | "高估";
+export type ValuationRiskExclusion = "ST" | "*ST" | "退市";
 
 export interface IndustryValuationProfile {
   industry: string;
@@ -51,14 +52,14 @@ export interface BalanceSheetBreakdown {
 }
 
 export interface ValuationFilters {
-  board: ValuationBoardFilter;
-  industry: string;
+  boards: ValuationBoardFilter[];
+  industries: string[];
   state: "全部" | EnterpriseState;
   ownership: string;
   style: ValuationStyle;
+  stockRiskExclusions: ValuationRiskExclusion[];
   minSafetyMargin: number;
   minGovernanceScore: number;
-  displayLimit: number;
 }
 
 export interface ValuationRow {
@@ -156,14 +157,14 @@ export type ValuationBoardFilter = "全部" | "A股" | "沪市" | "深市" | "�
 export const valuationBoardOptions: ValuationBoardFilter[] = ["全部", "A股", "沪市", "深市", "主板", "科创板", "创业板", "北交所"];
 
 export const defaultValuationFilters: ValuationFilters = {
-  board: "全部",
-  industry: "全部",
+  boards: ["全部"],
+  industries: ["全部"],
   state: "全部",
   ownership: "全部",
   style: "严苛核算",
+  stockRiskExclusions: ["ST", "*ST", "退市"],
   minSafetyMargin: -999,
-  minGovernanceScore: 0,
-  displayLimit: 50
+  minGovernanceScore: 0
 };
 
 const realValuationRequiredFields: Array<{ key: string; label: string; positive?: boolean }> = [

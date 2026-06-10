@@ -32,6 +32,15 @@ export interface StockKlineHistoryResult {
   sourceRows: number;
 }
 
+export interface StockProfileResult {
+  ok: boolean;
+  checkedAt: string;
+  message: string;
+  details: string;
+  stock: Stock;
+  source: string;
+}
+
 export type StockKlinePeriod = "day" | "week" | "month";
 
 interface NormalizedQuote {
@@ -59,9 +68,11 @@ const RUST_TENCENT_QUOTE_ROWS_BASE = "/api/market/tencent/quote-rows";
 const RUST_TENCENT_ASHARE_QUOTE_ROWS_URL = "/api/market/tencent/ashare/quotes";
 const RUST_TENCENT_KLINE_POINTS_BASE = "/api/market/tencent/kline-points";
 const RUST_TECHNICAL_INDICATORS_BASE = "/api/market/technical-indicators";
+const RUST_STOCK_PROFILE_BASE = "/api/market/stock";
 const TECHNICAL_INDICATOR_CODE_LIMIT = 200;
 const TECHNICAL_INDICATOR_KLINE_LIMIT = 120;
 const LISTED_ASHARE_CODE_PATTERN = /^(60[0-5]|688|689|000|001|002|003|300|301|302|920)\d{3}$/;
+const EMPTY_PROFILE_VALUES = new Set(["", "-", "--", "暂无", "未披露", "未分类", "腾讯行情", "东方财富行情"]);
 
 interface RustTechnicalIndicatorRow {
   code?: unknown;
@@ -76,6 +87,26 @@ interface NormalizedTechnicalIndicatorRow {
   sourceRows: number;
   reportDate?: string;
   metrics: Record<string, number>;
+}
+
+interface RustStockProfilePayload {
+  code?: unknown;
+  name?: unknown;
+  website?: unknown;
+  industry1?: unknown;
+  industry2?: unknown;
+  industryTags?: unknown;
+  source?: unknown;
+}
+
+interface NormalizedStockProfile {
+  code: string;
+  name: string;
+  website?: string;
+  industry1?: string;
+  industry2?: string;
+  industryTags: string[];
+  source: string;
 }
 
 const toNumber = (value: unknown) => {
@@ -203,6 +234,77 @@ function technicalIndicatorRowsFromPayload(payload: unknown): NormalizedTechnica
     .filter((row): row is NormalizedTechnicalIndicatorRow => Boolean(row));
   if (payload.length && !rows.length) throw new Error("Rust technical indicator API returned invalid payload");
   return rows;
+}
+
+const usefulProfileText = (value: unknown) => {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value).trim();
+  return !EMPTY_PROFILE_VALUES.has(text) ? text : undefined;
+};
+
+const normalizeProfileWebsite = (value: unknown) => {
+  const text = usefulProfileText(value);
+  if (!text) return undefined;
+  const token =
+    text
+      .split(/[\s,，;；|]+/)
+      .find((item) => item.includes(".")) ?? text;
+  const trimmed = token.trim().replace(/[。；;，,]+$/g, "");
+  if (!trimmed || EMPTY_PROFILE_VALUES.has(trimmed)) return undefined;
+  if (/^https?:\/\//i.test(trimmed) && trimmed.includes(".")) return trimmed;
+  if (/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(\/.*)?$/i.test(trimmed)) return `https://${trimmed}`;
+  return undefined;
+};
+
+const profileTextList = (value: unknown) => {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,，;；、|]+/) : [];
+  return values.map(usefulProfileText).filter((item): item is string => Boolean(item));
+};
+
+const compactProfileTags = (values: Array<string | undefined>) => {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  values.forEach((value) => {
+    const text = usefulProfileText(value);
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    result.push(text);
+  });
+  return result;
+};
+
+function stockProfileFromPayload(payload: unknown): NormalizedStockProfile {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Rust Eastmoney F10 profile API returned invalid payload");
+  }
+  const row = payload as RustStockProfilePayload;
+  return {
+    code: usefulProfileText(row.code) ?? "",
+    name: usefulProfileText(row.name) ?? "",
+    website: normalizeProfileWebsite(row.website),
+    industry1: usefulProfileText(row.industry1),
+    industry2: usefulProfileText(row.industry2),
+    industryTags: compactProfileTags(profileTextList(row.industryTags)),
+    source: usefulProfileText(row.source) ?? "eastmoney-f10"
+  };
+}
+
+function mergeStockProfile(stock: Stock, profile: NormalizedStockProfile): Stock {
+  const industry1 = profile.industry1 ?? stock.industry1;
+  const industry2 = profile.industry2 ?? stock.industry2;
+  const industryTags = compactProfileTags([
+    ...(stock.industryTags ?? []),
+    industry1,
+    industry2,
+    ...profile.industryTags
+  ]);
+  return {
+    ...stock,
+    website: profile.website ?? stock.website,
+    industry1,
+    industry2,
+    industryTags: industryTags.length ? industryTags : stock.industryTags
+  };
 }
 
 async function responseErrorSuffix(response: Response) {
@@ -491,6 +593,8 @@ function mergeExistingStockWithTencentQuote(existing: Stock | undefined, quoteSt
     ...quoteStock,
     industry1: hasRealFinancialData ? usefulExistingText(existing.industry1, ["未分类"]) || quoteStock.industry1 : quoteStock.industry1,
     industry2: hasRealFinancialData ? usefulExistingText(existing.industry2, ["未分类", "腾讯行情"]) || quoteStock.industry2 : quoteStock.industry2,
+    website: existing.website,
+    industryTags: existing.industryTags,
     region: hasRealFinancialData ? usefulExistingText(existing.region, ["未分类", "未披露"]) || quoteStock.region : quoteStock.region,
     property: hasRealFinancialData ? existing.property || quoteStock.property : quoteStock.property,
     isMargin: hasRealFinancialData ? existing.isMargin || quoteStock.isMargin : quoteStock.isMargin,
@@ -542,6 +646,64 @@ export async function fetchStockKlineHistory(
       message: `K线获取失败：${klineErrorText(error)}`,
       points: [],
       sourceRows: 0
+    };
+  }
+}
+
+export async function fetchStockProfileAutoMatch(
+  stock: Stock,
+  fetchImpl: FetchLike = fetch
+): Promise<StockProfileResult> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const params = new URLSearchParams();
+    const queryFields = [
+      ["name", stock.name],
+      ["industry1", stock.industry1],
+      ["industry2", stock.industry2]
+    ] as const;
+    queryFields.forEach(([key, value]) => {
+      const text = usefulProfileText(value);
+      if (text) params.set(key, text);
+    });
+
+    const code = encodeURIComponent(marketDataCodeForStock(stock));
+    const query = params.toString();
+    const response = await fetchImpl(`${RUST_STOCK_PROFILE_BASE}/${code}/profile${query ? `?${query}` : ""}`);
+    if (!response.ok) {
+      throw new Error(`Rust Eastmoney F10 profile API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    }
+
+    const profile = stockProfileFromPayload(await jsonFromResponse(response, "Rust Eastmoney F10 profile API"));
+    const nextStock = mergeStockProfile(stock, profile);
+    const matched = Boolean(profile.website || profile.industry1 || profile.industry2 || profile.industryTags.length);
+    if (!matched) {
+      return {
+        ok: false,
+        checkedAt,
+        message: "官网/行业标签自动匹配未返回新增字段",
+        details: `Rust ${profile.source} 已请求 ${stock.name}(${stock.code})，但未返回官网或行业标签`,
+        stock,
+        source: profile.source
+      };
+    }
+
+    return {
+      ok: true,
+      checkedAt,
+      message: "官网/行业标签自动匹配完成",
+      details: `Rust ${profile.source} 匹配 ${profile.name || stock.name}，${profile.website ? "官网已更新" : "官网未返回"}，行业标签 ${nextStock.industryTags?.length ?? 0} 个`,
+      stock: nextStock,
+      source: profile.source
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      checkedAt,
+      message: "官网/行业标签自动匹配失败",
+      details: error instanceof Error ? error.message : "未知网络错误",
+      stock,
+      source: "eastmoney-f10"
     };
   }
 }

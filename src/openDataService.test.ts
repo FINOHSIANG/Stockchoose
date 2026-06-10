@@ -209,7 +209,7 @@ const rustTechnicalIndicatorRows = [
 
 const ashareHubRowsByEndpoint: Record<string, Record<string, unknown>[]> = {
   "reference/stocks": [
-    { ts_code: "600519.SH", symbol: "600519", name: "贵州茅台", area: "贵州", industry: "白酒", market: "主板", exchange: "SSE", list_date: "20010827" },
+    { ts_code: "600519.SH", symbol: "600519", name: "贵州茅台", area: "贵州", industry: "白酒", market: "主板", exchange: "SSE", list_date: "20010827", website: "www.moutaichina.com", concept: "高端白酒,贵州国企" },
     { ts_code: "000858.SZ", symbol: "000858", name: "五粮液", area: "四川", industry: "白酒", market: "主板", exchange: "SZSE", list_date: "19980427" }
   ],
   "reference/industries": [
@@ -681,6 +681,8 @@ describe("openDataService", () => {
     expect(result.summary.valuationReadyRows).toBeGreaterThanOrEqual(1);
     expect(maotai?.name).toBe("贵州茅台");
     expect(maotai?.industry1).toBe("食品饮料");
+    expect(maotai?.website).toBe("https://www.moutaichina.com");
+    expect(maotai?.industryTags).toEqual(expect.arrayContaining(["高端白酒", "贵州国企", "食品饮料", "白酒"]));
     expect(maotai?.metrics.price).toBe(1688.88);
     expect(maotai?.metrics.amount).toBeCloseTo(9.88, 2);
     expect(maotai?.metrics.marketCap).toBe(21000);

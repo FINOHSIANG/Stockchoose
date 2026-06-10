@@ -164,15 +164,18 @@ import {
   valuationBoardOptions,
   valuationStyleOptions,
   type ValuationFilters,
+  type ValuationRiskExclusion,
   type ValuationRow
 } from "./valuationServices";
 import {
+  fetchStockProfileAutoMatch,
   fetchStockKlineHistory,
   syncTencentAllAshareMarketData,
   syncTencentRealMarketData,
   type StockKlineHistoryResult,
   type StockKlinePeriod,
-  type StockKlinePoint
+  type StockKlinePoint,
+  type StockProfileResult
 } from "./realMarketDataService";
 import {
   displayStockCode,
@@ -224,7 +227,8 @@ const guornFactorKeysByGroup: Partial<Record<FactorGroup, string[]>> = {
     "tradingDays"
   ]
 };
-const fallbackResultFactorKeys = ["qualityScore", "pe", "momentum60"];
+const hiddenSelectionResultFactorKeys = new Set(["qualityScore"]);
+const fallbackResultFactorKeys = ["pe", "momentum60", "roe"];
 const priceDetailNames = [
   "开盘价",
   "收盘价",
@@ -421,6 +425,12 @@ const valuationSortLabels: Record<ValuationSortKey, string> = {
   governanceScore: "治理",
   action: "动作"
 };
+const defaultValuationPageSize = 50;
+const valuationRiskExclusionOptions: Array<{ value: ValuationRiskExclusion; label: string }> = [
+  { value: "ST", label: "筛除 ST" },
+  { value: "*ST", label: "筛除 *ST" },
+  { value: "退市", label: "筛除退市" }
+];
 
 const defaultSentimentFilters: SentimentFilters = {
   category: "全部",
@@ -438,6 +448,17 @@ function pct(value: number) {
 function round(value: number, precision = 2) {
   const scale = 10 ** precision;
   return Math.round(value * scale) / scale;
+}
+
+function toggleAllBackedOption<T extends string>(current: T[], value: T, allValue: T): T[] {
+  if (value === allValue) return [allValue];
+  const selected = current.filter((item) => item !== allValue);
+  const next = selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value];
+  return next.length ? next : [allValue];
+}
+
+function toggleOption<T extends string>(current: T[], value: T): T[] {
+  return current.includes(value) ? current.filter((item) => item !== value) : [...current, value];
 }
 
 function normalizeMinimumTradeAmount(value: unknown, fallback = 1000) {
@@ -705,6 +726,7 @@ function getResultFactorKeys(strategy: StrategyConfig) {
   const selected = strategy.ranks
     .filter((rank) => rank.enabled)
     .map((rank) => rank.factorKey)
+    .filter((key) => !hiddenSelectionResultFactorKeys.has(key))
     .filter((key, index, keys) => keys.indexOf(key) === index);
   const merged = [...selected, ...fallbackResultFactorKeys].filter((key, index, keys) => keys.indexOf(key) === index);
   return merged.slice(0, 3);
@@ -721,6 +743,21 @@ function getFilterConditionLabel(condition: FilterCondition, factors: Factor[]) 
   const factorName = getFactorName(factors, condition.factorKey);
   const scope = condition.range === "全部" ? "" : `（${condition.range}）`;
   return `${factorName}${scope} ${getOperatorLabel(condition.operator)} ${getFilterConditionValueLabel(condition)}`;
+}
+
+function getFilterMetricItem(row: SelectionRow, condition: FilterCondition, factors: Factor[]) {
+  const factor = factorByKey(factors, condition.factorKey);
+  const hasRawMetric = Object.prototype.hasOwnProperty.call(row.stock.metrics, condition.factorKey);
+  let value = Number.NaN;
+  if (factor?.formula || hasRawMetric) {
+    value = factor ? metricValue(row.stock, factor, factors) : row.stock.metrics[condition.factorKey];
+  }
+  return {
+    key: `${condition.id}-${condition.factorKey}`,
+    name: getFactorName(factors, condition.factorKey),
+    value: formatMetric(value, factor),
+    title: getFilterConditionLabel(condition, factors)
+  };
 }
 
 function getRankFactorKeys(strategy: StrategyConfig) {
@@ -1279,6 +1316,104 @@ function compactUniqueTexts(values: Array<string | undefined>) {
   return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
 }
 
+function normalizeOfficialWebsite(value: string | undefined) {
+  if (!value) return "";
+  const token = value.split(/[\s,，;；|]+/).find((item) => item.includes(".")) ?? value;
+  const trimmed = token.trim().replace(/[。；;，,]+$/g, "");
+  if (!trimmed || ["-", "--", "暂无", "未披露"].includes(trimmed)) return "";
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(\/.*)?$/i.test(trimmed)) return `https://${trimmed}`;
+  return "";
+}
+
+function displayWebsiteHost(url: string) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url.replace(/^https?:\/\//i, "");
+  }
+}
+
+function stockIndustryTags(stock: Stock) {
+  return compactUniqueTexts([
+    ...(stock.industryTags ?? []),
+    stock.industry1,
+    stock.industry2,
+    stock.board,
+    ...stock.indexes
+  ]).filter((tag) => !["未分类", "腾讯行情", "东方财富行情"].includes(tag)).slice(0, 12);
+}
+
+function StockOfficialInfoSection({
+  stock,
+  status,
+  loading,
+  onRefresh
+}: {
+  stock: Stock;
+  status: string;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const website = normalizeOfficialWebsite(stock.website);
+  const tags = stockIndustryTags(stock);
+  return (
+    <div className="stock-info-section stock-official-section">
+      <div className="stock-info-section-title">
+        <div>
+          <h4>官网与行业标签</h4>
+          <p>官网和行业标签来自已同步基础资料，并通过 Rust F10 接口自动匹配补齐。</p>
+        </div>
+        <div className="stock-official-actions">
+          <button className="btn" type="button" onClick={onRefresh} disabled={loading}>
+            <RefreshCcw size={14} />
+            {loading ? "匹配中" : "自动匹配官网/标签"}
+          </button>
+        </div>
+      </div>
+      <div className={status.includes("失败") ? "stock-official-status danger" : "stock-official-status"}>
+        {status}
+      </div>
+      <div className="stock-official-grid">
+        <div className="stock-official-card">
+          <span>对应官网</span>
+          {website ? (
+            <a href={website} target="_blank" rel="noreferrer" title={website}>
+              {displayWebsiteHost(website)}
+            </a>
+          ) : (
+            <strong>暂无官网数据</strong>
+          )}
+          <em>{website ? "点击打开公司官方网站" : "同步包含官网字段的基础资料后自动显示"}</em>
+        </div>
+        <div className="stock-official-card">
+          <span>行业标签</span>
+          {tags.length ? (
+            <div className="stock-industry-tag-list">
+              {tags.map((tag) => (
+                <b key={tag}>{tag}</b>
+              ))}
+            </div>
+          ) : (
+            <strong>暂无行业标签</strong>
+          )}
+          <em>用于快速识别行业、板块和指数归属</em>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function mergeStockProfileFields(current: Stock, profileStock: Stock): Stock {
+  return {
+    ...current,
+    website: profileStock.website ?? current.website,
+    industry1: profileStock.industry1,
+    industry2: profileStock.industry2,
+    industryTags: profileStock.industryTags ?? current.industryTags
+  };
+}
+
 function stockRelatedNewsSources(newsSourceSettings: NewsSourceSettings, stock: Stock): NewsSourceEndpoint[] {
   const terms = compactUniqueTexts([stock.name, stock.code, stock.industry1, stock.industry2]);
   const query = terms.join(" OR ");
@@ -1451,13 +1586,55 @@ function StockInfoModal({
   const [klineLoading, setKlineLoading] = useState(false);
   const [stockInfoSyncStatus, setStockInfoSyncStatus] = useState("腾讯股票信息接口已就绪");
   const [stockInfoSyncing, setStockInfoSyncing] = useState(false);
+  const [stockProfileStatus, setStockProfileStatus] = useState("官网/行业标签自动匹配待请求");
+  const [stockProfileLoading, setStockProfileLoading] = useState(false);
   const stock = liveStock;
   const stockCode = stock?.code ?? "";
+
+  const applyStockProfileResult = (result: StockProfileResult) => {
+    if (result.ok) {
+      setLiveStock((current) =>
+        current && current.code === result.stock.code ? mergeStockProfileFields(current, result.stock) : result.stock
+      );
+    }
+    setStockProfileStatus(`${result.message}：${result.details}`);
+  };
 
   useEffect(
     function resetLiveStockOnTargetChange() {
       setLiveStock(sourceStock ?? null);
       setStockInfoSyncStatus(sourceStock ? "腾讯股票信息接口已就绪" : "当前股票池未收录，无法请求股票信息");
+      setStockProfileStatus(sourceStock ? "官网/行业标签将在打开后自动匹配" : "当前股票池未收录，无法自动匹配官网/行业标签");
+    },
+    [sourceStock?.code]
+  );
+
+  useEffect(
+    function autoMatchStockOfficialInfo() {
+      if (!sourceStock) {
+        setStockProfileLoading(false);
+        return;
+      }
+
+      let active = true;
+      setStockProfileLoading(true);
+      setStockProfileStatus("正在通过 Rust Eastmoney F10 自动匹配官网和行业标签...");
+
+      fetchStockProfileAutoMatch(sourceStock)
+        .then((result) => {
+          if (active) applyStockProfileResult(result);
+        })
+        .catch((error) => {
+          if (!active) return;
+          setStockProfileStatus(`官网/行业标签自动匹配失败：${readableError(error)}`);
+        })
+        .finally(() => {
+          if (active) setStockProfileLoading(false);
+        });
+
+      return function cancelStockOfficialInfoMatch() {
+        active = false;
+      };
     },
     [sourceStock?.code]
   );
@@ -1497,6 +1674,15 @@ function StockInfoModal({
     },
     [stockCode, klinePeriod]
   );
+
+  const refreshStockProfile = async () => {
+    if (!stock) return;
+    setStockProfileLoading(true);
+    setStockProfileStatus("正在通过 Rust Eastmoney F10 自动匹配官网和行业标签...");
+    const result = await fetchStockProfileAutoMatch(stock);
+    applyStockProfileResult(result);
+    setStockProfileLoading(false);
+  };
 
   const refreshStockInfo = async () => {
     if (!stock) return;
@@ -1604,6 +1790,12 @@ function StockInfoModal({
 
         <StockKlinePanel result={klineResult} loading={klineLoading} period={klinePeriod} onPeriodChange={setKlinePeriod} />
 
+        <StockOfficialInfoSection
+          stock={stock}
+          status={stockProfileStatus}
+          loading={stockProfileLoading}
+          onRefresh={refreshStockProfile}
+        />
         <StockAnnualFinancialReportSection stock={stock} />
         <StockRelatedInfoSection stock={stock} stocks={stocks} newsSourceSettings={newsSourceSettings} />
         <StockInfoDetailGrid title="公司与交易属性" description="公司属性、交易属性、指数成分与上市交易状态。" items={companyAttributeItems} columns={2} />
@@ -2912,7 +3104,7 @@ function ScreenStep({
               ))}
             </select>
           </label>
-          <NumberField label="股票上限(只)" value={strategy.poolLimit} min={1} onChange={(poolLimit) => patchStrategy({ poolLimit })} />
+          <NumberField label="选股数量" value={strategy.poolLimit} min={1} onChange={(poolLimit) => patchStrategy({ poolLimit })} />
           <NumberField label="调仓周期(交易日)" value={strategy.screenPeriod} min={1} onChange={(screenPeriod) => patchStrategy({ screenPeriod })} />
           <button className="icon-action" onClick={openPoolModal} title="新建股票池">
             <Plus size={17} />
@@ -4178,6 +4370,8 @@ function ValuationWorkspace({
     key: "safetyMargin",
     direction: "desc"
   });
+  const [valuationPage, setValuationPage] = useState(1);
+  const [valuationPageSize, setValuationPageSize] = useState(defaultValuationPageSize);
   const industryOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.industry1))).sort()], [stocks]);
   const ownershipOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.property))).sort()], [stocks]);
   const missingRealValuationCount = useMemo(
@@ -4279,8 +4473,13 @@ function ValuationWorkspace({
       return b.safetyMargin - a.safetyMargin || a.stock.code.localeCompare(b.stock.code);
     });
   }, [searchedRows, valuationSort]);
+  const totalValuationPages = Math.max(1, Math.ceil(sortedRows.length / valuationPageSize));
+  const safeValuationPage = Math.min(valuationPage, totalValuationPages);
+  const valuationPageStart = sortedRows.length ? (safeValuationPage - 1) * valuationPageSize : 0;
+  const valuationPageRows = sortedRows.slice(valuationPageStart, valuationPageStart + valuationPageSize);
+  const valuationPageEnd = valuationPageStart + valuationPageRows.length;
   const summary = useMemo(() => summarizeValuationRows(searchedRows), [searchedRows]);
-  const selected = sortedRows.find((row) => row.stock.code === selectedCode) ?? sortedRows[0] ?? null;
+  const selected = sortedRows.find((row) => row.stock.code === selectedCode) ?? valuationPageRows[0] ?? sortedRows[0] ?? null;
   const unmatchedCodeQuery = Boolean(normalizedValuationQuery && valuationCodeQuery.isCodeLike && !searchedRows.length);
   const firstMissingRealFields = useMemo(() => {
     if (!isRealDataReady) return "";
@@ -4297,20 +4496,26 @@ function ValuationWorkspace({
   const patchFilters = (patch: Partial<ValuationFilters>) => {
     setFilters((current) => ({ ...current, ...patch }));
     setSelectedCode(null);
+    setValuationPage(1);
   };
-  const updateValuationDisplayLimit = (value: number) => {
-    const displayLimit = Number.isFinite(value) ? Math.floor(value) : defaultValuationFilters.displayLimit;
-    patchFilters({ displayLimit: Math.min(500, Math.max(1, displayLimit)) });
+  const updateValuationPageSize = (value: number) => {
+    const pageSize = Number.isFinite(value) ? Math.floor(value) : defaultValuationPageSize;
+    setValuationPageSize(Math.max(1, pageSize));
+    setValuationPage(1);
+    setSelectedCode(null);
   };
   const resetValuationControls = () => {
     setFilters(defaultValuationFilters);
     setValuationQuery("");
     setSelectedCode(null);
+    setValuationPage(1);
+    setValuationPageSize(defaultValuationPageSize);
   };
   const recalculateValuation = () => {
     setValuationRecalcKey((current) => current + 1);
     setValuationCalculatedAt(new Date().toISOString());
     setSelectedCode(null);
+    setValuationPage(1);
   };
 
   const formatValue = (value: number, suffix = "") => `${round(value, 2)}${suffix}`;
@@ -4319,6 +4524,7 @@ function ValuationWorkspace({
   const updateValuationQuery = (value: string) => {
     setValuationQuery(value);
     setSelectedCode(null);
+    setValuationPage(1);
   };
   const toggleValuationSort = (key: ValuationSortKey) => {
     setValuationSort((current) => ({
@@ -4326,6 +4532,7 @@ function ValuationWorkspace({
       direction: current.key === key && current.direction === "desc" ? "asc" : "desc"
     }));
     setSelectedCode(null);
+    setValuationPage(1);
   };
   const sortDirectionLabel = valuationSort.direction === "desc" ? "降序" : "升序";
   const financeMatchedRows = financeSummary.financeMatchedRows ?? 0;
@@ -4387,22 +4594,54 @@ function ValuationWorkspace({
             </em>
           ) : null}
         </label>
-        <label>
+        <div className="valuation-option-filter valuation-board-filter">
           <span>板块</span>
-          <select value={filters.board} onChange={(event) => patchFilters({ board: event.target.value as ValuationFilters["board"] })}>
+          <div className="valuation-option-group" role="group" aria-label="价值核算板块">
             {valuationBoardOptions.map((board) => (
-              <option key={board} value={board}>{board}</option>
+              <button
+                className={`valuation-option-chip ${filters.boards.includes(board) ? "active" : ""}`}
+                type="button"
+                key={board}
+                aria-pressed={filters.boards.includes(board)}
+                onClick={() => patchFilters({ boards: toggleAllBackedOption(filters.boards, board, "全部") })}
+              >
+                {board}
+              </button>
             ))}
-          </select>
-        </label>
-        <label>
+          </div>
+        </div>
+        <div className="valuation-option-filter valuation-status-filter">
+          <span>筛除风险</span>
+          <div className="valuation-option-group" role="group" aria-label="价值核算风险状态">
+            {valuationRiskExclusionOptions.map((option) => (
+              <button
+                className={`valuation-option-chip ${filters.stockRiskExclusions.includes(option.value) ? "active" : ""}`}
+                type="button"
+                key={option.value}
+                aria-pressed={filters.stockRiskExclusions.includes(option.value)}
+                onClick={() => patchFilters({ stockRiskExclusions: toggleOption(filters.stockRiskExclusions, option.value) })}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="valuation-option-filter valuation-industry-filter">
           <span>行业</span>
-          <select value={filters.industry} onChange={(event) => patchFilters({ industry: event.target.value })}>
+          <div className="valuation-option-group scroll" role="group" aria-label="价值核算行业">
             {industryOptions.map((industry) => (
-              <option key={industry} value={industry}>{industry}</option>
+              <button
+                className={`valuation-option-chip ${filters.industries.includes(industry) ? "active" : ""}`}
+                type="button"
+                key={industry}
+                aria-pressed={filters.industries.includes(industry)}
+                onClick={() => patchFilters({ industries: toggleAllBackedOption(filters.industries, industry, "全部") })}
+              >
+                {industry}
+              </button>
             ))}
-          </select>
-        </label>
+          </div>
+        </div>
         <label>
           <span>企业状态</span>
           <select value={filters.state} onChange={(event) => patchFilters({ state: event.target.value as ValuationFilters["state"] })}>
@@ -4436,10 +4675,10 @@ function ValuationWorkspace({
           <input type="number" min={0} max={100} value={filters.minGovernanceScore} onChange={(event) => patchFilters({ minGovernanceScore: Number(event.target.value) })} />
         </label>
         <label>
-          <span>显示数量</span>
-          <input type="number" min={1} max={500} step={1} value={filters.displayLimit} onChange={(event) => updateValuationDisplayLimit(Number(event.target.value))} />
+          <span>每页数量</span>
+          <input type="number" min={1} step={1} value={valuationPageSize} onChange={(event) => updateValuationPageSize(Number(event.target.value))} />
         </label>
-        <button className="btn" onClick={resetValuationControls}>重置</button>
+        <button className="btn valuation-filter-reset" onClick={resetValuationControls}>重置</button>
       </div>
 
       <div className="valuation-summary">
@@ -4479,11 +4718,22 @@ function ValuationWorkspace({
       <div className={`valuation-layout ${valuationDetailCollapsed ? "detail-collapsed" : ""}`}>
         <section className="valuation-panel valuation-table-panel">
           <div className="valuation-panel-title">
-            <h3>价值核算排序</h3>
-            <span>
-              {normalizedValuationQuery ? `检索 ${searchedRows.length}/${rows.length}，` : `显示 ${sortedRows.length} 只，`}
-              按{valuationSortLabels[valuationSort.key]}{sortDirectionLabel}排列
-            </span>
+            <div className="valuation-panel-heading">
+              <h3>价值核算排序</h3>
+              <span>
+                {normalizedValuationQuery ? `检索 ${searchedRows.length}/${rows.length}，` : `结果 ${sortedRows.length} 只，`}
+                本页 {valuationPageRows.length ? `${valuationPageStart + 1}-${valuationPageEnd}` : "0"}，按{valuationSortLabels[valuationSort.key]}{sortDirectionLabel}排列
+              </span>
+            </div>
+            <div className="valuation-pagination" aria-label="价值核算分页">
+              <button className="btn" type="button" disabled={safeValuationPage <= 1} onClick={() => setValuationPage(Math.max(1, safeValuationPage - 1))}>
+                上一页
+              </button>
+              <span>第 {safeValuationPage}/{totalValuationPages} 页</span>
+              <button className="btn" type="button" disabled={safeValuationPage >= totalValuationPages} onClick={() => setValuationPage(Math.min(totalValuationPages, safeValuationPage + 1))}>
+                下一页
+              </button>
+            </div>
           </div>
           <table className="data-table valuation-table">
             <thead>
@@ -4501,7 +4751,7 @@ function ValuationWorkspace({
               </tr>
             </thead>
             <tbody>
-              {sortedRows.map((row) => (
+              {valuationPageRows.map((row) => (
                 <tr key={row.stock.code} className={selected?.stock.code === row.stock.code ? "active" : ""} onClick={() => setSelectedCode(row.stock.code)}>
                   <td>
                     <button
@@ -6964,28 +7214,40 @@ function SelectionTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => (
-            <tr key={row.stock.code}>
-              <td>{index + 1}</td>
-              <td>{displayStockCode(row.stock)}</td>
-              <td>
-                <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
-              </td>
-              <td>{row.stock.industry1}</td>
-              <td>{row.score.toFixed(2)}</td>
-              <td>{row.weight}%</td>
-              {showFilterMetric ? (
-                <td className="filter-pass-cell" title={filterTitle}>
-                  <span className={enabledFilters.length && row.passedFilters >= enabledFilters.length ? "filter-pass-chip pass" : "filter-pass-chip"}>
-                    {enabledFilters.length ? `${row.passedFilters}/${enabledFilters.length}` : "未设置"}
-                  </span>
+          {rows.map((row, index) => {
+            const filterMetrics = enabledFilters.map((condition) => getFilterMetricItem(row, condition, factors));
+            return (
+              <tr key={row.stock.code}>
+                <td>{index + 1}</td>
+                <td>{displayStockCode(row.stock)}</td>
+                <td>
+                  <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
                 </td>
-              ) : null}
-              {rankFactors.map((key) => (
-                <td key={key}>{formatMetric(metricValue(row.stock, factorByKey(factors, key), factors), factorByKey(factors, key))}</td>
-              ))}
-            </tr>
-          ))}
+                <td>{row.stock.industry1}</td>
+                <td>{row.score.toFixed(2)}</td>
+                <td>{row.weight}%</td>
+                {showFilterMetric ? (
+                  <td className="filter-pass-cell">
+                    {filterMetrics.length ? (
+                      <div className="filter-metric-list" title={filterTitle}>
+                        {filterMetrics.map((item) => (
+                          <span className="filter-metric-chip" key={item.key} title={item.title}>
+                            <b>{item.name}</b>
+                            <em>{item.value}</em>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="filter-metric-empty">未设置</span>
+                    )}
+                  </td>
+                ) : null}
+                {rankFactors.map((key) => (
+                  <td key={key}>{formatMetric(metricValue(row.stock, factorByKey(factors, key), factors), factorByKey(factors, key))}</td>
+                ))}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

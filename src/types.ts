@@ -45,6 +45,8 @@ export interface Stock {
   board: "主板" | "创业板" | "科创板" | "北交所";
   industry1: string;
   industry2: string;
+  website?: string;
+  industryTags?: string[];
   region: string;
   property: "国企" | "民企" | "外资";
   isST: boolean;

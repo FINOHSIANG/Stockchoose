@@ -8,6 +8,10 @@ const EASTMONEY_CLIST_URL: &str = "https://push2delay.eastmoney.com/api/qt/clist
 const EASTMONEY_KLINE_URL: &str = "https://push2his.eastmoney.com/api/qt/stock/kline/get";
 const EASTMONEY_DATACENTER_URL: &str = "https://datacenter-web.eastmoney.com/api/data/v1/get";
 const EASTMONEY_ANNOUNCEMENT_URL: &str = "https://np-anotice-stock.eastmoney.com/api/security/ann";
+const EASTMONEY_COMPANY_SURVEY_URL: &str =
+    "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax";
+const EASTMONEY_CORE_CONCEPTION_URL: &str =
+    "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax";
 const EASTMONEY_UT: &str = "bd1d9ddb04089700cf9c27f6f7426281";
 const SPOT_FIELDS: &str =
     "f12,f14,f2,f3,f5,f6,f8,f20,f21,f9,f23,f7,f24,f26,f62,f66,f69,f72,f75,f78,f81,f84,f87,f184";
@@ -50,6 +54,21 @@ pub struct AnnouncementRow {
     pub category: String,
     pub stock_codes: Vec<String>,
     pub stock_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockProfileRow {
+    pub code: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub industry1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub industry2: Option<String>,
+    pub industry_tags: Vec<String>,
+    pub source: String,
 }
 
 impl EastmoneyClient {
@@ -289,6 +308,33 @@ impl EastmoneyClient {
         rows.dedup_by(|left, right| left.id == right.id);
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    pub async fn fetch_stock_profile(
+        &self,
+        code: &str,
+        name: Option<&str>,
+        industry1: Option<&str>,
+        industry2: Option<&str>,
+    ) -> Result<StockProfileRow, CollectorError> {
+        let code = normalize_code(code);
+        let eastmoney_code = eastmoney_f10_code(&code);
+        let survey_url = url_with_params(
+            EASTMONEY_COMPANY_SURVEY_URL,
+            &[("code", eastmoney_code.clone())],
+        )?;
+        let concept_url =
+            url_with_params(EASTMONEY_CORE_CONCEPTION_URL, &[("code", eastmoney_code)])?;
+        let survey_payload = self.fetch_json(survey_url).await?;
+        let concept_payload = self.fetch_json(concept_url).await.unwrap_or(Value::Null);
+        Ok(stock_profile_from_payloads(
+            &code,
+            name,
+            industry1,
+            industry2,
+            &survey_payload,
+            &concept_payload,
+        ))
     }
 
     async fn financial_rows_for_endpoint(
@@ -701,6 +747,17 @@ fn normalize_code(value: &str) -> String {
     }
 }
 
+fn eastmoney_f10_code(code: &str) -> String {
+    let code = normalize_code(code);
+    if code.starts_with('6') || code.starts_with('9') {
+        format!("SH{code}")
+    } else if code.starts_with('8') || code.starts_with('4') {
+        format!("BJ{code}")
+    } else {
+        format!("SZ{code}")
+    }
+}
+
 fn eastmoney_secid(code: &str) -> String {
     if code.starts_with('6') || code.starts_with('9') {
         format!("1.{code}")
@@ -719,6 +776,239 @@ fn normalize_report_date(value: Option<&str>) -> String {
         return format!("{}-{}-{}", &digits[0..4], &digits[4..6], &digits[6..8]);
     }
     "2025-12-31".to_string()
+}
+
+fn stock_profile_from_payloads(
+    code: &str,
+    name: Option<&str>,
+    industry1: Option<&str>,
+    industry2: Option<&str>,
+    survey_payload: &Value,
+    concept_payload: &Value,
+) -> StockProfileRow {
+    const WEBSITE_KEYS: &[&str] = &[
+        "WEB_SITE",
+        "WEBSITE",
+        "WEB_URL",
+        "ORG_WEB",
+        "ORG_WEB_SITE",
+        "COM_WEB",
+        "OFFICIAL_WEBSITE",
+        "公司网址",
+        "官方网站",
+        "官网",
+        "网址",
+    ];
+    const NAME_KEYS: &[&str] = &[
+        "SECURITY_NAME_ABBR",
+        "SECURITY_NAME",
+        "ORG_NAME",
+        "股票简称",
+        "股票名称",
+        "公司名称",
+    ];
+    const INDUSTRY1_KEYS: &[&str] = &[
+        "INDUSTRY",
+        "INDUSTRY_NAME",
+        "CSRC_INDUSTRY",
+        "SW_INDUSTRY",
+        "所属行业",
+        "行业",
+        "一级行业",
+    ];
+    const INDUSTRY2_KEYS: &[&str] = &[
+        "INDUSTRY2",
+        "SUB_INDUSTRY",
+        "SECOND_INDUSTRY",
+        "二级行业",
+        "细分行业",
+    ];
+    const TAG_KEYS: &[&str] = &[
+        "BOARD_NAME",
+        "BOARD_NAMES",
+        "CONCEPT",
+        "CONCEPT_NAME",
+        "CONCEPT_NAMES",
+        "CORE_CONCEPTION",
+        "THEME",
+        "THEMES",
+        "SECTOR",
+        "SECTORS",
+        "概念",
+        "概念题材",
+        "所属概念",
+        "核心题材",
+        "题材",
+        "行业标签",
+    ];
+
+    let resolved_name = first_profile_text(survey_payload, NAME_KEYS)
+        .or_else(|| {
+            name.map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| code.to_string());
+    let website = first_profile_text(survey_payload, WEBSITE_KEYS)
+        .and_then(|value| normalize_profile_website(&value));
+    let resolved_industry1 = first_profile_text(survey_payload, INDUSTRY1_KEYS)
+        .or_else(|| first_profile_text(concept_payload, INDUSTRY1_KEYS))
+        .or_else(|| {
+            industry1
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    let resolved_industry2 = first_profile_text(survey_payload, INDUSTRY2_KEYS)
+        .or_else(|| first_profile_text(concept_payload, INDUSTRY2_KEYS))
+        .or_else(|| {
+            industry2
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+
+    let mut tags = Vec::new();
+    add_tag_values(&mut tags, resolved_industry1.as_deref().into_iter());
+    add_tag_values(&mut tags, resolved_industry2.as_deref().into_iter());
+    add_tag_values(
+        &mut tags,
+        profile_texts_by_keys(survey_payload, TAG_KEYS)
+            .iter()
+            .map(String::as_str),
+    );
+    add_tag_values(
+        &mut tags,
+        profile_texts_by_keys(concept_payload, TAG_KEYS)
+            .iter()
+            .map(String::as_str),
+    );
+
+    StockProfileRow {
+        code: normalize_code(code),
+        name: resolved_name,
+        website,
+        industry1: resolved_industry1,
+        industry2: resolved_industry2,
+        industry_tags: tags,
+        source: "eastmoney-f10".to_string(),
+    }
+}
+
+fn normalized_profile_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn profile_key_matches(key: &str, targets: &[&str]) -> bool {
+    let normalized = normalized_profile_key(key);
+    targets.iter().any(|target| {
+        let target = normalized_profile_key(target);
+        !target.is_empty() && (normalized == target || normalized.contains(&target))
+    })
+}
+
+fn profile_texts_by_keys(payload: &Value, keys: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    collect_profile_texts_by_keys(payload, keys, &mut values);
+    let mut unique = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() && !unique.iter().any(|item| item == value) {
+            unique.push(value.to_string());
+        }
+    }
+    unique
+}
+
+fn first_profile_text(payload: &Value, keys: &[&str]) -> Option<String> {
+    profile_texts_by_keys(payload, keys)
+        .into_iter()
+        .find(|value| !value.trim().is_empty())
+}
+
+fn collect_profile_texts_by_keys(payload: &Value, keys: &[&str], values: &mut Vec<String>) {
+    match payload {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if profile_key_matches(key, keys) {
+                    collect_profile_value_texts(value, values);
+                }
+                collect_profile_texts_by_keys(value, keys, values);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_profile_texts_by_keys(item, keys, values);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_profile_value_texts(value: &Value, values: &mut Vec<String>) {
+    match value {
+        Value::String(text) => values.push(text.trim().to_string()),
+        Value::Number(number) => values.push(number.to_string()),
+        Value::Array(items) => {
+            for item in items {
+                collect_profile_value_texts(item, values);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_profile_value_texts(item, values);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_profile_website(value: &str) -> Option<String> {
+    let token = value
+        .split(|ch: char| ch.is_whitespace() || [',', '，', ';', '；', '|'].contains(&ch))
+        .find(|item| item.contains('.'))
+        .unwrap_or(value)
+        .trim()
+        .trim_matches(|ch: char| ['。', '；', ';', '，', ','].contains(&ch));
+    if token.is_empty() || matches!(token, "-" | "--" | "暂无" | "未披露") {
+        return None;
+    }
+    let lower = token.to_lowercase();
+    if (lower.starts_with("http://") || lower.starts_with("https://")) && token.contains('.') {
+        return Some(token.to_string());
+    }
+    if token.contains('.') && !token.contains('@') && !token.contains(' ') {
+        return Some(format!("https://{token}"));
+    }
+    None
+}
+
+fn add_tag_values<'a>(tags: &mut Vec<String>, values: impl Iterator<Item = &'a str>) {
+    for value in values {
+        for tag in value.split(|ch: char| {
+            ['、', ',', '，', ';', '；', '|', '/', '\n', '\r', '\t'].contains(&ch)
+        }) {
+            let tag = tag
+                .trim()
+                .trim_matches(|ch: char| ['。', '.', ':', '：'].contains(&ch));
+            let length = tag.chars().count();
+            if length < 2
+                || length > 20
+                || tag.contains("http")
+                || tag.contains("www.")
+                || matches!(tag, "未分类" | "腾讯行情" | "东方财富行情")
+            {
+                continue;
+            }
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_string());
+            }
+        }
+    }
 }
 
 fn map_spot_row(row: &Value) -> Value {
@@ -1675,6 +1965,48 @@ mod tests {
         assert_eq!(mapped.get("listingDate"), Some(&json!(20010827)));
         assert_eq!(mapped.get("netInflow"), Some(&json!(2235612416.0)));
         assert_eq!(mapped.get("netInflowRatio"), Some(&json!(8.34)));
+    }
+
+    #[test]
+    fn normalizes_stock_profile_from_eastmoney_f10_payloads() {
+        let survey = json!({
+            "jbzl": [{
+                "SECURITY_CODE": "600519",
+                "SECURITY_NAME_ABBR": "贵州茅台",
+                "ORG_WEB": "www.moutaichina.com",
+                "INDUSTRY": "食品饮料"
+            }]
+        });
+        let concept = json!({
+            "zygcfx": [
+                { "BOARD_NAME": "高端白酒" },
+                { "BOARD_NAME": "贵州国企" }
+            ],
+            "sshy": [
+                { "CONCEPT_NAME": "白酒" }
+            ]
+        });
+
+        let profile = stock_profile_from_payloads(
+            "600519",
+            Some("贵州茅台"),
+            Some("食品饮料"),
+            Some("白酒"),
+            &survey,
+            &concept,
+        );
+
+        assert_eq!(profile.code, "600519");
+        assert_eq!(profile.name, "贵州茅台");
+        assert_eq!(
+            profile.website.as_deref(),
+            Some("https://www.moutaichina.com")
+        );
+        assert_eq!(profile.industry1.as_deref(), Some("食品饮料"));
+        assert!(profile.industry_tags.contains(&"食品饮料".to_string()));
+        assert!(profile.industry_tags.contains(&"白酒".to_string()));
+        assert!(profile.industry_tags.contains(&"高端白酒".to_string()));
+        assert!(profile.industry_tags.contains(&"贵州国企".to_string()));
     }
 
     #[test]

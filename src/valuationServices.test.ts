@@ -52,8 +52,10 @@ describe("valuationServices", () => {
     };
 
     expect(defaultValuationFilters.style).toBe("严苛核算");
+    expect(defaultValuationFilters.boards).toEqual(["全部"]);
+    expect(defaultValuationFilters.industries).toEqual(["全部"]);
+    expect(defaultValuationFilters.stockRiskExclusions).toEqual(["ST", "*ST", "退市"]);
     expect(defaultValuationFilters.minSafetyMargin).toBe(-999);
-    expect(defaultValuationFilters.displayLimit).toBe(50);
     expect(valuationBoardOptions).toEqual(expect.arrayContaining(["A股", "科创板", "创业板", "北交所"]));
     expect(hasRequiredRealValuationData(quoteOnly)).toBe(false);
     expect(missingRealValuationFields(quoteOnly)).toEqual(expect.arrayContaining(["营业收入", "经营现金流", "投资性资产"]));
@@ -87,13 +89,12 @@ describe("valuationServices", () => {
       "/api/valuation/rows",
       expect.objectContaining({ method: "POST" })
     );
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body).toMatchObject({
       stocks: expect.any(Array),
-      filters: expect.objectContaining({
-        ...defaultValuationFilters,
-        displayLimit: 50
-      })
+      filters: expect.objectContaining(defaultValuationFilters)
     });
+    expect(body.filters).not.toHaveProperty("displayLimit");
     expect(rows).toEqual(rustRows);
   });
 

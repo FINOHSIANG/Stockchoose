@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import {
+  fetchStockProfileAutoMatch,
   fetchStockKlineHistory,
   generateTencentAshareCandidates,
   syncTencentAllAshareMarketData,
@@ -106,6 +107,52 @@ afterEach(() => {
 });
 
 describe("realMarketDataService", () => {
+  it("auto matches official website and industry tags through the Rust profile API", async () => {
+    const baseStock = {
+      ...(STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0]),
+      website: undefined,
+      industryTags: ["白酒"]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          code: "600519",
+          name: "贵州茅台",
+          website: "www.moutaichina.com",
+          industry1: "食品饮料",
+          industry2: "白酒",
+          industryTags: ["高端白酒", "贵州国企"],
+          source: "eastmoney-f10"
+        }),
+        { status: 200 }
+      )
+    );
+
+    const result = await fetchStockProfileAutoMatch(baseStock, fetchMock);
+    const requestedUrl = new URL(String(fetchMock.mock.calls[0][0]), "http://stockchoose.test");
+
+    expect(result.ok).toBe(true);
+    expect(requestedUrl.pathname).toBe("/api/market/stock/600519/profile");
+    expect(requestedUrl.searchParams.get("name")).toBe(baseStock.name);
+    expect(requestedUrl.searchParams.get("industry1")).toBe(baseStock.industry1);
+    expect(requestedUrl.searchParams.get("industry2")).toBe(baseStock.industry2);
+    expect(result.stock.website).toBe("https://www.moutaichina.com");
+    expect(result.stock.industry1).toBe("食品饮料");
+    expect(result.stock.industry2).toBe("白酒");
+    expect(result.stock.industryTags).toEqual(expect.arrayContaining(["白酒", "食品饮料", "高端白酒", "贵州国企"]));
+  });
+
+  it("keeps the original stock when the Rust profile API fails", async () => {
+    const baseStock = STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("upstream blocked", { status: 502 }));
+
+    const result = await fetchStockProfileAutoMatch(baseStock, fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("Rust Eastmoney F10 profile API HTTP 502");
+    expect(result.stock).toBe(baseStock);
+  });
+
   it("merges Tencent quote data into valuation metrics", async () => {
     const base = STOCKS.filter((stock) => stock.code === "600519");
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 }));
