@@ -1,0 +1,17 @@
+flowchart LR
+  UI["React UI"]
+  Electron["Electron shell"]
+  API["stockchoose-api Axum"]
+  Core["stockchoose-core"]
+  Collectors["stockchoose-collectors"]
+  Eastmoney["Eastmoney"]
+  Tencent["Tencent"]
+  Gdelt["GDELT / NewsAPI / RSS"]
+
+  Electron --> UI
+  UI --> API
+  API --> Core
+  API --> Collectors
+  Collectors --> Eastmoney
+  Collectors --> Tencent
+  Collectors --> Gdelt

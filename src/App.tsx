@@ -39,16 +39,17 @@ import {
   loadLocal,
   removeLocal,
   saveLocal,
+  todayOffset,
   uid
 } from "./storage";
 import {
   factorByKey,
   formatMetric,
   metricValue,
-  optimizeStrategy,
-  rankingAnalysis,
-  runBacktest,
-  screenStocks
+  optimizeStrategyRustFirst,
+  rankingAnalysisRustFirst,
+  runBacktestRustFirst,
+  screenStocksRustFirst
 } from "./strategyEngine";
 import {
   defaultBaseUrlForProvider,
@@ -96,28 +97,35 @@ import {
 } from "./newsAnalysisModelServices";
 import {
   bindTradeConnection,
-  createTradePlan,
+  createTradePlanExportRustFirst,
+  createTradePlanRustFirst,
   defaultPaperTradeState,
   defaultTradeConnectionSettings,
+  defaultTradeAssetState,
+  ensureTradeAssetState,
   ensurePaperTradeState,
   ensureTradeConnectionSettings,
-  submitPaperTradePlan as submitPaperTradePlanToState,
-  tradePlanToCsv,
+  exportTradePlanRustFirst,
+  submitPaperTradePlanRustFirst,
+  syncTradeAssetsRustFirst,
   type ExecutionMode,
   type PaperTradeState,
   type PlannedOrder,
+  type TradeAssetState,
   type TradeConnectionSettings,
-  type TradePlan
+  type TradePlan,
+  type TradePlanExport
 } from "./tradingServices";
 import {
-  buildSentimentInsightReport,
-  buildSentimentEventsFromNewsArticles,
-  buildSentimentLinkedStocks,
+  buildSentimentAnalysisRustFirst,
+  createEmptySentimentAnalysis,
+  buildSentimentEventsRustFirst,
   filterSentimentEvents,
   scoreSentimentEvent,
   sentimentCategories,
   sentimentDirections,
   sentimentSeverityLevels,
+  type SentimentAnalysisResult,
   type SentimentEvent,
   type SentimentFilters
 } from "./sentimentServices";
@@ -137,17 +145,17 @@ import {
   type NewsArticle,
   type NewsFetchMode,
   type NewsFetchStats,
-  type NewsFilters
+  type NewsFilters,
+  type NewsSourceDiagnostic
 } from "./newsPageServices";
 import {
-  buildAnnualFinancialReports,
+  buildAnnualFinancialReportsRustFirst,
   buildFinancialReportSourceDataUrl,
   type AnnualFinancialReport,
   type AnnualFinancialReportYear
 } from "./financialReportServices";
 import {
-  buildValuationRows,
-  calculateValuation,
+  buildValuationRowsRustFirst,
   defaultValuationFilters,
   enterpriseStateOptions,
   hasRequiredRealValuationData,
@@ -312,6 +320,27 @@ function downloadTextFile(filename: string, content: string, type = "text/plain;
   URL.revokeObjectURL(url);
 }
 
+function shiftDateInput(value: string, days: number) {
+  const date = value ? new Date(`${value}T00:00:00`) : new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function isDateInInputRange(value: string | undefined, start: string, end: string) {
+  if (!value) return false;
+  const day = value.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  return (!start || day >= start) && (!end || day <= end);
+}
+
+function csvCell(value: unknown) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+
+function buildCsv(rows: unknown[][]) {
+  return rows.map((line) => line.map(csvCell).join(",")).join("\n");
+}
+
 const mojibakeTextPattern = /[\uFFFD]|锟|Ã|Â|ŵ|˼/;
 
 function hasRealRuntimeStockData(stock: Stock) {
@@ -374,7 +403,7 @@ type MainSection = "strategy" | "sentiment" | "valuation" | "trade" | "settings"
 type StockReference = Pick<Stock, "code" | "name">;
 type StockInfoTarget = StockReference & { stock?: Stock };
 type SortDirection = "asc" | "desc";
-type ValuationDataSource = "none" | "tencentQuote" | "akshare";
+type ValuationDataSource = "none" | "tencentQuote" | "openSource" | "akshare";
 type ValuationSortKey = "currentPrice" | "fairValue" | "marketCap" | "fairMarketCap" | "safetyMargin" | "governanceScore" | "action";
 
 const stockKlinePeriodOptions: Array<{ value: StockKlinePeriod; label: string }> = [
@@ -411,75 +440,40 @@ function round(value: number, precision = 2) {
   return Math.round(value * scale) / scale;
 }
 
-interface TradeAssetState {
-  netValue: number;
-  holdingValue: number;
-  strategyCash: number;
-  outsideAsset: number;
-  lastSyncedAt?: string;
-}
-
-const defaultTradeAssetState: TradeAssetState = {
-  netValue: 1,
-  holdingValue: 320000,
-  strategyCash: 180000,
-  outsideAsset: 500000
-};
-
-function ensureTradeAssetState(value: Partial<TradeAssetState> | null | undefined): TradeAssetState {
-  const positiveNumber = (input: unknown, fallback: number) => {
-    const parsed = Number(input);
-    return Number.isFinite(parsed) && parsed >= 0 ? round(parsed, 4) : fallback;
-  };
-  return {
-    netValue: positiveNumber(value?.netValue, defaultTradeAssetState.netValue),
-    holdingValue: positiveNumber(value?.holdingValue, defaultTradeAssetState.holdingValue),
-    strategyCash: positiveNumber(value?.strategyCash, defaultTradeAssetState.strategyCash),
-    outsideAsset: positiveNumber(value?.outsideAsset, defaultTradeAssetState.outsideAsset),
-    lastSyncedAt: value?.lastSyncedAt
-  };
-}
-
 function normalizeMinimumTradeAmount(value: unknown, fallback = 1000) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? round(parsed, 2) : fallback;
 }
 
-function filterTradePlanByAmount(plan: TradePlan, minimumAmount: number): TradePlan {
-  const normalizedMinimum = normalizeMinimumTradeAmount(minimumAmount, 0);
-  if (normalizedMinimum <= 0) return plan;
-  return {
-    ...plan,
-    orders: plan.orders.filter((order) => Math.abs(order.amount) >= normalizedMinimum)
-  };
+function readableError(error: unknown) {
+  return error instanceof Error ? error.message : String(error ?? "unknown error");
 }
 
-function tradePlanStatusToCsv(plan: TradePlan) {
-  const header = ["指令编号", "策略", "生成时间", "股票代码", "股票名称", "方向", "数量", "参考价", "参考金额", "指令状态"];
-  const rows = plan.orders.map((order) => [
-    order.clientOrderId,
-    plan.strategyName,
-    plan.generatedAt.replace("T", " ").slice(0, 19),
-    order.code,
-    order.name,
-    order.side,
-    String(order.shares),
-    String(order.price),
-    String(order.amount),
-    order.status
-  ]);
-  return [header, ...rows].map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(",")).join("\n");
+function ensureValuationDataSource(value: ValuationDataSource): Exclude<ValuationDataSource, "akshare"> {
+  return value === "akshare" ? "openSource" : value;
 }
 
-function tradeClientStockCode(code: string) {
-  const digits = code.replace(/\D/g, "");
-  return digits.length >= 6 ? digits.slice(-6) : code;
+function infoSourceDisplayName(settings: Pick<InfoSourceSettings, "provider">) {
+  const provider = settings.provider.trim();
+  return provider || "当前真实数据源";
 }
 
-function tradePlanToClientText(plan: TradePlan) {
-  return plan.orders
-    .map((order) => [tradeClientStockCode(order.code), order.side, order.price.toFixed(3), String(order.shares)].join("\t"))
-    .join("\n");
+function newsFallbackSourceLabel(source: string) {
+  const normalized = source.trim().toLowerCase();
+  if (normalized === "eastmoney") return "东方财富";
+  return source;
+}
+
+function newsDiagnosticsStatusSuffix(diagnostics: NewsSourceDiagnostic[]) {
+  const fallbackDiagnostics = diagnostics.filter((diagnostic) => diagnostic.fallbackSource);
+  if (!fallbackDiagnostics.length) return "";
+  return fallbackDiagnostics
+    .map((diagnostic) => {
+      const target = newsFallbackSourceLabel(diagnostic.fallbackSource ?? "");
+      const reason = diagnostic.fallbackReason ? `，原因：${diagnostic.fallbackReason}` : "";
+      return `${diagnostic.sourceName || diagnostic.provider} 失败，Rust 已切换 ${target} 真实新闻源${reason}`;
+    })
+    .join("；");
 }
 
 function copyTextWithTextarea(text: string) {
@@ -716,6 +710,19 @@ function getResultFactorKeys(strategy: StrategyConfig) {
   return merged.slice(0, 3);
 }
 
+function getFilterConditionValueLabel(condition: FilterCondition) {
+  if (isRangeOperator(condition.operator)) {
+    return `${condition.min ?? 0} - ${condition.max ?? 100}`;
+  }
+  return String(condition.value ?? condition.min ?? condition.max ?? 0);
+}
+
+function getFilterConditionLabel(condition: FilterCondition, factors: Factor[]) {
+  const factorName = getFactorName(factors, condition.factorKey);
+  const scope = condition.range === "全部" ? "" : `（${condition.range}）`;
+  return `${factorName}${scope} ${getOperatorLabel(condition.operator)} ${getFilterConditionValueLabel(condition)}`;
+}
+
 function getRankFactorKeys(strategy: StrategyConfig) {
   return strategy.ranks
     .filter((rank) => rank.enabled && rank.weight > 0)
@@ -786,7 +793,8 @@ function NumberField({
   onChange,
   suffix,
   min,
-  max
+  max,
+  step
 }: {
   label: string;
   value: number;
@@ -794,6 +802,7 @@ function NumberField({
   suffix?: string;
   min?: number;
   max?: number;
+  step?: number;
 }) {
   return (
     <label className="setting-field compact">
@@ -803,6 +812,7 @@ function NumberField({
         value={value}
         min={min}
         max={max}
+        step={step}
         onChange={(event) => onChange(Number(event.target.value))}
       />
       {suffix ? <em>{suffix}</em> : null}
@@ -1120,14 +1130,40 @@ function buildAnnualReportRatioItems(report: AnnualFinancialReport) {
 }
 
 function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
-  const reports = buildAnnualFinancialReports(stock);
-  const [selectedYear, setSelectedYear] = useState<AnnualFinancialReportYear>("2025");
+  const [reports, setReports] = useState<AnnualFinancialReport[]>([]);
+  const [selectedYear, setSelectedYear] = useState<AnnualFinancialReportYear>("");
+  const [annualReportStatus, setAnnualReportStatus] = useState("Rust 年报接口等待请求");
+
+  useEffect(
+    function loadAnnualReportsFromRust() {
+      let cancelled = false;
+      setReports([]);
+      setAnnualReportStatus("正在通过 Rust 年报接口读取真实财报...");
+      buildAnnualFinancialReportsRustFirst(stock)
+        .then((nextReports) => {
+          if (!cancelled) {
+            setReports(nextReports);
+            setAnnualReportStatus(`Rust 年报接口完成，返回 ${nextReports.length} 份真实年报`);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setReports([]);
+            setAnnualReportStatus(`Rust 年报接口失败：${readableError(error)}`);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [stock]
+  );
 
   useEffect(
     function resetAnnualReportYear() {
-      setSelectedYear("2025");
+      setSelectedYear(reports[0]?.year ?? "");
     },
-    [stock.code]
+    [stock.code, reports[0]?.year]
   );
 
   if (!reports.length) {
@@ -1139,6 +1175,7 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
             <p>本地样本财报已清空，当前仅展示真实财报源返回的数据。</p>
           </div>
         </div>
+        <div className={annualReportStatus.includes("失败") ? "settings-status danger" : "settings-status"}>{annualReportStatus}</div>
         <div className="stock-related-info-empty">尚未接入该股票的真实年度财报源文件，暂不展示财报摘要或下载源文件。</div>
       </div>
     );
@@ -1147,6 +1184,7 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
   const selectedReport = reports.find((report) => report.year === selectedYear) ?? reports[0];
   const statementItems = buildAnnualReportStatementItems(selectedReport);
   const ratioItems = buildAnnualReportRatioItems(selectedReport);
+  const hasSourceCsv = Boolean(selectedReport.sourceCsv?.trim());
 
   return (
     <div className="stock-info-section annual-report-section">
@@ -1156,6 +1194,7 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
           <p>
             {selectedReport.year} 年度报告，报告期 {selectedReport.periodEnd}，披露日期 {selectedReport.disclosureDate}。
           </p>
+          <p className={annualReportStatus.includes("失败") ? "settings-status danger" : "settings-status"}>{annualReportStatus}</p>
         </div>
         <div className="annual-report-actions">
           <div className="annual-report-years" role="tablist" aria-label="财报年度">
@@ -1172,10 +1211,17 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
               </button>
             ))}
           </div>
-          <a className="btn annual-report-source-download" href={buildFinancialReportSourceDataUrl(selectedReport)} download={selectedReport.sourceFileName}>
-            <Download size={14} />
-            源文件
-          </a>
+          {hasSourceCsv ? (
+            <a className="btn annual-report-source-download" href={buildFinancialReportSourceDataUrl(selectedReport)} download={selectedReport.sourceFileName}>
+              <Download size={14} />
+              源文件
+            </a>
+          ) : (
+            <button className="btn annual-report-source-download" disabled type="button">
+              <Download size={14} />
+              源文件待同步
+            </button>
+          )}
         </div>
       </div>
 
@@ -1229,6 +1275,36 @@ function sortNewsByPublishTime(articles: NewsArticle[]) {
   return [...articles].sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
 }
 
+function compactUniqueTexts(values: Array<string | undefined>) {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function stockRelatedNewsSources(newsSourceSettings: NewsSourceSettings, stock: Stock): NewsSourceEndpoint[] {
+  const terms = compactUniqueTexts([stock.name, stock.code, stock.industry1, stock.industry2]);
+  const query = terms.join(" OR ");
+  return enabledNewsSources(newsSourceSettings).map((source) => ({
+    ...source,
+    query: source.query?.trim() ? `${query} OR (${source.query.trim()})` : query,
+    maxItems: Math.max(Number(source.maxItems) || 0, 12)
+  }));
+}
+
+function stockRelatedArticleText(article: NewsArticle) {
+  return `${article.title} ${article.summary} ${article.content} ${article.tags.join(" ")} ${article.industries.join(" ")}`.toLowerCase();
+}
+
+function articleDirectlyMentionsStock(article: NewsArticle, stock: Stock) {
+  const text = stockRelatedArticleText(article);
+  const code = stock.code.toLowerCase();
+  const name = stock.name.toLowerCase();
+  return text.includes(code) || text.includes(name);
+}
+
+function articleMentionsStockIndustry(article: NewsArticle, stock: Stock) {
+  const text = stockRelatedArticleText(article);
+  return [stock.industry1, stock.industry2].some((industry) => industry && text.includes(industry.toLowerCase()));
+}
+
 function StockRelatedArticleCard({ article, fallback }: { article: NewsArticle; fallback?: boolean }) {
   return (
     <article className={`stock-related-info-card ${fallback ? "fallback" : ""}`}>
@@ -1258,10 +1334,59 @@ function StockRelatedArticleCard({ article, fallback }: { article: NewsArticle; 
   );
 }
 
-function StockRelatedInfoSection({ stock }: { stock: Stock }) {
-  const directArticles: NewsArticle[] = [];
-  const useFallback = false;
-  const displayArticles = directArticles.slice(0, 6);
+function StockRelatedInfoSection({
+  stock,
+  stocks,
+  newsSourceSettings
+}: {
+  stock: Stock;
+  stocks: Stock[];
+  newsSourceSettings: NewsSourceSettings;
+}) {
+  const [relatedArticles, setRelatedArticles] = useState<NewsArticle[]>([]);
+  const [relatedStatus, setRelatedStatus] = useState("Rust 新闻接口等待请求");
+
+  useEffect(
+    function loadRelatedNewsFromRust() {
+      let cancelled = false;
+      setRelatedArticles([]);
+      setRelatedStatus("正在通过 Rust 新闻接口读取该股票相关真实新闻...");
+      const requestStocks = Array.from(new Map([stock, ...stocks].map((item) => [item.code, item])).values());
+      fetchNewsArticlesFromSources(stockRelatedNewsSources(newsSourceSettings, stock), requestStocks, fetch, { mode: "fast" })
+        .then((result) => {
+          if (cancelled) return;
+          if (!result.ok) {
+            setRelatedArticles([]);
+            setRelatedStatus(`Rust 新闻接口失败：${result.details}`);
+            return;
+          }
+          const diagnosticStatus = newsDiagnosticsStatusSuffix(result.sourceDiagnostics);
+          const directCount = result.articles.filter((article) => articleDirectlyMentionsStock(article, stock)).length;
+          const industryCount = directCount ? 0 : result.articles.filter((article) => articleMentionsStockIndustry(article, stock)).length;
+          setRelatedArticles(result.articles);
+          setRelatedStatus(
+            `Rust 新闻接口完成：返回 ${result.stats.returnedRows} 条真实新闻，筛选 ${directCount || industryCount} 条相关信息${diagnosticStatus ? `；${diagnosticStatus}` : ""}`
+          );
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setRelatedArticles([]);
+            setRelatedStatus(`Rust 新闻接口失败：${readableError(error)}`);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [stock.code, stock.name, stock.industry1, stock.industry2, stocks, newsSourceSettings]
+  );
+
+  const directArticles = sortNewsByPublishTime(relatedArticles.filter((article) => articleDirectlyMentionsStock(article, stock)));
+  const fallbackArticles = directArticles.length
+    ? []
+    : sortNewsByPublishTime(relatedArticles.filter((article) => articleMentionsStockIndustry(article, stock)));
+  const useFallback = !directArticles.length && fallbackArticles.length > 0;
+  const displayArticles = (directArticles.length ? directArticles : fallbackArticles).slice(0, 6);
   const disclosureArticles = displayArticles.filter(isDisclosureArticle);
   const newsArticles = displayArticles.filter((article) => !isDisclosureArticle(article));
 
@@ -1278,7 +1403,8 @@ function StockRelatedInfoSection({ stock }: { stock: Stock }) {
           {`直接关联 ${directArticles.length} 条`}
         </span>
       </div>
-      <div className="stock-related-info-notice">本地样本资讯已清空。请通过新闻页面手动刷新真实新闻源，命中该股票后再展示相关新闻、财报或产业链信息。</div>
+      <div className={relatedStatus.includes("失败") ? "settings-status danger" : "settings-status"}>{relatedStatus}</div>
+      <div className="stock-related-info-notice">本地样本资讯已清空。当前仅展示 Rust 新闻接口返回且命中该股票名称、代码或行业的真实新闻。</div>
       <div className="stock-related-info-layout">
         <div className="stock-related-info-column">
           <div className="stock-related-info-column-title">
@@ -1307,7 +1433,17 @@ function StockRelatedInfoSection({ stock }: { stock: Stock }) {
   );
 }
 
-function StockInfoModal({ target, onClose }: { target: StockInfoTarget; onClose: () => void }) {
+function StockInfoModal({
+  target,
+  stocks,
+  newsSourceSettings,
+  onClose
+}: {
+  target: StockInfoTarget;
+  stocks: Stock[];
+  newsSourceSettings: NewsSourceSettings;
+  onClose: () => void;
+}) {
   const sourceStock = target.stock;
   const [liveStock, setLiveStock] = useState<Stock | null>(() => sourceStock ?? null);
   const [klinePeriod, setKlinePeriod] = useState<StockKlinePeriod>("day");
@@ -1469,7 +1605,7 @@ function StockInfoModal({ target, onClose }: { target: StockInfoTarget; onClose:
         <StockKlinePanel result={klineResult} loading={klineLoading} period={klinePeriod} onPeriodChange={setKlinePeriod} />
 
         <StockAnnualFinancialReportSection stock={stock} />
-        <StockRelatedInfoSection stock={stock} />
+        <StockRelatedInfoSection stock={stock} stocks={stocks} newsSourceSettings={newsSourceSettings} />
         <StockInfoDetailGrid title="公司与交易属性" description="公司属性、交易属性、指数成分与上市交易状态。" items={companyAttributeItems} columns={2} />
         <StockInfoDetailGrid title="治理与机构信息" description="股权质押、违规风险、机构持仓与分析师相关字段。" items={governanceItems} />
 
@@ -1668,7 +1804,9 @@ function App() {
     stockCount: 0,
     ...loadLocal("openSourceDataSummary", {})
   }));
-  const [valuationDataSource, setValuationDataSource] = useState<ValuationDataSource>(() => loadLocal<ValuationDataSource>("valuationDataSource", "none"));
+  const [valuationDataSource, setValuationDataSource] = useState<Exclude<ValuationDataSource, "akshare">>(() =>
+    ensureValuationDataSource(loadLocal<ValuationDataSource>("valuationDataSource", "none"))
+  );
   const [valuationRealDataStatus, setValuationRealDataStatus] = useState("价值核算未接入真实数据，当前不进行本地样本核算");
   const [tradeConnection, setTradeConnection] = useState<TradeConnectionSettings>(() =>
     ensureTradeConnectionSettings(loadLocal("tradeConnectionSettings", defaultTradeConnectionSettings))
@@ -1682,6 +1820,7 @@ function App() {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [rankRows, setRankRows] = useState<RankingRow[]>([]);
   const [selectionRows, setSelectionRows] = useState<SelectionRow[]>([]);
+  const [strategyRunStatus, setStrategyRunStatus] = useState("");
   const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
   const [poolDraft, setPoolDraft] = useState({ name: "我的股票池", codes: "600519,300750,002594,600036,600900" });
   const [customFactorDraft, setCustomFactorDraft] = useState({ name: "质量成长合成", formula: "qualityScore * 0.6 + revenueGrowth * 0.4 - pe * 0.2" });
@@ -1743,7 +1882,6 @@ function App() {
       return queryMatch;
     });
   }, [activeFactorGroup, factors, query]);
-  const previewRows = useMemo(() => screenStocks(strategy, stocks, pools, factors), [strategy, stocks, pools, factors]);
   const openStockInfo = (stock: StockReference) => setStockInfoTarget(resolveStockInfoTarget(stock, stocks));
 
   const persistStrategy = (next: StrategyConfig, markUpdated = true) => {
@@ -1817,22 +1955,75 @@ function App() {
     patchStrategy({ ranks: strategy.ranks.map((item) => (item.id === id ? { ...item, ...patch } : item)) });
   };
 
-  const runCurrentTask = (tab = backtestTab) => {
-    saveLocal("backtestConfig", backtestConfig);
-    if (tab === "rank" || tab === "factorCorrelation") {
-      setRankRows(rankingAnalysis(strategy, stocks, pools, factors));
-      setBacktestTab(tab);
-      return;
+  const ensureStocksForStrategyRun = async () => {
+    if (stocks.length) return stocks;
+    setInfoSourceStatus("当前股票池为空，正在通过 Rust 数据接口接入全市场股票...");
+    const result = await syncOpenSourceMarketData(infoSourceSettings, []);
+    setInfoSourceStatus(`${result.message}；${result.details}`);
+    if (!result.ok) {
+      setSelectionRows([]);
+      setRankRows([]);
+      return [];
     }
-    if (tab === "daily" || tab === "realtime") {
-      setSelectionRows(screenStocks(strategy, stocks, pools, factors));
+
+    setStocks(result.stocks);
+    setOpenSourceSummary(result.summary);
+    saveLocal("openSourceStocks", result.stocks);
+    saveLocal("openSourceDataSummary", result.summary);
+    setValuationDataSource("openSource");
+    saveLocal<ValuationDataSource>("valuationDataSource", "openSource");
+    setValuationRealDataStatus(result.details);
+    return result.stocks;
+  };
+
+  const runCurrentTask = async (tab = backtestTab) => {
+    let strategyStocks: Stock[] = [];
+    let strategyPools: StockPool[] = [];
+    const label = tab === "backtest" ? "回测" : tab === "rank" || tab === "factorCorrelation" ? "排名分析" : "选股";
+    try {
+      saveLocal("backtestConfig", backtestConfig);
+      setStrategyRunStatus(`正在通过 Rust ${label}接口运行...`);
+      strategyStocks = await ensureStocksForStrategyRun();
+      strategyPools = [...createRuntimeSystemPools(strategyStocks), ...customPools];
+      if (!strategyStocks.length) {
+        setBacktestTab(tab);
+        setStrategyRunStatus("股票池为空，Rust 数据接口未返回可用股票。");
+        return;
+      }
+      if (tab === "rank" || tab === "factorCorrelation") {
+        const rows = await rankingAnalysisRustFirst(strategy, strategyStocks, strategyPools, factors);
+        setRankRows(rows);
+        setBacktestTab(tab);
+        setStrategyRunStatus(`Rust 排名分析完成，返回 ${rows.length} 只股票。`);
+        return;
+      }
+      if (tab === "daily" || tab === "realtime") {
+        const rows = await screenStocksRustFirst(strategy, strategyStocks, strategyPools, factors, {
+          resultLimit: strategy.poolLimit,
+          weightLimit: strategy.trading.maxHoldings
+        });
+        setSelectionRows(rows);
+        setBacktestTab(tab);
+        setStrategyRunStatus(`Rust 选股完成，返回 ${rows.length}/${strategy.poolLimit} 只股票。`);
+        return;
+      }
+      const next = await runBacktestRustFirst(strategy, strategyStocks, strategyPools, factors, backtestConfig);
+      setResult(next);
+      setSelectionRows(next.rows);
+      setBacktestTab("backtest");
+      setStrategyRunStatus(`Rust 回测完成，曲线 ${next.curve.length} 个点，持仓 ${next.rows.length} 只。`);
+    } catch (error) {
+      const detail = readableError(error);
+      if (tab === "rank" || tab === "factorCorrelation") {
+        setRankRows([]);
+      } else {
+        setSelectionRows([]);
+      }
+      if (tab === "backtest") setResult(null);
       setBacktestTab(tab);
-      return;
+      setInfoSourceStatus(`Rust 策略接口失败：${detail}`);
+      setStrategyRunStatus(`Rust 策略接口失败：${detail}。当前不会使用浏览器本地策略引擎补齐结果。`);
     }
-    const next = runBacktest(strategy, stocks, pools, factors, backtestConfig);
-    setResult(next);
-    setSelectionRows(next.rows);
-    setBacktestTab("backtest");
   };
 
   const saveStrategy = (saveAs = false) => {
@@ -1956,11 +2147,20 @@ function App() {
     persistStrategy({ ...strategy, assets: [...strategy.assets, item] });
   };
 
-  const optimize = () => {
-    const best = optimizeStrategy(strategy, stocks, pools, factors, backtestConfig);
-    persistStrategy(best.candidate);
-    setResult(best.result);
-    setModal(null);
+  const optimize = async () => {
+    const strategyStocks = await ensureStocksForStrategyRun();
+    if (!strategyStocks.length) return;
+    const strategyPools = [...createRuntimeSystemPools(strategyStocks), ...customPools];
+    try {
+      const best = await optimizeStrategyRustFirst(strategy, strategyStocks, strategyPools, factors, backtestConfig);
+      persistStrategy(best.candidate);
+      setResult(best.result);
+      setModal(null);
+    } catch (error) {
+      const detail = readableError(error);
+      setInfoSourceStatus(`Rust 策略优化接口失败：${detail}`);
+      setStrategyRunStatus(`Rust 策略优化接口失败：${detail}。当前不会使用浏览器本地优化引擎补齐候选策略。`);
+    }
   };
 
   const patchInfoSourceSettings = (patch: Partial<InfoSourceSettings>) => {
@@ -1997,15 +2197,15 @@ function App() {
   };
 
   const syncOpenSourceData = async () => {
-    setInfoSourceStatus("正在同步免费开源数据...");
+    setInfoSourceStatus(`正在通过 ${infoSourceDisplayName(infoSourceSettings)} 同步真实数据...`);
     const result = await syncOpenSourceMarketData(infoSourceSettings, stocks);
     if (result.ok) {
       setStocks(result.stocks);
       setOpenSourceSummary(result.summary);
       saveLocal("openSourceStocks", result.stocks);
       saveLocal("openSourceDataSummary", result.summary);
-      setValuationDataSource("akshare");
-      saveLocal<ValuationDataSource>("valuationDataSource", "akshare");
+      setValuationDataSource("openSource");
+      saveLocal<ValuationDataSource>("valuationDataSource", "openSource");
       setValuationRealDataStatus(result.details);
       setResult(null);
       setRankRows([]);
@@ -2016,10 +2216,31 @@ function App() {
 
   const syncValuationRealData = async () => {
     setValuationRealDataStatus("正在从腾讯行情扫描全市场 A 股代码并接入真实行情...");
-    const result = await syncTencentAllAshareMarketData([]);
+    const result = await syncTencentAllAshareMarketData(stocks);
     if (result.ok) {
+      const financeMatchedRows = result.stocks.filter((stock) => stock.metrics.realAnnualReportSource === 1).length;
+      const valuationReadyRows = result.stocks.filter(hasRequiredRealValuationData).length;
+      const nextSummary = {
+        ...openSourceSummary,
+        lastSyncAt: result.checkedAt,
+        matchedRows: result.matchedRows,
+        sourceRows: result.sourceRows,
+        financeMatchedRows,
+        financeSourceRows: financeMatchedRows ? openSourceSummary.financeSourceRows : 0,
+        analystMatchedRows: financeMatchedRows ? openSourceSummary.analystMatchedRows : 0,
+        analystSourceRows: financeMatchedRows ? openSourceSummary.analystSourceRows : 0,
+        marginMatchedRows: financeMatchedRows ? openSourceSummary.marginMatchedRows : 0,
+        marginSourceRows: financeMatchedRows ? openSourceSummary.marginSourceRows : 0,
+        valuationReadyRows,
+        technicalMatchedRows: result.technicalMatchedRows,
+        technicalSourceRows: result.technicalSourceRows,
+        stockCount: result.stocks.length,
+        details: result.details
+      };
       setStocks(result.stocks);
+      setOpenSourceSummary(nextSummary);
       saveLocal("openSourceStocks", result.stocks);
+      saveLocal("openSourceDataSummary", nextSummary);
       setValuationDataSource("tencentQuote");
       saveLocal<ValuationDataSource>("valuationDataSource", "tencentQuote");
       setResult(null);
@@ -2030,7 +2251,8 @@ function App() {
   };
 
   const syncValuationFinancialReports = async () => {
-    setValuationRealDataStatus("正在从 AKShare / AKTools 同步真实财报...");
+    const sourceName = infoSourceDisplayName(infoSourceSettings);
+    setValuationRealDataStatus(`正在从 ${sourceName} 同步真实财报...`);
     const result = await syncOpenSourceFinancialReports(infoSourceSettings, stocks);
     if (result.ok) {
       const nextSummary = {
@@ -2047,8 +2269,8 @@ function App() {
       setOpenSourceSummary(nextSummary);
       saveLocal("openSourceStocks", result.stocks);
       saveLocal("openSourceDataSummary", nextSummary);
-      setValuationDataSource("akshare");
-      saveLocal<ValuationDataSource>("valuationDataSource", "akshare");
+      setValuationDataSource("openSource");
+      saveLocal<ValuationDataSource>("valuationDataSource", "openSource");
       setResult(null);
       setRankRows([]);
       setSelectionRows([]);
@@ -2184,23 +2406,36 @@ function App() {
     saveLocal("paperTradeState", nextState);
   };
 
-  const generateTradePlan = (rows: SelectionRow[], mode: ExecutionMode, label = "交易指令", minimumAmount = 0) => {
-    const plan = filterTradePlanByAmount(createTradePlan({
-      strategy,
-      rows,
-      mode,
-      accountId: tradeConnection.accountId
-    }), minimumAmount);
-    saveTradePlan(plan);
-    setTradeConnectionStatus(`已生成 ${plan.orders.length} 条${label}`);
-    return plan;
+  const generateTradePlan = async (rows: SelectionRow[], mode: ExecutionMode, label = "交易指令", minimumAmount = 0, accountAsset = 500000) => {
+    try {
+      const tradeExport = await createTradePlanExportRustFirst({
+        strategy,
+        rows,
+        mode,
+        accountId: tradeConnection.accountId,
+        accountAsset,
+        minimumAmount
+      });
+      const plan = tradeExport.plan;
+      saveTradePlan(plan);
+      setTradeConnectionStatus(`已生成 ${plan.orders.length} 条${label}`);
+      return tradeExport;
+    } catch (error) {
+      setTradeConnectionStatus(`Rust 交易指令接口失败：${readableError(error)}`);
+      throw error;
+    }
   };
 
-  const exportTradePlan = (rows: SelectionRow[], mode: ExecutionMode, label = "交易指令", minimumAmount = 0) => {
-    const plan = generateTradePlan(rows, mode, label, minimumAmount);
-    downloadTextFile(`${safeFileName(strategy.name)}-${label}.csv`, `\ufeff${tradePlanToCsv(plan)}`, "text/csv;charset=utf-8");
-    setTradeConnectionStatus(`已导出 ${plan.orders.length} 条${label}`);
-    return plan;
+  const exportTradePlan = async (rows: SelectionRow[], mode: ExecutionMode, label = "交易指令", minimumAmount = 0, accountAsset = 500000) => {
+    try {
+      const tradeExport = await generateTradePlan(rows, mode, label, minimumAmount, accountAsset);
+      downloadTextFile(`${safeFileName(strategy.name)}-${label}.csv`, `\ufeff${tradeExport.csv}`, "text/csv;charset=utf-8");
+      setTradeConnectionStatus(`已导出 ${tradeExport.plan.orders.length} 条${label}`);
+      return tradeExport;
+    } catch (error) {
+      setTradeConnectionStatus(`Rust 交易导出接口失败：${readableError(error)}`);
+      throw error;
+    }
   };
 
   const clearTradePlans = (strategyId: string) => {
@@ -2216,22 +2451,29 @@ function App() {
     return removedCount;
   };
 
-  const submitPaperTradePlan = (rows: SelectionRow[]) => {
+  const submitPaperTradePlan = async (rows: SelectionRow[], accountAsset = 500000) => {
     if (!tradeConnection.bound) {
       setTradeConnectionStatus("自动交易前必须先绑定交易接口");
       return null;
     }
-    const plan = createTradePlan({
-      strategy,
-      rows,
-      mode: "auto",
-      accountId: tradeConnection.accountId
-    });
-    const nextState = submitPaperTradePlanToState(paperTradeState, plan);
-    setPaperTradeState(nextState);
-    saveLocal("paperTradeState", nextState);
-    setTradeConnectionStatus(`纸面交易已成交 ${plan.orders.length} 笔`);
-    return plan;
+    try {
+      const plan = await createTradePlanRustFirst({
+        strategy,
+        rows,
+        mode: "auto",
+        accountId: tradeConnection.accountId,
+        accountAsset
+      });
+      const nextState = await submitPaperTradePlanRustFirst(paperTradeState, plan);
+      const submittedPlan = nextState.plans.find((item) => item.id === plan.id) ?? plan;
+      setPaperTradeState(nextState);
+      saveLocal("paperTradeState", nextState);
+      setTradeConnectionStatus(`纸面交易已成交 ${submittedPlan.orders.length} 笔`);
+      return submittedPlan;
+    } catch (error) {
+      setTradeConnectionStatus(`Rust 自动交易接口失败：${readableError(error)}`);
+      return null;
+    }
   };
 
   return (
@@ -2345,10 +2587,12 @@ function App() {
                   config={backtestConfig}
                   setConfig={setBacktestConfig}
                   result={result}
-                  selectionRows={selectionRows.length ? selectionRows : previewRows}
+                  selectionRows={selectionRows}
                   rankRows={rankRows}
+                  runStatus={strategyRunStatus}
                   factors={factors}
                   strategy={strategy}
+                  patchStrategy={patchStrategy}
                   runCurrentTask={runCurrentTask}
                   openCompare={() => setModal("compare")}
                   onOpenStockInfo={openStockInfo}
@@ -2356,12 +2600,18 @@ function App() {
               </main>
             ) : topSection === "sentiment" ? (
               <main>
-                <SentimentWorkspace stocks={stocks} newsSourceSettings={newsSourceSettings} />
+                <SentimentWorkspace
+                  stocks={stocks}
+                  newsSourceSettings={newsSourceSettings}
+                  newsAnalysisModelSettings={newsAnalysisModelSettings}
+                />
               </main>
             ) : topSection === "valuation" ? (
               <main>
                 <ValuationWorkspace
                   stocks={stocks}
+                  newsSourceSettings={newsSourceSettings}
+                  infoSourceSettings={infoSourceSettings}
                   realDataStatus={valuationRealDataStatus}
                   financeSummary={openSourceSummary}
                   isRealDataReady={
@@ -2376,7 +2626,7 @@ function App() {
               <main>
                 <TradeWorkspace
                   strategy={strategy}
-                  rows={selectionRows.length ? selectionRows : previewRows}
+                  rows={selectionRows}
                   tradeConnection={tradeConnection}
                   tradeConnectionStatus={tradeConnectionStatus}
                   paperTradeState={paperTradeState}
@@ -2530,7 +2780,7 @@ function App() {
                   <td>
                     <input type="checkbox" />
                   </td>
-                  <td>保留当前权重，本地调优先搜索持仓数</td>
+                  <td>保留当前权重，Rust 调优优先搜索持仓数</td>
                 </tr>
                 <tr>
                   <td>调仓周期</td>
@@ -2565,7 +2815,14 @@ function App() {
         />
       ) : null}
 
-      {stockInfoTarget ? <StockInfoModal target={stockInfoTarget} onClose={() => setStockInfoTarget(null)} /> : null}
+      {stockInfoTarget ? (
+        <StockInfoModal
+          target={stockInfoTarget}
+          stocks={stocks}
+          newsSourceSettings={newsSourceSettings}
+          onClose={() => setStockInfoTarget(null)}
+        />
+      ) : null}
     </>
   );
 }
@@ -3069,7 +3326,7 @@ function HedgeStep({ strategy, patchHedge }: { strategy: StrategyConfig; patchHe
       <div className="hedge-note">
         <BarChart3 size={22} />
         <div>
-          <strong>本地对冲引擎</strong>
+          <strong>Rust 对冲回测引擎</strong>
           <p>回测时会按对冲比例扣减基准波动并计入期货成本，用于观察多空组合、低排名做空和风险敞口控制效果。</p>
         </div>
       </div>
@@ -3170,7 +3427,15 @@ function NewsFetchStatsBar({
   );
 }
 
-function SentimentWorkspace({ stocks, newsSourceSettings }: { stocks: Stock[]; newsSourceSettings: NewsSourceSettings }) {
+function SentimentWorkspace({
+  stocks,
+  newsSourceSettings,
+  newsAnalysisModelSettings
+}: {
+  stocks: Stock[];
+  newsSourceSettings: NewsSourceSettings;
+  newsAnalysisModelSettings: NewsAnalysisModelSettings;
+}) {
   const [sentimentTab, setSentimentTab] = useState<"overview" | "news">("overview");
   const [filters, setFilters] = useState<SentimentFilters>(defaultSentimentFilters);
   const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
@@ -3182,19 +3447,41 @@ function SentimentWorkspace({ stocks, newsSourceSettings }: { stocks: Stock[]; n
   const [sentimentFetchStats, setSentimentFetchStats] = useState<NewsFetchStats>(defaultNewsFetchStats);
   const [sentimentFetchEventCount, setSentimentFetchEventCount] = useState(0);
   const [sentimentFetchLinkedStockCount, setSentimentFetchLinkedStockCount] = useState(0);
+  const [sentimentAnalysis, setSentimentAnalysis] = useState<SentimentAnalysisResult>(() => createEmptySentimentAnalysis());
   const industryOptions = useMemo(
     () => ["全部", ...Array.from(new Set(rawSentimentEvents.flatMap((event) => event.industries))).sort()],
     [rawSentimentEvents]
   );
   const events = useMemo(() => filterSentimentEvents(rawSentimentEvents, filters), [rawSentimentEvents, filters]);
-  const linkedStocks = useMemo(() => buildSentimentLinkedStocks(events, stocks), [events, stocks]);
-  const report = useMemo(() => buildSentimentInsightReport(events, linkedStocks), [events, linkedStocks]);
+  const linkedStocks = sentimentAnalysis.linkedStocks;
+  const report = sentimentAnalysis.report;
   const topEvent = events[0];
   const positiveCount = events.filter((event) => event.direction === "利好").length;
   const negativeCount = events.filter((event) => event.direction === "利空").length;
   const majorCount = events.filter((event) => event.severity === "特别重大" || event.severity === "重大").length;
   const focusedIndustry = filters.industry === "全部" ? report.topIndustries[0]?.industry ?? "--" : filters.industry;
   const openStockInfo = (stock: StockReference) => setStockInfoTarget(resolveStockInfoTarget(stock, stocks));
+
+  useEffect(
+    function syncSentimentAnalysisFromRust() {
+      let cancelled = false;
+      setSentimentAnalysis(createEmptySentimentAnalysis(events));
+      void buildSentimentAnalysisRustFirst(events, stocks, newsAnalysisModelSettings, fetch)
+        .then((nextAnalysis) => {
+          if (!cancelled) setSentimentAnalysis(nextAnalysis);
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setSentimentAnalysis(createEmptySentimentAnalysis(events));
+            setSentimentRefreshStatus(`Rust 舆情分析接口失败：${readableError(error)}`);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [events, stocks, newsAnalysisModelSettings]
+  );
 
   const refreshSentimentData = async (mode: "手动" | "自动" = "手动") => {
     const fetchModeLabel = newsFetchModeOptions.find((item) => item.value === sentimentFetchMode)?.label ?? "快速";
@@ -3209,16 +3496,29 @@ function SentimentWorkspace({ stocks, newsSourceSettings }: { stocks: Stock[]; n
       setSentimentRefreshStatus(`${mode}${result.message}：${result.details}`);
       return;
     }
-    const nextEvents = buildSentimentEventsFromNewsArticles(result.articles, stocks);
-    const nextLinkedStocks = buildSentimentLinkedStocks(nextEvents, stocks);
-    setRawSentimentEvents(nextEvents);
-    setSentimentFetchEventCount(nextEvents.length);
-    setSentimentFetchLinkedStockCount(nextLinkedStocks.length);
-    setSentimentRefreshStatus(
-      nextEvents.length
-        ? `${mode}${result.message}：扫描 ${result.stats.scannedStocks} 只股票，请求 ${result.stats.requestCount} 次，返回 ${result.stats.returnedRows} 条新闻，生成 ${nextEvents.length} 个舆情事件，关联 ${nextLinkedStocks.length} 只股票`
-        : `${mode}刷新失败：真实新闻源返回 ${result.articles.length} 条数据，但未形成可关联股票的舆情事件`
-    );
+    const sourceDiagnosticStatus = newsDiagnosticsStatusSuffix(result.sourceDiagnostics);
+    try {
+      const nextEvents = await buildSentimentEventsRustFirst(result.articles, stocks, fetch);
+      const nextAnalysis = await buildSentimentAnalysisRustFirst(nextEvents, stocks, newsAnalysisModelSettings, fetch);
+      setRawSentimentEvents(nextEvents);
+      setSentimentAnalysis(nextAnalysis);
+      setSentimentFetchEventCount(nextEvents.length);
+      setSentimentFetchLinkedStockCount(nextAnalysis.linkedStocks.length);
+      setSentimentRefreshStatus(
+        nextEvents.length
+          ? `${mode}${result.message}：扫描 ${result.stats.scannedStocks} 只股票，请求 ${result.stats.requestCount} 次，返回 ${result.stats.returnedRows} 条新闻，生成 ${nextEvents.length} 个舆情事件，关联 ${nextAnalysis.linkedStocks.length} 只股票`
+          : `${mode}刷新失败：真实新闻源返回 ${result.articles.length} 条数据，但未形成可关联股票的舆情事件`
+      );
+      if (sourceDiagnosticStatus) {
+        setSentimentRefreshStatus((status) => `${status}；${sourceDiagnosticStatus}`);
+      }
+    } catch (error) {
+      setRawSentimentEvents([]);
+      setSentimentAnalysis(createEmptySentimentAnalysis());
+      setSentimentFetchEventCount(0);
+      setSentimentFetchLinkedStockCount(0);
+      setSentimentRefreshStatus(`${mode}Rust 舆情接口失败：${readableError(error)}`);
+    }
   };
 
   const updateSentimentRefreshInterval = (value: number) => {
@@ -3499,7 +3799,14 @@ function SentimentWorkspace({ stocks, newsSourceSettings }: { stocks: Stock[]; n
       ) : (
         <NewsPage stocks={stocks} newsSourceSettings={newsSourceSettings} onOpenStockInfo={openStockInfo} />
       )}
-      {stockInfoTarget ? <StockInfoModal target={stockInfoTarget} onClose={() => setStockInfoTarget(null)} /> : null}
+      {stockInfoTarget ? (
+        <StockInfoModal
+          target={stockInfoTarget}
+          stocks={stocks}
+          newsSourceSettings={newsSourceSettings}
+          onClose={() => setStockInfoTarget(null)}
+        />
+      ) : null}
     </section>
   );
 }
@@ -3550,6 +3857,7 @@ function NewsPage({
     setNewsFetchStats(result.stats);
     if (result.ok) {
       const linkedCodeSet = new Set(result.articles.flatMap((article) => article.linkedCodes));
+      const sourceDiagnosticStatus = newsDiagnosticsStatusSuffix(result.sourceDiagnostics);
       setNewsArticles(result.articles);
       setNewsLinkedStockCount(linkedCodeSet.size);
       setSelectedArticle(null);
@@ -3558,6 +3866,9 @@ function NewsPage({
       setNewsRefreshStatus(
         `${mode}${result.message}：扫描 ${result.stats.scannedStocks} 只股票，请求 ${result.stats.requestCount} 次，返回 ${result.stats.returnedRows} 条新闻，有效 ${result.stats.validArticles} 条，关联 ${linkedCodeSet.size} 只股票`
       );
+      if (sourceDiagnosticStatus) {
+        setNewsRefreshStatus((status) => `${status}；${sourceDiagnosticStatus}`);
+      }
       return;
     }
     setNewsLinkedStockCount(0);
@@ -3836,6 +4147,8 @@ function NewsPage({
 
 function ValuationWorkspace({
   stocks,
+  newsSourceSettings,
+  infoSourceSettings,
   realDataStatus,
   financeSummary,
   isRealDataReady,
@@ -3843,6 +4156,8 @@ function ValuationWorkspace({
   onSyncFinancialReports
 }: {
   stocks: Stock[];
+  newsSourceSettings: NewsSourceSettings;
+  infoSourceSettings: InfoSourceSettings;
   realDataStatus: string;
   financeSummary: OpenSourceDataSummary;
   isRealDataReady: boolean;
@@ -3856,6 +4171,9 @@ function ValuationWorkspace({
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [valuationDetailCollapsed, setValuationDetailCollapsed] = useState(false);
   const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
+  const [rows, setRows] = useState<ValuationRow[]>([]);
+  const [exactValuationRows, setExactValuationRows] = useState<ValuationRow[]>([]);
+  const [valuationApiStatus, setValuationApiStatus] = useState("Rust 估值接口等待运行");
   const [valuationSort, setValuationSort] = useState<{ key: ValuationSortKey; direction: SortDirection }>({
     key: "safetyMargin",
     direction: "desc"
@@ -3867,16 +4185,71 @@ function ValuationWorkspace({
     [isRealDataReady, stocks]
   );
   const valuationInputReadyCount = isRealDataReady ? Math.max(stocks.length - missingRealValuationCount, 0) : 0;
-  const rows = useMemo(() => (isRealDataReady ? buildValuationRows(stocks, filters) : []), [isRealDataReady, stocks, filters, valuationRecalcKey]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!isRealDataReady) {
+      setRows([]);
+      setValuationApiStatus("等待真实行情和真实财报字段后再运行 Rust 估值接口");
+      return;
+    }
+    setValuationApiStatus("正在通过 Rust 估值接口核算...");
+    buildValuationRowsRustFirst(stocks, filters)
+      .then((nextRows) => {
+        if (!cancelled) {
+          setRows(nextRows);
+          setValuationApiStatus(`Rust 估值接口完成，返回 ${nextRows.length} 条核算结果`);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRows([]);
+          setValuationApiStatus(`Rust 估值接口失败：${readableError(error)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isRealDataReady, stocks, filters, valuationRecalcKey]);
   const normalizedValuationQuery = valuationQuery.trim().toLowerCase();
   const valuationCodeQuery = useMemo(() => normalizeStockCodeInput(valuationQuery), [valuationQuery]);
+  const exactValuationStock = useMemo(
+    () => (valuationCodeQuery.isCodeLike ? resolveStockByCode(stocks, valuationQuery) ?? null : null),
+    [stocks, valuationCodeQuery.isCodeLike, valuationQuery]
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const alreadyVisible = Boolean(exactValuationStock && rows.some((row) => stockMatchesCodeQuery(row.stock, exactValuationStock.code)));
+    if (
+      !isRealDataReady ||
+      !exactValuationStock ||
+      alreadyVisible ||
+      !hasRequiredRealValuationData(exactValuationStock)
+    ) {
+      setExactValuationRows([]);
+      return;
+    }
+    buildValuationRowsRustFirst([exactValuationStock], filters)
+      .then((nextRows) => {
+        if (!cancelled) {
+          setExactValuationRows(nextRows);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setExactValuationRows([]);
+          setValuationApiStatus(`Rust 估值接口失败：${readableError(error)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [exactValuationStock, filters, isRealDataReady, rows, valuationRecalcKey]);
   const searchedRows = useMemo(() => {
     if (!normalizedValuationQuery) return rows;
     if (valuationCodeQuery.isCodeLike) {
       const exactRows = rows.filter((row) => stockMatchesCodeQuery(row.stock, valuationQuery));
       if (exactRows.length) return exactRows;
-      const exactStock = resolveStockByCode(stocks, valuationQuery);
-      return exactStock && isRealDataReady && hasRequiredRealValuationData(exactStock) ? [calculateValuation(exactStock, filters.style)] : [];
+      return exactValuationRows;
     }
     return rows.filter((row) => {
       const stock = row.stock;
@@ -3897,7 +4270,7 @@ function ValuationWorkspace({
       ].join(" ").toLowerCase();
       return searchableText.includes(normalizedValuationQuery);
     });
-  }, [rows, normalizedValuationQuery, valuationCodeQuery.isCodeLike, valuationQuery, stocks, filters.style, isRealDataReady]);
+  }, [rows, normalizedValuationQuery, valuationCodeQuery.isCodeLike, valuationQuery, exactValuationRows]);
   const sortedRows = useMemo(() => {
     const directionMultiplier = valuationSort.direction === "asc" ? 1 : -1;
     return [...searchedRows].sort((a, b) => {
@@ -3914,15 +4287,20 @@ function ValuationWorkspace({
     const sample = stocks.find((stock) => !hasRequiredRealValuationData(stock));
     return sample ? missingRealValuationFields(sample).slice(0, 8).join("、") : "";
   }, [isRealDataReady, stocks]);
+  const realFinancialSourceName = infoSourceDisplayName(infoSourceSettings);
   const valuationGateMessage = !isRealDataReady
     ? "价值核算已关闭本地样本兜底。请先点击“接入全市场股票”接入真实行情，再点击“同步真实财报”补齐年报字段；缺少真实财报字段时不会生成核算价值。"
     : valuationInputReadyCount === 0
-      ? `已接入 ${stocks.length} 只真实行情，但腾讯行情接口不提供完整财报、现金流和资产负债拆分。请点击“同步真实财报”从 AKShare / AKTools 拉取年报、利润表、资产负债表和现金流字段。缺少字段示例：${firstMissingRealFields || "真实财报字段"}。`
+      ? `已接入 ${stocks.length} 只真实行情，但腾讯行情接口不提供完整财报、现金流和资产负债拆分。请点击“同步真实财报”从 ${realFinancialSourceName} 拉取年报、利润表、资产负债表和现金流字段。缺少字段示例：${firstMissingRealFields || "真实财报字段"}。`
       : "";
 
   const patchFilters = (patch: Partial<ValuationFilters>) => {
     setFilters((current) => ({ ...current, ...patch }));
     setSelectedCode(null);
+  };
+  const updateValuationDisplayLimit = (value: number) => {
+    const displayLimit = Number.isFinite(value) ? Math.floor(value) : defaultValuationFilters.displayLimit;
+    patchFilters({ displayLimit: Math.min(500, Math.max(1, displayLimit)) });
   };
   const resetValuationControls = () => {
     setFilters(defaultValuationFilters);
@@ -3966,6 +4344,7 @@ function ValuationWorkspace({
       <div className="valuation-data-bar">
         <div>
           <span>
+            {valuationApiStatus} 路{" "}
             {realDataStatus} · 可核算 {valuationInputReadyCount}/{stocks.length} · 财报匹配 {financeMatchedRows}/{financeSourceRows} · 估值可用 {valuationReadyRows} · 缺少真实财报 {missingRealValuationCount} · 最近核算 {formatDateTime(valuationCalculatedAt)}
           </span>
         </div>
@@ -4055,6 +4434,10 @@ function ValuationWorkspace({
         <label>
           <span>最低治理分</span>
           <input type="number" min={0} max={100} value={filters.minGovernanceScore} onChange={(event) => patchFilters({ minGovernanceScore: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>显示数量</span>
+          <input type="number" min={1} max={500} step={1} value={filters.displayLimit} onChange={(event) => updateValuationDisplayLimit(Number(event.target.value))} />
         </label>
         <button className="btn" onClick={resetValuationControls}>重置</button>
       </div>
@@ -4298,7 +4681,14 @@ function ValuationWorkspace({
           )}
         </section>
       </div>
-      {stockInfoTarget ? <StockInfoModal target={stockInfoTarget} onClose={() => setStockInfoTarget(null)} /> : null}
+      {stockInfoTarget ? (
+        <StockInfoModal
+          target={stockInfoTarget}
+          stocks={stocks}
+          newsSourceSettings={newsSourceSettings}
+          onClose={() => setStockInfoTarget(null)}
+        />
+      ) : null}
     </section>
   );
 }
@@ -4585,7 +4975,7 @@ function SettingsWorkspace({
             <input type="checkbox" checked={newsAnalysisSettings.enabled} onChange={(event) => patchNewsAnalysis({ enabled: event.target.checked })} />
             <span>
               <strong>启用模型分析</strong>
-              <em>{newsAnalysisSettings.enabled ? "新闻进入舆情分析时调用该模型" : "停用后仅使用本地规则，不加载样本标签"}</em>
+              <em>{newsAnalysisSettings.enabled ? "新闻进入舆情分析时调用该模型" : "停用后仅使用 Rust 规则，不加载样本标签"}</em>
             </span>
           </label>
           <label>
@@ -4771,15 +5161,20 @@ function TradeWorkspace({
   bindTradingInterface: () => boolean;
   openHoldingImportModal: () => void;
   removeHoldingStrategy: (strategyId: string) => void;
-  generateTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string, minimumAmount?: number) => TradePlan;
-  exportTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string, minimumAmount?: number) => TradePlan;
+  generateTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string, minimumAmount?: number, accountAsset?: number) => Promise<TradePlanExport>;
+  exportTradePlan: (rows: SelectionRow[], mode: ExecutionMode, label?: string, minimumAmount?: number, accountAsset?: number) => Promise<TradePlanExport>;
   clearTradePlans: (strategyId: string) => number;
-  submitPaperTradePlan: (rows: SelectionRow[]) => TradePlan | null;
+  submitPaperTradePlan: (rows: SelectionRow[], accountAsset?: number) => Promise<TradePlan | null>;
   onOpenStockInfo: (stock: StockReference) => void;
 }) {
   const [tradeMode, setTradeMode] = useState<"strategy" | "condition">("strategy");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("manual");
   const [tradeTab, setTradeTab] = useState<"holding" | "rebalance" | "log" | "history">("holding");
+  const [tradeLogStartDate, setTradeLogStartDate] = useState(() => todayOffset(-7));
+  const [tradeLogEndDate, setTradeLogEndDate] = useState(() => todayOffset(0));
+  const [historyStartDate, setHistoryStartDate] = useState(() => todayOffset(-30));
+  const [historyEndDate, setHistoryEndDate] = useState(() => todayOffset(0));
+  const [tradeAuditStatus, setTradeAuditStatus] = useState("日志和历史仅显示 Rust 交易计划、纸面成交或资产同步记录。");
   const [syncedAssets, setSyncedAssets] = useState<TradeAssetState>(() => ensureTradeAssetState(loadLocal("tradeAssetState", defaultTradeAssetState)));
   const [assetDraft, setAssetDraft] = useState<TradeAssetState>(() => ensureTradeAssetState(loadLocal("tradeAssetState", defaultTradeAssetState)));
   const [assetSyncStatus, setAssetSyncStatus] = useState(() =>
@@ -4794,7 +5189,7 @@ function TradeWorkspace({
   const accountAsset = round(holdingValue + strategyCash + outsideCash, 2);
   const strategyAsset = round(holdingValue + strategyCash, 2);
   const dailyReturn = holdings.length ? round(holdings.reduce((sum, row) => sum + (row.stock.metrics.pctChange ?? 0), 0) / holdings.length, 2) : 0;
-  const nextRebalanceDate = "2026-05-26";
+  const nextRebalanceDate = todayOffset(1);
   const tradeTime = "14:55";
   const formatMoney = (value: number) =>
     value.toLocaleString("zh-CN", {
@@ -4810,22 +5205,35 @@ function TradeWorkspace({
       amount: round(price * shares, 2)
     };
   });
-  const historyRows = planRows.slice(0, 10).map((row, index) => ({
-    ...row,
-    time: `2026-05-2${index % 4} 11:${String(8 + index).padStart(2, "0")}:27`
-  }));
-  const logRows = planRows.slice(0, 8).map((row, index) => ({
-    time: `2026-05-25 11:${String(8 + index).padStart(2, "0")}:26`,
-    type: index < 2 ? "提醒" : "买入",
-    message:
-      index < 2
-        ? `开始执行买入指令，买入${row.stock.name}${row.shares}股。`
-        : `订单 ${1531451296800 + index} 已全部成交：买入${row.shares}股${row.stock.name}，成交均价：${row.stock.metrics.price?.toFixed(3)}。`
-  }));
   const strategyPlans = paperTradeState.plans.filter((plan) => plan.strategyId === strategy.id);
   const strategyFills = paperTradeState.fills.filter((fill) => fill.strategyId === strategy.id);
-  const paperFills = strategyFills.slice(0, 8);
-  const strategyHistoryRows = paperFills.length ? [] : historyRows;
+  const historyFills = strategyFills.filter((fill) => isDateInInputRange(fill.filledAt, historyStartDate, historyEndDate));
+  const paperFills = historyFills.slice(0, 8);
+  const assetSyncRecord = syncedAssets.lastSyncedAt
+    ? {
+        time: syncedAssets.lastSyncedAt.replace("T", " ").slice(0, 19),
+        amount: accountAsset
+      }
+    : null;
+  const logFills = strategyFills.filter((fill) => isDateInInputRange(fill.filledAt, tradeLogStartDate, tradeLogEndDate));
+  const logAssetSyncRecord = assetSyncRecord && isDateInInputRange(assetSyncRecord.time, tradeLogStartDate, tradeLogEndDate) ? assetSyncRecord : null;
+  const historyAssetSyncRecord = assetSyncRecord && isDateInInputRange(assetSyncRecord.time, historyStartDate, historyEndDate) ? assetSyncRecord : null;
+  const tradeLogRows = [
+    ...logFills.map((fill) => ({
+      time: fill.filledAt.replace("T", " ").slice(0, 19),
+      type: fill.side,
+      message: `纸面交易已记录：${fill.side}${fill.shares}股 ${fill.name}，成交均价 ${fill.price.toFixed(3)}。`
+    })),
+    ...(logAssetSyncRecord
+      ? [
+          {
+            time: logAssetSyncRecord.time,
+            type: "资产同步",
+            message: `资产同步完成：账户资产 ${formatMoney(logAssetSyncRecord.amount)}。`
+          }
+        ]
+      : [])
+  ];
   const latestStrategyPlan = strategyPlans[0];
   const shortStrategyId = strategy.id.length > 8 ? strategy.id.slice(-8) : strategy.id;
   const latestPlanText = latestStrategyPlan
@@ -4837,9 +5245,15 @@ function TradeWorkspace({
   const [activeInstructionPlan, setActiveInstructionPlan] = useState<TradePlan | null>(() =>
     latestStrategyPlan?.status === "draft" || latestStrategyPlan?.status === "confirmed" ? latestStrategyPlan : null
   );
+  const [activeInstructionClientText, setActiveInstructionClientText] = useState("");
+  const [showClientCopyPanel, setShowClientCopyPanel] = useState(false);
   const [instructionStatus, setInstructionStatus] = useState(() =>
     latestStrategyPlan ? `已载入最近一次${latestStrategyPlan.mode === "auto" ? "自动" : "手动"}指令` : "尚未生成本次调仓指令"
   );
+  useEffect(() => {
+    setShowClientCopyPanel(false);
+    setActiveInstructionClientText("");
+  }, [executionMode, latestStrategyPlan?.id, strategy.id]);
   useEffect(() => {
     if (latestStrategyPlan?.status === "draft" || latestStrategyPlan?.status === "confirmed") {
       setActiveInstructionPlan((current) => {
@@ -4855,15 +5269,26 @@ function TradeWorkspace({
       return null;
     });
   }, [latestStrategyPlan?.id, latestStrategyPlan?.status, strategy.id]);
+  const instructionTradeDate = activeInstructionPlan?.generatedAt.slice(0, 10) ?? todayOffset(0);
   const patchAssetDraft = (patch: Partial<TradeAssetState>) => {
     setAssetDraft((current) => ensureTradeAssetState({ ...current, ...patch }));
   };
-  const syncManualAssets = () => {
-    const next = ensureTradeAssetState({ ...assetDraft, lastSyncedAt: new Date().toISOString() });
-    setSyncedAssets(next);
-    setAssetDraft(next);
-    saveLocal("tradeAssetState", next);
-    setAssetSyncStatus(`资产已同步 ${next.lastSyncedAt?.replace("T", " ").slice(0, 16)}`);
+  const syncManualAssets = async () => {
+    setAssetSyncStatus("正在通过 Rust 交易接口同步资产...");
+    try {
+      const result = await syncTradeAssetsRustFirst(assetDraft);
+      if (!result.ok) {
+        setAssetSyncStatus(result.message);
+        return;
+      }
+      const next = result.asset;
+      setSyncedAssets(next);
+      setAssetDraft(next);
+      saveLocal("tradeAssetState", next);
+      setAssetSyncStatus(`${result.message} ${next.lastSyncedAt?.replace("T", " ").slice(0, 16)}`);
+    } catch (error) {
+      setAssetSyncStatus(`Rust 资产同步接口失败：${readableError(error)}`);
+    }
   };
   const instructionOrders = activeInstructionPlan?.orders ?? [];
   const instructionTableRows = instructionOrders.map((order) => {
@@ -4874,16 +5299,28 @@ function TradeWorkspace({
       industry: sourceRow?.stock.industry1 ?? "--"
     };
   });
-  const clientInstructionText = activeInstructionPlan ? tradePlanToClientText(activeInstructionPlan) : "";
+  const clientInstructionText = showClientCopyPanel ? activeInstructionClientText : "";
   const formatMinimumTradeAmount = (value: number) => formatMoney(normalizeMinimumTradeAmount(value, 0));
-  const generateManualInstructions = () => {
-    const plan = generateTradePlan(rows, "manual", "交易指令", minimumTradeAmount);
-    setActiveInstructionPlan(plan);
-    setInstructionStatus(`已生成 ${plan.orders.length} 条手动交易指令，最小买卖金额 ${formatMinimumTradeAmount(minimumTradeAmount)}`);
-    return plan;
+  const generateManualInstructions = async () => {
+    try {
+      const tradeExport = await generateTradePlan(rows, "manual", "交易指令", minimumTradeAmount, accountAsset);
+      const plan = tradeExport.plan;
+      setActiveInstructionPlan(plan);
+      setActiveInstructionClientText("");
+      setShowClientCopyPanel(false);
+      setInstructionStatus(`已生成 ${plan.orders.length} 条手动交易指令，最小买卖金额 ${formatMinimumTradeAmount(minimumTradeAmount)}`);
+      return plan;
+    } catch (error) {
+      setActiveInstructionPlan(null);
+      setActiveInstructionClientText("");
+      setShowClientCopyPanel(false);
+      setInstructionStatus(`Rust 交易指令接口失败：${readableError(error)}`);
+      return null;
+    }
   };
-  const prepareManualInstructionPlan = () => {
-    const plan = filterTradePlanByAmount(activeInstructionPlan ?? generateManualInstructions(), minimumTradeAmount);
+  const prepareManualInstructionPlan = async () => {
+    const plan = activeInstructionPlan ?? await generateManualInstructions();
+    if (!plan) return null;
     if (!plan.orders.length) {
       setInstructionStatus(`没有达到 ${formatMinimumTradeAmount(minimumTradeAmount)} 的交易指令可导出`);
       return null;
@@ -4892,45 +5329,76 @@ function TradeWorkspace({
     return plan;
   };
   const copyClientInstructions = async () => {
-    const plan = prepareManualInstructionPlan();
+    const plan = await prepareManualInstructionPlan();
     if (!plan) return;
-    const copied = await copyTextToClipboard(tradePlanToClientText(plan));
-    setInstructionStatus(
-      copied
-        ? `已复制 ${plan.orders.length} 条交易客户端指令，可粘贴到批量下单表格`
-        : "浏览器未允许自动复制，请手动复制下方交易客户端文本"
-    );
+    try {
+      const tradeExport = await exportTradePlanRustFirst(plan);
+      if (!tradeExport.clientText.trim()) {
+        setInstructionStatus("Rust 交易导出接口未返回客户端复制文本");
+        return;
+      }
+      setActiveInstructionClientText(tradeExport.clientText);
+      const copied = await copyTextToClipboard(tradeExport.clientText);
+      setInstructionStatus(
+        copied
+          ? `已复制 ${plan.orders.length} 条交易客户端指令，可粘贴到批量下单表格`
+          : "浏览器未允许自动复制，请点击“导出交易指令”后手动复制交易客户端文本"
+      );
+    } catch (error) {
+      setInstructionStatus(`Rust 交易导出接口失败：${readableError(error)}`);
+    }
   };
   const exportManualInstructions = async () => {
-    const plan = prepareManualInstructionPlan();
+    const plan = await prepareManualInstructionPlan();
     if (!plan) {
       return;
     }
-    const clientText = tradePlanToClientText(plan);
-    downloadTextFile(`${safeFileName(strategy.name)}-交易客户端指令.txt`, clientText, "text/plain;charset=utf-8");
-    const copied = await copyTextToClipboard(clientText);
-    setInstructionStatus(
-      copied
-        ? `已导出并复制 ${plan.orders.length} 条交易客户端指令`
-        : `已导出 ${plan.orders.length} 条交易客户端指令，请手动复制下方文本`
-    );
+    try {
+      const tradeExport = await exportTradePlanRustFirst(plan);
+      if (!tradeExport.clientText.trim()) {
+        setInstructionStatus("Rust 交易导出接口未返回客户端复制文本");
+        return;
+      }
+      downloadTextFile(`${safeFileName(strategy.name)}-交易客户端指令.txt`, tradeExport.clientText, "text/plain;charset=utf-8");
+      setActiveInstructionClientText(tradeExport.clientText);
+      setShowClientCopyPanel(true);
+      const copied = await copyTextToClipboard(tradeExport.clientText);
+      setInstructionStatus(
+        copied
+          ? `已导出并复制 ${plan.orders.length} 条交易客户端指令`
+          : `已导出 ${plan.orders.length} 条交易客户端指令，请手动复制下方文本`
+      );
+    } catch (error) {
+      setInstructionStatus(`Rust 交易导出接口失败：${readableError(error)}`);
+    }
   };
-  const exportInstructionStatusTable = () => {
+  const exportInstructionStatusTable = async () => {
     const plan = activeInstructionPlan;
     if (!plan || !plan.orders.length) {
       setInstructionStatus("请先生成交易指令，再生成交易状态表");
       return;
     }
-    downloadTextFile(`${safeFileName(strategy.name)}-交易状态表.csv`, `\ufeff${tradePlanStatusToCsv(plan)}`, "text/csv;charset=utf-8");
-    setInstructionStatus(`已生成 ${plan.orders.length} 条交易状态表`);
+    try {
+      const tradeExport = await exportTradePlanRustFirst(plan);
+      if (!tradeExport.csv.trim()) {
+        setInstructionStatus("Rust 交易导出接口未返回交易状态表");
+        return;
+      }
+      downloadTextFile(`${safeFileName(strategy.name)}-交易状态表.csv`, `\ufeff${tradeExport.csv}`, "text/csv;charset=utf-8");
+      setInstructionStatus(`已生成 ${plan.orders.length} 条交易状态表`);
+    } catch (error) {
+      setInstructionStatus(`Rust 交易导出接口失败：${readableError(error)}`);
+    }
   };
   const saveMinimumTradeAmount = () => {
     const nextMinimum = normalizeMinimumTradeAmount(minimumTradeAmountDraft, minimumTradeAmount);
     setMinimumTradeAmount(nextMinimum);
     setMinimumTradeAmountDraft(String(nextMinimum));
     saveLocal("tradeMinimumAmount", nextMinimum);
-    setActiveInstructionPlan((current) => (current ? filterTradePlanByAmount(current, nextMinimum) : current));
-    setInstructionStatus(`最小买卖金额已保存为 ${formatMinimumTradeAmount(nextMinimum)}`);
+    setActiveInstructionPlan(null);
+    setActiveInstructionClientText("");
+    setShowClientCopyPanel(false);
+    setInstructionStatus(`最小买卖金额已保存为 ${formatMinimumTradeAmount(nextMinimum)}，请重新生成交易指令`);
   };
   const toggleAdvancedInstructions = () => {
     setAdvancedInstructions((current) => {
@@ -4958,15 +5426,21 @@ function TradeWorkspace({
         })
       };
     });
+    setActiveInstructionClientText("");
+    setShowClientCopyPanel(false);
     setInstructionStatus("已调整当前交易指令，导出前请确认");
   };
   const removeInstructionOrder = (clientOrderId: string) => {
     setActiveInstructionPlan((current) => (current ? { ...current, orders: current.orders.filter((order) => order.clientOrderId !== clientOrderId) } : current));
+    setActiveInstructionClientText("");
+    setShowClientCopyPanel(false);
     setInstructionStatus("已从当前指令中移除该股票");
   };
   const clearInstructions = () => {
     const removedCount = clearTradePlans(strategy.id);
     setActiveInstructionPlan(null);
+    setActiveInstructionClientText("");
+    setShowClientCopyPanel(false);
     setInstructionStatus(removedCount ? `已解除 ${removedCount} 个未成交指令` : "已清空当前页面指令草稿");
   };
   const isCurrentStrategyImported = holdingStrategies.some((item) => item.id === strategy.id);
@@ -4991,6 +5465,118 @@ function TradeWorkspace({
     ? round(holdingStrategyRows.reduce((sum, row) => sum + row.dailyReturn, 0) / holdingStrategyRows.length, 2)
     : 0;
   const holdingDetailRows = isCurrentStrategyImported ? holdings.slice(0, 8) : [];
+  const shiftTradeLogRange = (days: number) => {
+    setTradeLogStartDate((value) => shiftDateInput(value, days));
+    setTradeLogEndDate((value) => shiftDateInput(value, days));
+  };
+  const shiftHistoryRange = (days: number) => {
+    setHistoryStartDate((value) => shiftDateInput(value, days));
+    setHistoryEndDate((value) => shiftDateInput(value, days));
+  };
+  const showAssetAllocation = () => {
+    setAssetSyncStatus(
+      `当前资产分配：持仓市值 ${formatMoney(holdingValue)}，策略现金 ${formatMoney(strategyCash)}，策略外资产 ${formatMoney(outsideCash)}。调整后需点击资产同步。`
+    );
+  };
+  const exportHoldingDetails = () => {
+    if (!holdingDetailRows.length && !holdingStrategyCashTotal && !outsideCashForTable) {
+      setAssetSyncStatus("暂无可导出的真实持仓详情，请先导入策略并同步资产。");
+      return;
+    }
+    const rowsForCsv = [
+      ["序号", "标的名称", "证券代码", "行业", "持仓股数", "持仓市值", "最新价", "日涨跌幅", "策略外资产"],
+      ...holdingDetailRows.map((row, index) => {
+        const shares = planRows[index]?.shares ?? 0;
+        const price = row.stock.metrics.price ?? 0;
+        return [
+          index + 1,
+          row.stock.name,
+          displayStockCode(row.stock),
+          row.stock.industry1 ?? "",
+          shares,
+          round(price * shares, 2),
+          price.toFixed(2),
+          pct(row.stock.metrics.pctChange ?? 0),
+          0
+        ];
+      }),
+      [
+        holdingDetailRows.length + 1,
+        "现金",
+        "",
+        "",
+        formatMoney(holdingStrategyCashTotal + outsideCashForTable),
+        formatMoney(holdingStrategyCashTotal + outsideCashForTable),
+        "1.00",
+        "0.00%",
+        formatMoney(outsideCashForTable)
+      ]
+    ];
+    downloadTextFile(`${safeFileName(strategy.name)}-持仓详情.csv`, `\ufeff${buildCsv(rowsForCsv)}`, "text/csv;charset=utf-8");
+    setAssetSyncStatus(`已导出 ${Math.max(holdingDetailRows.length, 0)} 条持仓明细和现金记录。`);
+  };
+  const viewTradeLogs = () => {
+    setTradeAuditStatus(
+      tradeLogRows.length
+        ? `已按 ${tradeLogStartDate} 至 ${tradeLogEndDate} 筛选 ${tradeLogRows.length} 条真实交易日志。`
+        : `当前 ${tradeLogStartDate} 至 ${tradeLogEndDate} 没有真实交易日志。`
+    );
+  };
+  const showTradeLogHelp = () => {
+    setTradeAuditStatus("日志说明：这里只显示 Rust 交易指令确认后的纸面成交，以及 Rust 资产同步记录；接口失败或没有真实记录时保持空态。");
+  };
+  const exportTradeLogs = () => {
+    if (!tradeLogRows.length) {
+      setTradeAuditStatus("当前日期范围内没有真实交易日志可导出。");
+      return;
+    }
+    const csv = buildCsv([["时间", "类型", "信息"], ...tradeLogRows.map((row) => [row.time, row.type, row.message])]);
+    downloadTextFile(`${safeFileName(strategy.name)}-交易日志-${tradeLogStartDate}_${tradeLogEndDate}.csv`, `\ufeff${csv}`, "text/csv;charset=utf-8");
+    setTradeAuditStatus(`已导出 ${tradeLogRows.length} 条真实交易日志。`);
+  };
+  const viewTradeHistory = () => {
+    const total = historyFills.length + (historyAssetSyncRecord ? 1 : 0);
+    setTradeAuditStatus(
+      total
+        ? `已按 ${historyStartDate} 至 ${historyEndDate} 筛选 ${total} 条真实成交/资产记录。`
+        : `当前 ${historyStartDate} 至 ${historyEndDate} 没有真实成交或资产同步记录。`
+    );
+  };
+  const exportTradeHistory = () => {
+    const rowsForCsv = [
+      ["序号", "时间", "标的名称", "标的代码", "变更(股数)", "成交均价", "发生金额", "策略外资产"],
+      ...historyFills.map((fill, index) => [
+        index + 1,
+        fill.filledAt.replace("T", " ").slice(0, 19),
+        fill.name,
+        displayStockCode(fill.code),
+        `${fill.side}${fill.shares}`,
+        fill.price.toFixed(3),
+        `${fill.side === "买入" ? "-" : "+"}${formatMoney(fill.amount)}`,
+        ""
+      ]),
+      ...(historyAssetSyncRecord
+        ? [
+            [
+              historyFills.length + 1,
+              historyAssetSyncRecord.time,
+              "现金",
+              "",
+              "资产同步",
+              "N/A",
+              "N/A",
+              formatMoney(historyAssetSyncRecord.amount)
+            ]
+          ]
+        : [])
+    ];
+    if (rowsForCsv.length <= 1) {
+      setTradeAuditStatus("当前日期范围内没有真实成交或资产同步记录可导出。");
+      return;
+    }
+    downloadTextFile(`${safeFileName(strategy.name)}-交易历史-${historyStartDate}_${historyEndDate}.csv`, `\ufeff${buildCsv(rowsForCsv)}`, "text/csv;charset=utf-8");
+    setTradeAuditStatus(`已导出 ${rowsForCsv.length - 1} 条真实成交/资产记录。`);
+  };
   const conditionRows = holdings.slice(0, 5).map((row, index) => {
     const price = row.stock.metrics.price ?? 0;
     const direction = index % 2 === 0 ? "买入" : "卖出";
@@ -5007,8 +5593,8 @@ function TradeWorkspace({
       orderPrice: direction === "买入" ? "卖五价+0.05" : "跌停价",
       shares,
       amount: round(price * shares, 2),
-      status: index === 0 ? "运行中" : index === 1 ? "已触发" : "暂停",
-      validUntil: "2026-06-25"
+      status: "运行中",
+      validUntil: todayOffset(15)
     };
   });
   const tabs = [
@@ -5057,7 +5643,16 @@ function TradeWorkspace({
             {tradeInterfaceBound ? "交易接口已绑定" : "绑定交易接口"}
           </button>
         ) : (
-          <button className="btn" onClick={() => exportTradePlan(rows, "manual", "指令模板")}>导出指令模板</button>
+          <button
+            className="btn"
+            onClick={() => {
+              void exportTradePlan(rows, "manual", "指令模板", 0, accountAsset).catch((error) => {
+                setInstructionStatus(`Rust 交易导出接口失败：${readableError(error)}`);
+              });
+            }}
+          >
+            导出指令模板
+          </button>
         )}
       </div>
 
@@ -5300,7 +5895,7 @@ function TradeWorkspace({
               </tr>
             </tbody>
           </table>
-          <p className="live-note">注：持仓市值和今日涨跌根据本地策略信号模拟生成，页面结构对应果仁实盘管家。</p>
+          <p className="live-note">注：持仓市值来自资产同步后的资产输入，今日涨跌取自已接入的真实行情字段；未生成 Rust 交易指令或未确认纸面成交时不展示本地样本成交。</p>
 
           <div className="live-section-title">
             <h3>持仓详情</h3>
@@ -5314,8 +5909,8 @@ function TradeWorkspace({
               </select>
             </label>
             <div className="live-title-links">
-              <a>资产分配</a>
-              <a>导出</a>
+              <button className="text-link" onClick={showAssetAllocation}>资产分配</button>
+              <button className="text-link" onClick={exportHoldingDetails}>导出</button>
             </div>
           </div>
           <table className="live-table">
@@ -5369,8 +5964,8 @@ function TradeWorkspace({
         <div className="live-panel">
           <div className="rebalance-toolbar">
             <div>
-              <h3>交易指令（2026-05-25）</h3>
-              <button className="btn primary" onClick={() => (executionMode === "manual" ? generateManualInstructions() : submitPaperTradePlan(rows))}>
+              <h3>交易指令（{instructionTradeDate}）</h3>
+              <button className="btn primary" onClick={() => (executionMode === "manual" ? generateManualInstructions() : submitPaperTradePlan(rows, accountAsset))}>
                 {executionMode === "manual" ? "生成手动交易指令" : "确认自动交易计划"}
               </button>
               {executionMode === "manual" ? <button className="btn primary" onClick={exportManualInstructions}>导出交易指令</button> : null}
@@ -5419,7 +6014,7 @@ function TradeWorkspace({
             <span>●</span> {tradeTime} {executionMode === "manual" ? "生成指令" : "自动执行"}
             <button className="text-link" onClick={exportInstructionStatusTable}>生成交易状态表</button>
           </p>
-          {activeInstructionPlan ? (
+          {executionMode === "manual" && showClientCopyPanel && activeInstructionPlan ? (
             <div className="trade-client-copy-panel">
               <div className="trade-client-copy-head">
                 <strong>交易客户端复制格式</strong>
@@ -5529,14 +6124,16 @@ function TradeWorkspace({
         <div className="live-panel">
           <div className="history-toolbar">
             <span>选择时间：</span>
-            <button className="date-step">◀</button>
-            <input type="date" defaultValue="2026-05-22" />
+            <button className="date-step" onClick={() => shiftTradeLogRange(-1)}>◀</button>
+            <input type="date" value={tradeLogStartDate} onChange={(event) => setTradeLogStartDate(event.target.value)} />
             <span>-</span>
-            <input type="date" defaultValue="2026-05-25" />
-            <button className="date-step">▶</button>
-            <button className="btn primary">查看日志</button>
-            <a>日志说明</a>
+            <input type="date" value={tradeLogEndDate} onChange={(event) => setTradeLogEndDate(event.target.value)} />
+            <button className="date-step" onClick={() => shiftTradeLogRange(1)}>▶</button>
+            <button className="btn primary" onClick={viewTradeLogs}>查看日志</button>
+            <button className="text-link" onClick={exportTradeLogs}>导出</button>
+            <button className="text-link" onClick={showTradeLogHelp}>日志说明</button>
           </div>
+          <p className="instruction-status" aria-live="polite">{tradeAuditStatus}</p>
           <table className="live-table">
             <thead>
               <tr>
@@ -5546,7 +6143,7 @@ function TradeWorkspace({
               </tr>
             </thead>
             <tbody>
-              {logRows.map((row, index) => (
+              {tradeLogRows.map((row, index) => (
                 <tr key={`${row.time}-${index}`}>
                   <td>{row.time}</td>
                   <td>
@@ -5555,6 +6152,13 @@ function TradeWorkspace({
                   <td>{row.message}</td>
                 </tr>
               ))}
+              {!tradeLogRows.length ? (
+                <tr>
+                  <td className="instruction-empty" colSpan={3}>
+                    暂无真实交易日志。请先通过 Rust 生成交易指令并确认纸面交易，或点击资产同步生成同步记录。
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -5564,16 +6168,17 @@ function TradeWorkspace({
         <div className="live-panel">
           <div className="history-toolbar">
             <span>成交时间：</span>
-            <button className="date-step">◀</button>
-            <input type="date" defaultValue="2026-05-22" />
+            <button className="date-step" onClick={() => shiftHistoryRange(-1)}>◀</button>
+            <input type="date" value={historyStartDate} onChange={(event) => setHistoryStartDate(event.target.value)} />
             <span>-</span>
-            <input type="date" defaultValue="2026-05-25" />
-            <button className="date-step">▶</button>
+            <input type="date" value={historyEndDate} onChange={(event) => setHistoryEndDate(event.target.value)} />
+            <button className="date-step" onClick={() => shiftHistoryRange(1)}>▶</button>
             <SelectField label="选择策略：" value={strategy.name} options={[strategy.name, "策略外资产"]} onChange={() => undefined} />
-            <button className="btn primary">查看历史记录</button>
-            <a>导出</a>
-            <span>当前策略成交：{strategyFills.length}笔</span>
+            <button className="btn primary" onClick={viewTradeHistory}>查看历史记录</button>
+            <button className="text-link" onClick={exportTradeHistory}>导出</button>
+            <span>当前范围成交：{historyFills.length} / {strategyFills.length}笔</span>
           </div>
+          <p className="instruction-status" aria-live="polite">{tradeAuditStatus}</p>
           <table className="live-table">
             <thead>
               <tr>
@@ -5588,25 +6193,9 @@ function TradeWorkspace({
               </tr>
             </thead>
             <tbody>
-              {strategyHistoryRows.map((row, index) => (
-                <tr key={`${row.stock.code}-${index}`}>
-                  <td>{index + 1}</td>
-                  <td>{row.time}</td>
-                  <td>
-                    <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
-                  </td>
-                  <td>
-                    <a>{displayStockCode(row.stock)}</a>
-                  </td>
-                  <td>买入{row.shares}</td>
-                  <td>{row.stock.metrics.price?.toFixed(3)}</td>
-                  <td className="negative">-{formatMoney(row.amount)}</td>
-                  <td />
-                </tr>
-              ))}
               {paperFills.map((fill, index) => (
                 <tr key={fill.id}>
-                  <td>{strategyHistoryRows.length + index + 1}</td>
+                  <td>{index + 1}</td>
                   <td>{fill.filledAt.replace("T", " ").slice(0, 19)}</td>
                   <td>
                     <StockNameAction stock={{ code: fill.code, name: fill.name }} onOpen={onOpenStockInfo} />
@@ -5620,16 +6209,25 @@ function TradeWorkspace({
                   <td />
                 </tr>
               ))}
-              <tr>
-                <td>{strategyHistoryRows.length + paperFills.length + 1}</td>
-                <td>2026-05-22 17:49:53</td>
-                <td>现金</td>
-                <td />
-                <td>资产同步</td>
-                <td>N/A</td>
-                <td>N/A</td>
-                <td>{formatMoney(accountAsset)}</td>
-              </tr>
+              {historyAssetSyncRecord ? (
+                <tr>
+                  <td>{paperFills.length + 1}</td>
+                  <td>{historyAssetSyncRecord.time}</td>
+                  <td>现金</td>
+                  <td />
+                  <td>资产同步</td>
+                  <td>N/A</td>
+                  <td>N/A</td>
+                  <td>{formatMoney(historyAssetSyncRecord.amount)}</td>
+                </tr>
+              ) : null}
+              {!paperFills.length && !historyAssetSyncRecord ? (
+                <tr>
+                  <td className="instruction-empty" colSpan={8}>
+                    暂无真实成交记录。请先通过 Rust 生成交易指令并确认纸面交易，或点击资产同步生成同步记录。
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -5643,12 +6241,65 @@ function TradeWorkspace({
           executionMode={executionMode}
           tradeInterfaceBound={tradeInterfaceBound}
           bindTradeInterface={bindTradingInterface}
-          exportConditionInstructions={() => exportTradePlan(rows, "manual", "条件单指令")}
+          exportConditionInstructions={() =>
+            exportTradePlan(rows, "manual", "条件单指令", 0, accountAsset).catch((error) => {
+              setInstructionStatus(`Rust 条件单导出接口失败：${readableError(error)}`);
+            })
+          }
           onOpenStockInfo={onOpenStockInfo}
         />
       )}
     </section>
   );
+}
+
+type ConditionOrderRow = {
+  id: string;
+  stock: SelectionRow["stock"];
+  name: string;
+  direction: string;
+  triggerOperator: string;
+  triggerPrice: number;
+  orderPrice: string;
+  shares: number;
+  amount: number;
+  status: string;
+  validUntil: string;
+  triggeredAt?: string;
+};
+
+function conditionDraftFromRow(row: ConditionOrderRow | undefined, strategy: StrategyConfig): ConditionOrderRow {
+  const fallbackStock = row?.stock ?? {
+    code: "",
+    name: "",
+    exchange: "沪市",
+    board: "主板",
+    industry1: "",
+    industry2: "",
+    region: "",
+    property: "民企",
+    isST: false,
+    isSuspended: false,
+    isSTAR: false,
+    isMargin: false,
+    indexes: [],
+    metrics: {}
+  };
+  const price = Number(fallbackStock.metrics.price ?? row?.triggerPrice ?? 0);
+  return {
+    id: row?.id ?? `condition-${Date.now().toString(36)}`,
+    stock: fallbackStock,
+    name: row?.name ?? `${strategy.name}条件单`,
+    direction: row?.direction ?? "买入",
+    triggerOperator: row?.triggerOperator ?? "<=",
+    triggerPrice: row?.triggerPrice ?? round(price * 0.98, 2),
+    orderPrice: row?.orderPrice ?? "卖五价+0.05",
+    shares: row?.shares ?? 100,
+    amount: row?.amount ?? round(price * 100, 2),
+    status: row?.status ?? "运行中",
+    validUntil: row?.validUntil ?? todayOffset(15),
+    triggeredAt: row?.triggeredAt
+  };
 }
 
 function ConditionTradePanel({
@@ -5661,28 +6312,120 @@ function ConditionTradePanel({
   exportConditionInstructions,
   onOpenStockInfo
 }: {
-  rows: Array<{
-    id: string;
-    stock: SelectionRow["stock"];
-    name: string;
-    direction: string;
-    triggerOperator: string;
-    triggerPrice: number;
-    orderPrice: string;
-    shares: number;
-    amount: number;
-    status: string;
-    validUntil: string;
-  }>;
+  rows: ConditionOrderRow[];
   strategy: StrategyConfig;
   formatMoney: (value: number) => string;
   executionMode: "manual" | "auto";
   tradeInterfaceBound: boolean;
   bindTradeInterface: () => boolean;
-  exportConditionInstructions: () => void;
+  exportConditionInstructions: () => void | Promise<unknown>;
   onOpenStockInfo: (stock: StockReference) => void;
 }) {
-  const first = rows[0];
+  const sourceKey = rows.map((row) => `${row.id}:${row.stock.code}:${row.triggerPrice}:${row.status}`).join("|");
+  const [conditionOrders, setConditionOrders] = useState<ConditionOrderRow[]>(rows);
+  const [statusFilter, setStatusFilter] = useState("全部");
+  const [conditionStatus, setConditionStatus] = useState("条件单来自当前真实选股结果，可保存、暂停、删除或导出。");
+  const [draft, setDraft] = useState<ConditionOrderRow>(() => conditionDraftFromRow(rows[0], strategy));
+
+  useEffect(() => {
+    setConditionOrders(rows.map((row) => ({ ...row, status: row.status === "已触发" ? "运行中" : row.status })));
+    setDraft(conditionDraftFromRow(rows[0], strategy));
+  }, [sourceKey, strategy.id]);
+
+  const filteredOrders = statusFilter === "全部" ? conditionOrders : conditionOrders.filter((row) => row.status === statusFilter);
+  const triggeredRows = conditionOrders.filter((row) => row.status === "已触发" && row.triggeredAt);
+  const updateDraft = (patch: Partial<ConditionOrderRow>) => {
+    setDraft((current) => {
+      const next = { ...current, ...patch };
+      const price = Number(next.stock.metrics.price ?? next.triggerPrice ?? 0);
+      return {
+        ...next,
+        shares: Math.max(0, Math.floor(Number(next.shares) / 100) * 100),
+        amount: round(price * Math.max(0, Math.floor(Number(next.shares) / 100) * 100), 2)
+      };
+    });
+  };
+  const newConditionOrder = () => {
+    if (!rows.length) {
+      setConditionStatus("请先运行每日选股或实时选股，生成真实候选股票后再新增条件单。");
+      return;
+    }
+    const next = conditionDraftFromRow({ ...rows[0], id: `condition-${Date.now().toString(36)}` }, strategy);
+    setDraft(next);
+    setConditionStatus("已创建新的条件单草稿，请检查触发价、方向和委托数量后保存。");
+  };
+  const saveConditionOrder = () => {
+    if (!draft.stock.code) {
+      setConditionStatus("缺少证券代码，无法保存条件单。请先接入真实选股结果。");
+      return;
+    }
+    setConditionOrders((current) => {
+      const exists = current.some((row) => row.id === draft.id);
+      return exists ? current.map((row) => (row.id === draft.id ? draft : row)) : [draft, ...current];
+    });
+    setConditionStatus(`已保存条件单：${draft.name}`);
+  };
+  const testConditionOrder = () => {
+    const price = Number(draft.stock.metrics.price ?? 0);
+    const hit =
+      draft.triggerOperator === ">="
+        ? price >= draft.triggerPrice
+        : draft.triggerOperator === ">"
+          ? price > draft.triggerPrice
+          : draft.triggerOperator === "<"
+            ? price < draft.triggerPrice
+            : price <= draft.triggerPrice;
+    if (price > 0 && hit) {
+      const triggered = { ...draft, status: "已触发", triggeredAt: new Date().toISOString() };
+      setDraft(triggered);
+      setConditionOrders((current) => {
+        const exists = current.some((row) => row.id === triggered.id);
+        return exists ? current.map((row) => (row.id === triggered.id ? triggered : row)) : [triggered, ...current];
+      });
+    }
+    setConditionStatus(
+      price > 0
+        ? `试算完成：最新价 ${price.toFixed(2)} ${hit ? "已满足" : "未满足"} ${draft.triggerOperator} ${draft.triggerPrice.toFixed(2)}。`
+        : "试算失败：当前股票缺少真实最新价，请先接入真实行情。"
+    );
+  };
+  const pauseAllConditions = () => {
+    setConditionOrders((current) => current.map((row) => ({ ...row, status: "暂停" })));
+    setConditionStatus("已暂停全部条件单。");
+  };
+  const editConditionOrder = (row: ConditionOrderRow) => {
+    setDraft(row);
+    setConditionStatus(`正在编辑条件单：${row.name}`);
+  };
+  const toggleConditionOrder = (id: string) => {
+    setConditionOrders((current) =>
+      current.map((row) => (row.id === id ? { ...row, status: row.status === "暂停" ? "运行中" : "暂停" } : row))
+    );
+    setConditionStatus("条件单状态已更新。");
+  };
+  const deleteConditionOrder = (id: string) => {
+    setConditionOrders((current) => current.filter((row) => row.id !== id));
+    setConditionStatus("条件单已删除。");
+  };
+  const exportConditionOrders = () => {
+    const header = ["条件单名称", "股票代码", "股票名称", "触发条件", "方向", "委托价格", "委托数量", "计划金额", "有效期", "状态"];
+    const lines = conditionOrders.map((row) => [
+      row.name,
+      displayStockCode(row.stock),
+      row.stock.name,
+      `最新价 ${row.triggerOperator} ${row.triggerPrice.toFixed(2)}`,
+      row.direction,
+      row.orderPrice,
+      String(row.shares),
+      String(row.amount),
+      row.validUntil,
+      row.status
+    ]);
+    const csv = [header, ...lines].map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    downloadTextFile(`${safeFileName(strategy.name)}-条件单列表.csv`, `\ufeff${csv}`, "text/csv;charset=utf-8");
+    setConditionStatus(`已导出 ${conditionOrders.length} 条条件单。`);
+  };
+
   return (
     <div className="condition-panel-live">
       <div className="condition-toolbar">
@@ -5697,7 +6440,7 @@ function ConditionTradePanel({
           </p>
         </div>
         <div>
-          <button className="btn primary">
+          <button className="btn primary" onClick={newConditionOrder}>
             <Plus size={14} />
             新增条件单
           </button>
@@ -5708,9 +6451,10 @@ function ConditionTradePanel({
           ) : (
             <button className="btn" onClick={exportConditionInstructions}>导出条件单指令</button>
           )}
-          <button className="btn">暂停全部</button>
+          <button className="btn" onClick={pauseAllConditions}>暂停全部</button>
         </div>
       </div>
+      <p className="instruction-status" aria-live="polite">{conditionStatus}</p>
 
       <div className="condition-layout">
         <section className="condition-editor">
@@ -5721,40 +6465,37 @@ function ConditionTradePanel({
           <div className="condition-form-grid">
             <label>
               <span>条件单名称</span>
-              <input defaultValue={first?.name ?? `${strategy.name}条件单`} />
+              <input value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} />
             </label>
             <label>
               <span>证券代码</span>
-              <input defaultValue={first ? displayStockCode(first.stock) : ""} placeholder="接入真实选股结果后自动填入" />
+              <input value={draft.stock.code ? displayStockCode(draft.stock) : ""} placeholder="接入真实选股结果后自动填入" readOnly />
             </label>
             <label>
               <span>证券名称</span>
-              <input defaultValue={first?.stock.name ?? ""} placeholder="接入真实选股结果后自动填入" />
+              <input value={draft.stock.name} placeholder="接入真实选股结果后自动填入" readOnly />
             </label>
             <label>
               <span>监控价格</span>
-              <select defaultValue="最新价">
+              <select value="最新价" onChange={() => undefined}>
                 <option>最新价</option>
-                <option>买一价</option>
-                <option>卖一价</option>
-                <option>涨跌幅</option>
               </select>
             </label>
             <label>
               <span>触发条件</span>
               <div className="condition-inline">
-                <select defaultValue={first?.triggerOperator ?? "<="}>
+                <select value={draft.triggerOperator} onChange={(event) => updateDraft({ triggerOperator: event.target.value })}>
                   <option>{">="}</option>
                   <option>{"<="}</option>
                   <option>{">"}</option>
                   <option>{"<"}</option>
                 </select>
-                <input type="number" defaultValue={first?.triggerPrice ?? 180} />
+                <input type="number" value={draft.triggerPrice} onChange={(event) => updateDraft({ triggerPrice: Number(event.target.value) })} />
               </div>
             </label>
             <label>
               <span>触发后操作</span>
-              <select defaultValue={first?.direction ?? "买入"}>
+              <select value={draft.direction} onChange={(event) => updateDraft({ direction: event.target.value })}>
                 <option>买入</option>
                 <option>卖出</option>
                 <option>提醒</option>
@@ -5766,7 +6507,7 @@ function ConditionTradePanel({
             </label>
             <label>
               <span>委托价格</span>
-              <select defaultValue={first?.orderPrice ?? "卖五价+0.05"}>
+              <select value={draft.orderPrice} onChange={(event) => updateDraft({ orderPrice: event.target.value })}>
                 <option>卖五价+0.05</option>
                 <option>买五价-0.05</option>
                 <option>涨停价</option>
@@ -5776,16 +6517,16 @@ function ConditionTradePanel({
             </label>
             <label>
               <span>委托数量</span>
-              <input type="number" step={100} defaultValue={first?.shares ?? 100} />
+              <input type="number" step={100} value={draft.shares} onChange={(event) => updateDraft({ shares: Number(event.target.value) })} />
             </label>
             <label>
               <span>有效期至</span>
-              <input type="date" defaultValue={first?.validUntil ?? "2026-06-25"} />
+              <input type="date" value={draft.validUntil} onChange={(event) => updateDraft({ validUntil: event.target.value })} />
             </label>
           </div>
           <div className="condition-actions">
-            <button className="btn primary">保存条件单</button>
-            <button className="btn">立即试算</button>
+            <button className="btn primary" onClick={saveConditionOrder}>保存条件单</button>
+            <button className="btn" onClick={testConditionOrder}>立即试算</button>
           </div>
         </section>
 
@@ -5794,14 +6535,14 @@ function ConditionTradePanel({
             <strong>我的条件单</strong>
             <label>
               <span>状态：</span>
-              <select defaultValue="全部">
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                 <option>全部</option>
                 <option>运行中</option>
                 <option>已触发</option>
                 <option>暂停</option>
               </select>
             </label>
-            <a>导出</a>
+            <button className="text-link" onClick={exportConditionOrders}>导出</button>
           </div>
           <table className="live-table">
             <thead>
@@ -5819,10 +6560,10 @@ function ConditionTradePanel({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {filteredOrders.map((row) => (
                 <tr key={row.id}>
                   <td>
-                    <a>{row.name}</a>
+                    <button className="text-link" onClick={() => editConditionOrder(row)}>{row.name}</button>
                   </td>
                   <td>
                     <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} className="stock-title-button">
@@ -5842,12 +6583,19 @@ function ConditionTradePanel({
                     <span className={`condition-status ${row.status === "运行中" ? "running" : row.status === "已触发" ? "done" : "paused"}`}>{row.status}</span>
                   </td>
                   <td>
-                    <button className="text-link">设置</button>
-                    <button className="text-link">暂停</button>
-                    <button className="text-link">删除</button>
+                    <button className="text-link" onClick={() => editConditionOrder(row)}>设置</button>
+                    <button className="text-link" onClick={() => toggleConditionOrder(row.id)}>{row.status === "暂停" ? "启用" : "暂停"}</button>
+                    <button className="text-link" onClick={() => deleteConditionOrder(row.id)}>删除</button>
                   </td>
                 </tr>
               ))}
+              {!filteredOrders.length ? (
+                <tr>
+                  <td className="instruction-empty" colSpan={10}>
+                    暂无条件单。请先运行每日选股/实时选股，再新增并保存条件单。
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </section>
@@ -5856,7 +6604,7 @@ function ConditionTradePanel({
       <section className="condition-log">
         <div className="live-section-title compact">
           <h3>触发记录</h3>
-          <a>查看全部</a>
+          <button className="text-link" onClick={() => setStatusFilter("全部")}>查看全部</button>
         </div>
         <table className="live-table">
           <thead>
@@ -5869,23 +6617,28 @@ function ConditionTradePanel({
             </tr>
           </thead>
           <tbody>
-            {rows.slice(0, 3).map((row, index) => (
+            {triggeredRows.map((row) => (
               <tr key={`${row.id}-log`}>
-                <td>2026-05-25 09:{15 + index}:26</td>
+                <td>{row.triggeredAt?.replace("T", " ").slice(0, 19)}</td>
                 <td>{row.name}</td>
                 <td>{row.triggerPrice.toFixed(2)}</td>
                 <td>{formatMoney(row.amount)}</td>
                 <td>
-                  {row.status === "已触发"
-                    ? executionMode === "manual"
-                      ? "已生成手动交易指令"
-                      : tradeInterfaceBound
-                        ? "已通过交易接口提交"
-                        : "已生成交易计划，等待接口绑定"
-                    : "继续监控"}
+                  {executionMode === "manual"
+                    ? "已生成手动交易指令"
+                    : tradeInterfaceBound
+                      ? "已通过交易接口提交"
+                      : "已生成交易计划，等待接口绑定"}
                 </td>
               </tr>
             ))}
+            {!triggeredRows.length ? (
+              <tr>
+                <td className="instruction-empty" colSpan={5}>
+                  暂无真实触发记录。条件触发或手动试算满足条件后再记录。
+                </td>
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </section>
@@ -5901,8 +6654,10 @@ function BacktestPanel({
   result,
   selectionRows,
   rankRows,
+  runStatus,
   factors,
   strategy,
+  patchStrategy,
   runCurrentTask,
   openCompare,
   onOpenStockInfo
@@ -5914,9 +6669,11 @@ function BacktestPanel({
   result: BacktestResult | null;
   selectionRows: SelectionRow[];
   rankRows: RankingRow[];
+  runStatus: string;
   factors: Factor[];
   strategy: StrategyConfig;
-  runCurrentTask: (tab?: BacktestTab) => void;
+  patchStrategy: (patch: Partial<StrategyConfig>) => void;
+  runCurrentTask: (tab?: BacktestTab) => void | Promise<void>;
   openCompare: () => void;
   onOpenStockInfo: (stock: StockReference) => void;
 }) {
@@ -5980,6 +6737,16 @@ function BacktestPanel({
             </label>
           ) : (
             <>
+              {tab === "daily" || tab === "realtime" ? (
+                <NumberField
+                  label="选股数量："
+                  value={strategy.poolLimit}
+                  min={1}
+                  step={1}
+                  onChange={(poolLimit) => patchStrategy({ poolLimit: Math.max(1, Math.floor(Number.isFinite(poolLimit) ? poolLimit : 1)) })}
+                  suffix="只"
+                />
+              ) : null}
               <SelectField label="收益基准：" value={config.benchmark} options={["沪深300", "中证500", "创业板指", "科创50"]} onChange={(benchmark) => setConfig({ ...config, benchmark })} />
               <SelectField label="交易成本（单边）：" value={String(config.cost)} options={["0", "0.1", "0.2", "0.3", "0.5", "1"]} onChange={(cost) => setConfig({ ...config, cost: Number(cost) })} />
               <label className="check-line">
@@ -5995,6 +6762,7 @@ function BacktestPanel({
             {tab === "backtest" ? "开始回测" : tab === "rank" || tab === "factorCorrelation" ? "开始分析" : "开始选股"}
           </button>
           {tab === "factorCorrelation" ? <span className="button-hint">分析排名因子IC关系</span> : null}
+          {runStatus ? <span className={`run-status ${runStatus.includes("失败") ? "danger" : ""}`}>{runStatus}</span> : null}
           {tab !== "factorCorrelation" ? (
             <button className="btn" onClick={openCompare}>
               <BarChart3 size={15} />
@@ -6152,9 +6920,34 @@ function SelectionTable({
   onOpenStockInfo?: (stock: StockReference) => void;
 }) {
   const rankFactors = getResultFactorKeys(strategy);
+  const enabledFilters = strategy.filters.filter((condition) => condition.enabled);
+  const filterTitle = enabledFilters.length ? enabledFilters.map((condition) => getFilterConditionLabel(condition, factors)).join("；") : "未设置筛选条件";
+  const showFilterMetric = !compact;
+  const title = realtime ? "实时选股结果" : compact ? "候选股票" : "每日选股结果";
+  const targetCount = Math.max(1, Math.floor(strategy.poolLimit || 1));
+  const weightedCount = Math.min(rows.length, Math.max(1, strategy.trading.maxHoldings));
+  const countLabel = compact ? `已选 ${rows.length} 只` : `已选 ${rows.length} / 目标 ${targetCount} 只，权重分配 ${weightedCount} 只`;
+  if (!rows.length) {
+    return (
+      <div className={`selection-table ${compact ? "compact" : ""}`}>
+        <h3 className="selection-table-title">
+          {title}
+          <span>{countLabel}</span>
+        </h3>
+        <EmptyState>
+          {compact
+            ? "暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。"
+            : "暂无选股结果。系统会优先通过 Rust 数据接口接入全市场股票；仍为空时，请同步真实财报补齐质量、估值和成长指标，或放宽当前筛选条件。"}
+        </EmptyState>
+      </div>
+    );
+  }
   return (
     <div className={`selection-table ${compact ? "compact" : ""}`}>
-      <h3>{realtime ? "实时选股结果" : compact ? "候选股票" : "每日选股结果"}</h3>
+      <h3 className="selection-table-title">
+        {title}
+        <span>{countLabel}</span>
+      </h3>
       <table>
         <thead>
           <tr>
@@ -6164,6 +6957,7 @@ function SelectionTable({
             <th>行业</th>
             <th>得分</th>
             <th>权重</th>
+            {showFilterMetric ? <th>筛选条件</th> : null}
             {rankFactors.map((key) => (
               <th key={key}>{getFactorName(factors, key)}</th>
             ))}
@@ -6180,6 +6974,13 @@ function SelectionTable({
               <td>{row.stock.industry1}</td>
               <td>{row.score.toFixed(2)}</td>
               <td>{row.weight}%</td>
+              {showFilterMetric ? (
+                <td className="filter-pass-cell" title={filterTitle}>
+                  <span className={enabledFilters.length && row.passedFilters >= enabledFilters.length ? "filter-pass-chip pass" : "filter-pass-chip"}>
+                    {enabledFilters.length ? `${row.passedFilters}/${enabledFilters.length}` : "未设置"}
+                  </span>
+                </td>
+              ) : null}
               {rankFactors.map((key) => (
                 <td key={key}>{formatMetric(metricValue(row.stock, factorByKey(factors, key), factors), factorByKey(factors, key))}</td>
               ))}

@@ -54,6 +54,39 @@ export interface PaperTradeState {
   fills: PaperTradeFill[];
 }
 
+export interface TradeAssetState {
+  netValue: number;
+  holdingValue: number;
+  strategyCash: number;
+  outsideAsset: number;
+  lastSyncedAt?: string;
+}
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export interface CreateTradePlanInput {
+  strategy: StrategyConfig;
+  rows: SelectionRow[];
+  mode: ExecutionMode;
+  accountId: string;
+  accountAsset?: number;
+  minimumAmount?: number;
+}
+
+export interface TradePlanExport {
+  plan: TradePlan;
+  clientText: string;
+  csv: string;
+}
+
+export interface TradeAssetSyncResult {
+  ok: boolean;
+  asset: TradeAssetState;
+  accountAsset: number;
+  strategyAsset: number;
+  message: string;
+}
+
 export const defaultTradeConnectionSettings: TradeConnectionSettings = {
   provider: "本地纸面交易接口",
   endpoint: "paper://local",
@@ -66,6 +99,29 @@ export const defaultPaperTradeState: PaperTradeState = {
   plans: [],
   fills: []
 };
+
+export const defaultTradeAssetState: TradeAssetState = {
+  netValue: 1,
+  holdingValue: 320000,
+  strategyCash: 180000,
+  outsideAsset: 500000
+};
+
+export function ensureTradeAssetState(value: Partial<TradeAssetState> | null | undefined): TradeAssetState {
+  const positiveNumber = (input: unknown, fallback: number, precision = 4) => {
+    const parsed = Number(input);
+    if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+    const scale = 10 ** precision;
+    return Math.round(parsed * scale) / scale;
+  };
+  return {
+    netValue: positiveNumber(value?.netValue, defaultTradeAssetState.netValue, 4),
+    holdingValue: positiveNumber(value?.holdingValue, defaultTradeAssetState.holdingValue, 2),
+    strategyCash: positiveNumber(value?.strategyCash, defaultTradeAssetState.strategyCash, 2),
+    outsideAsset: positiveNumber(value?.outsideAsset, defaultTradeAssetState.outsideAsset, 2),
+    lastSyncedAt: value?.lastSyncedAt
+  };
+}
 
 export function ensureTradeConnectionSettings(settings: Partial<TradeConnectionSettings> | null | undefined): TradeConnectionSettings {
   return { ...defaultTradeConnectionSettings, ...(settings ?? {}) };
@@ -110,46 +166,160 @@ export function bindTradeConnection(settings: TradeConnectionSettings) {
   };
 }
 
-export function createTradePlan({
-  strategy,
-  rows,
-  mode,
-  accountId,
-  accountAsset = 500000
-}: {
-  strategy: StrategyConfig;
-  rows: SelectionRow[];
-  mode: ExecutionMode;
-  accountId: string;
-  accountAsset?: number;
-}): TradePlan {
+export function createTradePlan(input: CreateTradePlanInput): TradePlan {
+  return createEmptyTradePlan(input);
+}
+
+function createEmptyTradePlan({ strategy, mode, accountId }: CreateTradePlanInput): TradePlan {
   const generatedAt = new Date().toISOString();
-  const selected = rows.slice(0, Math.max(strategy.trading.maxHoldings, 1));
-  const orders = selected.map((row, index) => {
-    const price = Number(row.stock.metrics.price ?? 1);
-    const targetAmount = accountAsset * Math.max(row.weight, 1) / 100;
-    const shares = Math.max(100, Math.floor(targetAmount / Math.max(price, 1) / 100) * 100);
-    const amount = round(price * shares, 2);
-    return {
-      clientOrderId: `${strategy.id}-${generatedAt}-${index}-${row.stock.code}`,
-      code: row.stock.code,
-      name: row.stock.name,
-      side: "买入" as const,
-      shares,
-      price: round(price, 3),
-      amount,
-      status: "待确认" as const
-    };
-  });
   return {
-    id: `plan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `plan-empty-${Date.now().toString(36)}`,
     strategyId: strategy.id,
     strategyName: strategy.name,
     accountId,
     mode,
     generatedAt,
-    orders,
+    orders: [],
     status: "draft"
+  };
+}
+
+function responseErrorSuffix(response: Response) {
+  return response
+    .text()
+    .then((details) => {
+      const trimmed = details.trim();
+      return trimmed ? `: ${trimmed.slice(0, 300)}` : "";
+    })
+    .catch(() => "");
+}
+
+async function jsonFromResponse(response: Response, label: string) {
+  try {
+    return await response.json();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`${label} returned invalid JSON: ${detail}`);
+  }
+}
+
+function isTradeAssetPayload(value: unknown): value is TradeAssetState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<TradeAssetState>;
+  return (
+    typeof candidate.netValue === "number" &&
+    typeof candidate.holdingValue === "number" &&
+    typeof candidate.strategyCash === "number" &&
+    typeof candidate.outsideAsset === "number"
+  );
+}
+
+export async function createTradePlanExportRustFirst(input: CreateTradePlanInput, fetchImpl?: FetchLike): Promise<TradePlanExport> {
+  const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust trade API unavailable: fetch is not available");
+
+  const response = await request("/api/trade/plan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      strategy: input.strategy,
+      rows: input.rows,
+      mode: input.mode,
+      accountId: input.accountId,
+      accountAsset: input.accountAsset ?? 500000,
+      minimumAmount: input.minimumAmount ?? 0
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Rust trade API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  }
+  const payload = await jsonFromResponse(response, "Rust trade API");
+  if (!Array.isArray(payload?.plan?.orders) || typeof payload.clientText !== "string" || typeof payload.csv !== "string") {
+    throw new Error("Rust trade API returned invalid trade export payload");
+  }
+  return {
+    plan: payload.plan as TradePlan,
+    clientText: payload.clientText,
+    csv: payload.csv
+  };
+}
+
+export async function createTradePlanRustFirst(input: CreateTradePlanInput, fetchImpl?: FetchLike): Promise<TradePlan> {
+  return (await createTradePlanExportRustFirst(input, fetchImpl)).plan;
+}
+
+export async function exportTradePlanRustFirst(plan: TradePlan, fetchImpl?: FetchLike): Promise<Pick<TradePlanExport, "clientText" | "csv">> {
+  const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust trade export API unavailable: fetch is not available");
+
+  const response = await request("/api/trade/export", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ plan })
+  });
+  if (!response.ok) {
+    throw new Error(`Rust trade export API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  }
+  const payload = await jsonFromResponse(response, "Rust trade export API");
+  if (typeof payload.clientText !== "string" || typeof payload.csv !== "string") {
+    throw new Error("Rust trade export API returned invalid export payload");
+  }
+  return {
+    clientText: payload.clientText,
+    csv: payload.csv
+  };
+}
+
+function isPaperTradeStatePayload(value: unknown): value is Partial<PaperTradeState> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<PaperTradeState>;
+  return Array.isArray(candidate.plans) && Array.isArray(candidate.fills);
+}
+
+export async function submitPaperTradePlanRustFirst(state: PaperTradeState, plan: TradePlan, fetchImpl?: FetchLike): Promise<PaperTradeState> {
+  const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust paper trade API unavailable: fetch is not available");
+
+  const response = await request("/api/trade/paper/submit", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      state: ensurePaperTradeState(state),
+      plan
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Rust paper trade API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  }
+  const payload = await jsonFromResponse(response, "Rust paper trade API");
+  if (!isPaperTradeStatePayload(payload)) {
+    throw new Error("Rust paper trade API returned invalid paper trade state");
+  }
+  return ensurePaperTradeState(payload);
+}
+
+export async function syncTradeAssetsRustFirst(asset: TradeAssetState, fetchImpl?: FetchLike): Promise<TradeAssetSyncResult> {
+  const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust asset sync API unavailable: fetch is not available");
+
+  const response = await request("/api/trade/assets/sync", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ asset })
+  });
+  if (!response.ok) {
+    throw new Error(`Rust asset sync API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  }
+  const payload = await jsonFromResponse(response, "Rust asset sync API");
+  if (!isTradeAssetPayload(payload?.asset) || typeof payload?.accountAsset !== "number" || typeof payload?.strategyAsset !== "number") {
+    throw new Error("Rust asset sync API returned invalid asset sync payload");
+  }
+  return {
+    ok: payload?.ok === true,
+    asset: ensureTradeAssetState(payload.asset),
+    accountAsset: payload.accountAsset,
+    strategyAsset: payload.strategyAsset,
+    message: typeof payload?.message === "string" ? payload.message : "Rust 资产同步接口已返回"
   };
 }
 
@@ -179,28 +349,6 @@ export function submitPaperTradePlan(state: PaperTradeState, plan: TradePlan): P
     plans: [submittedPlan, ...currentState.plans.filter((item) => item.id !== submittedPlan.id)].slice(0, 30),
     fills: [...fills, ...currentState.fills].slice(0, 200)
   };
-}
-
-export function tradePlanToCsv(plan: TradePlan) {
-  const header = ["指令编号", "策略", "资金账号", "模式", "股票代码", "股票名称", "方向", "数量", "参考价", "参考金额", "状态"];
-  const rows = plan.orders.map((order) => [
-    order.clientOrderId,
-    plan.strategyName,
-    plan.accountId,
-    plan.mode === "manual" ? "手动" : "自动",
-    order.code,
-    order.name,
-    order.side,
-    String(order.shares),
-    String(order.price),
-    String(order.amount),
-    order.status
-  ]);
-  return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
-}
-
-function csvCell(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function round(value: number, precision = 2) {

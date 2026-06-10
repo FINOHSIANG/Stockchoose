@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import {
   fetchStockKlineHistory,
@@ -7,89 +7,108 @@ import {
   syncTencentRealMarketData
 } from "./realMarketDataService";
 
-function tencentQuoteLine(symbol: string, overrides: Record<number, string | number>) {
-  const parts = Array.from({ length: 80 }, () => "");
-  Object.entries(overrides).forEach(([index, value]) => {
-    parts[Number(index)] = String(value);
-  });
-  return `v_${symbol}="${parts.join("~")}";`;
-}
+const rustMaotaiQuoteRow = {
+  symbol: "sh600519",
+  prefix: "sh",
+  code: "600519",
+  queryCode: "600519",
+  name: "贵州茅台",
+  price: 1319,
+  pctChange: -0.3,
+  volumeWanShou: 4.1234,
+  amountYi: 54.88,
+  turnover: 0.33,
+  pe: 15.21,
+  marketCapYi: 16576.08,
+  floatMarketCapYi: 16576.08,
+  pb: 6.12,
+  amplitude: 2.04,
+  statusFlag: "",
+  marketType: "GP-A"
+};
 
-const maotaiQuote = tencentQuoteLine("sh600519", {
-  1: "贵州茅台",
-  2: "600519",
-  3: 1319,
-  32: -0.3,
-  36: 41234,
-  37: 548800,
-  38: 0.33,
-  39: 15.21,
-  43: 2.04,
-  44: 16576.08,
-  45: 16576.08,
-  46: 6.12,
-  61: "GP-A"
-});
+const rustNoslandQuoteRow = {
+  symbol: "bj920047",
+  prefix: "bj",
+  code: "920047",
+  queryCode: "920047",
+  name: "诺思兰德",
+  price: 21.7,
+  pctChange: -10.4,
+  volumeWanShou: 17.9223,
+  amountYi: 4.23113,
+  turnover: 9.95,
+  pe: -125.21,
+  marketCapYi: 59.52,
+  floatMarketCapYi: 39.08,
+  pb: 22.41,
+  amplitude: 19.98,
+  statusFlag: "",
+  marketType: "GP"
+};
 
-const noslandQuote = tencentQuoteLine("bj920047", {
-  1: "诺思兰德",
-  2: "920047",
-  3: 21.7,
-  32: -10.4,
-  36: 179223,
-  37: 42311.3,
-  38: 9.95,
-  39: -125.21,
-  43: 19.98,
-  44: 59.52,
-  45: 39.08,
-  46: 22.41
-});
+const rustPinganQuoteRow = {
+  symbol: "sz000001",
+  prefix: "sz",
+  code: "000001",
+  queryCode: "000001",
+  name: "平安银行",
+  price: 10.99,
+  pctChange: 0.55,
+  volumeWanShou: 95.4596,
+  amountYi: 10.423,
+  turnover: 0.49,
+  pe: 4.95,
+  marketCapYi: 2132.68,
+  floatMarketCapYi: 2132.71,
+  pb: 0.46,
+  amplitude: 1.65,
+  statusFlag: "",
+  marketType: "GP-A"
+};
 
-const pinganQuote = tencentQuoteLine("sz000001", {
-  1: "平安银行",
-  2: "000001",
-  3: 10.99,
-  32: 0.55,
-  36: 954596,
-  37: 104230,
-  38: 0.49,
-  39: 4.95,
-  43: 1.65,
-  44: 2132.68,
-  45: 2132.71,
-  46: 0.46,
-  61: "GP-A"
-});
+const rustDelistedQuoteRow = {
+  symbol: "sh600001",
+  prefix: "sh",
+  code: "600001",
+  queryCode: "600001",
+  name: "邯郸钢铁",
+  price: 5.29,
+  marketCapYi: 148.99,
+  floatMarketCapYi: 148.99,
+  statusFlag: "D",
+  marketType: "GP-A"
+};
 
-const delistedQuote = tencentQuoteLine("sh600001", {
-  1: "邯郸钢铁",
-  2: "600001",
-  3: 5.29,
-  40: "D",
-  44: 148.99,
-  45: 148.99,
-  61: "GP-A"
-});
-
-const gbkNoslandQuoteBytes = new Uint8Array([
-  118, 95, 98, 106, 57, 50, 48, 48, 52, 55, 61, 34, 54, 50, 126, 197, 181, 203, 188, 192, 188, 181, 194, 126, 57, 50, 48, 48, 52, 55, 126, 50, 49, 46, 55, 48, 126, 50, 52, 46, 50, 50, 126, 50, 52, 46, 56, 48, 126, 49, 55, 57, 50, 50, 51, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 48, 126, 126, 50, 48, 50, 54, 48, 54, 48, 49, 49, 53, 51, 53, 52, 54, 126, 45, 50, 46, 53, 50, 126, 45, 49, 48, 46, 52, 48, 126, 50, 54, 46, 48, 48, 126, 50, 49, 46, 49, 54, 126, 50, 49, 46, 55, 48, 47, 49, 55, 57, 50, 50, 51, 47, 52, 50, 51, 49, 49, 50, 57, 56, 52, 126, 49, 55, 57, 50, 50, 51, 126, 52, 50, 51, 49, 49, 46, 51, 48, 126, 57, 46, 57, 53, 126, 45, 49, 48, 50, 46, 56, 49, 126, 126, 50, 54, 46, 48, 48, 126, 50, 49, 46, 49, 54, 126, 49, 57, 46, 57, 56, 126, 51, 57, 46, 48, 56, 126, 53, 57, 46, 53, 50, 126, 50, 50, 46, 52, 49, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 32, 126, 71, 80, 126, 45, 56, 46, 52, 56, 34, 59
-]);
-
-const tencentKlinePayload = {
-  code: 0,
-  msg: "",
-  data: {
-    sh600519: {
-      qfqweek: [["2026-05-29", "1320.00", "1319.00", "1338.00", "1311.00", "41234"]]
+const rustTechnicalIndicatorRows = [
+  {
+    code: "600519",
+    name: "Kweichow Moutai",
+    reportDate: "2026-06-09",
+    sourceRows: 120,
+    metrics: {
+      ma20Distance: 3.21,
+      ma60Distance: 8.76,
+      volatility20: 18.34,
+      macd: 1.23,
+      kdj: 72.4,
+      rsi: 61.8,
+      bias: 3.21,
+      bollWidth: 9.87,
+      technicalTradeDate: 20260609,
+      realTechnicalSource: 1
     }
   }
-};
+];
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("realMarketDataService", () => {
   it("merges Tencent quote data into valuation metrics", async () => {
     const base = STOCKS.filter((stock) => stock.code === "600519");
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(maotaiQuote, { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 }));
 
     const result = await syncTencentRealMarketData(base, fetchMock);
     const maotai = result.stocks[0];
@@ -103,11 +122,75 @@ describe("realMarketDataService", () => {
     expect(maotai.metrics.marketCap).toBeCloseTo(16576.08, 2);
     expect(maotai.metrics.amount).toBeCloseTo(54.88, 2);
     expect(maotai.metrics.volume).toBeCloseTo(4.12, 2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/quote-rows");
+  });
+
+  it("uses Rust structured Tencent quote rows without localhost gating", async () => {
+    vi.stubGlobal("window", { location: { hostname: "stockchoose.example" } });
+    const base = STOCKS.filter((stock) => stock.code === "600519");
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/market/tencent/quote-rows")) {
+        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+      }
+      return new Response("", { status: 500 });
+    });
+
+    const result = await syncTencentRealMarketData(base, fetchMock);
+    const maotai = result.stocks[0];
+
+    expect(result.ok).toBe(true);
+    expect(result.matchedRows).toBe(1);
+    expect(maotai.name).toBe("贵州茅台");
+    expect(maotai.metrics.realQuoteSource).toBe(1);
+    expect(maotai.metrics.price).toBe(1319);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/quote-rows");
+  });
+
+  it("does not fall back to browser-side Tencent quote parsing when the Rust quote API fails", async () => {
+    const base = STOCKS.filter((stock) => stock.code === "600519");
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).startsWith("/api/market/tencent/quote-rows")) {
+        return new Response("{}", { status: 502 });
+      }
+      return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+    });
+
+    const result = await syncTencentRealMarketData(base, fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("Rust Tencent quote API HTTP 502");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/quote-rows");
+  });
+
+  it("reports invalid Rust Tencent quote payloads instead of treating them as unmatched stocks", async () => {
+    const base = STOCKS.filter((stock) => stock.code === "600519");
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ data: [rustMaotaiQuoteRow] }), { status: 200 }));
+
+    const result = await syncTencentRealMarketData(base, fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("Rust Tencent quote API returned invalid quote rows payload");
+    expect(result.sourceRows).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports invalid Rust Tencent quote JSON explicitly", async () => {
+    const base = STOCKS.filter((stock) => stock.code === "600519");
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
+
+    const result = await syncTencentRealMarketData(base, fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("invalid JSON");
   });
 
   it("loads Tencent real kline history with the selected trading period", async () => {
     const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(tencentKlinePayload), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([
+      { date: "2026-05-29", open: 1320, close: 1319, high: 1338, low: 1311, volume: 4.12 }
+    ]), { status: 200 }));
 
     const result = await fetchStockKlineHistory(stock, "week", fetchMock);
     const requestedUrl = String(fetchMock.mock.calls[0]?.[0] ?? "");
@@ -122,13 +205,77 @@ describe("realMarketDataService", () => {
       low: 1311,
       volume: 4.12
     });
-    expect(requestedUrl).toContain("sh600519,week");
-    expect(requestedUrl).toContain("qfq");
+    expect(requestedUrl).toContain("/api/market/tencent/kline-points");
+    expect(requestedUrl).toContain("symbol=sh600519");
+    expect(requestedUrl).toContain("period=week");
+  });
+
+  it("uses Rust structured Tencent kline points on the local app proxy", async () => {
+    vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
+    const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/market/tencent/kline-points")) {
+        return new Response(JSON.stringify([
+          { date: "2026-05-29", open: 1320, close: 1319, high: 1338, low: 1311, volume: 4.12 }
+        ]), { status: 200 });
+      }
+      return new Response("{}", { status: 500 });
+    });
+
+    const result = await fetchStockKlineHistory(stock, "week", fetchMock);
+    const requestedUrl = String(fetchMock.mock.calls[0]?.[0] ?? "");
+
+    expect(result.ok).toBe(true);
+    expect(result.points).toEqual([
+      { date: "2026-05-29", open: 1320, close: 1319, high: 1338, low: 1311, volume: 4.12 }
+    ]);
+    expect(requestedUrl).toContain("/api/market/tencent/kline-points");
+    expect(requestedUrl).toContain("period=week");
+  });
+
+  it("does not fall back to browser-side Tencent kline parsing when the Rust kline API fails", async () => {
+    const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).startsWith("/api/market/tencent/kline-points")) {
+        return new Response("{}", { status: 503 });
+      }
+      return new Response(JSON.stringify([{ date: "2026-05-29", open: 1320, close: 1319, high: 1338, low: 1311, volume: 4.12 }]), { status: 200 });
+    });
+
+    const result = await fetchStockKlineHistory(stock, "week", fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Rust Tencent K线接口 HTTP 503");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/kline-points");
+  });
+
+  it("reports invalid Rust Tencent kline payloads instead of treating them as empty history", async () => {
+    const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
+
+    const result = await fetchStockKlineHistory(stock, "day", fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Rust Tencent K线接口返回结构无效");
+    expect(result.sourceRows).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports invalid Rust Tencent kline JSON explicitly", async () => {
+    const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
+
+    const result = await fetchStockKlineHistory(stock, "day", fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("invalid JSON");
   });
 
   it("uses switched Beijing Stock Exchange market codes for Tencent quotes", async () => {
     const base = STOCKS.filter((stock) => stock.code === "430047");
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(noslandQuote, { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([rustNoslandQuoteRow]), { status: 200 }));
 
     const result = await syncTencentRealMarketData(base, fetchMock);
     const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
@@ -143,20 +290,19 @@ describe("realMarketDataService", () => {
   });
 
   it("scans Tencent candidate codes and builds an all-market stock universe", async () => {
-    const quoteBySymbol: Record<string, string> = {
-      sh600519: maotaiQuote,
-      sh600001: delistedQuote,
-      sz000001: pinganQuote,
-      bj920047: noslandQuote
-    };
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
-      const query = url.split("q=")[1] ?? "";
-      const content = query.split(",").map((symbol) => quoteBySymbol[symbol] ?? "").filter(Boolean).join("");
-      return new Response(content, { status: 200 });
+      if (url === "/api/market/tencent/ashare/quotes") {
+        return new Response(JSON.stringify([rustMaotaiQuoteRow, rustDelistedQuoteRow, rustPinganQuoteRow, rustNoslandQuoteRow]), { status: 200 });
+      }
+      if (url.startsWith("/api/market/technical-indicators")) {
+        return new Response(JSON.stringify(rustTechnicalIndicatorRows), { status: 200 });
+      }
+      return new Response("", { status: 500 });
     });
 
     const result = await syncTencentAllAshareMarketData(STOCKS, fetchMock);
+    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
 
     expect(generateTencentAshareCandidates().length).toBeGreaterThan(10000);
     expect(result.ok).toBe(true);
@@ -166,16 +312,137 @@ describe("realMarketDataService", () => {
     expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.eps).toBeUndefined();
     expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.totalAssets).toBeUndefined();
     expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.realQuoteSource).toBe(1);
+    expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.realTechnicalSource).toBe(1);
+    expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.ma20Distance).toBe(3.21);
+    expect(result.stocks.find((stock) => stock.code === "600519")?.metrics.rsi).toBe(61.8);
+    expect(result.technicalMatchedRows).toBe(1);
+    expect(result.technicalSourceRows).toBe(120);
     expect(result.details).toContain("识别 3 只有效 A 股股票");
+    expect(result.details).toContain("Rust 技术指标匹配 1/1 只");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestedUrls[0]).toBe("/api/market/tencent/ashare/quotes");
+    expect(requestedUrls[1]).toContain("/api/market/technical-indicators");
+    expect(requestedUrls[1]).toContain("codes=600519%2C000001%2C920047");
   });
 
-  it("decodes Tencent GBK quote names without mojibake", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(gbkNoslandQuoteBytes, { status: 200 }));
+  it("preserves real financial fields when refreshing the all-market quote universe", async () => {
+    const existing = STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0];
+    const seedStocks = [
+      {
+        ...existing,
+        metrics: {
+          price: 1300,
+          marketCap: 16000,
+          eps: 59.49,
+          bps: 230.5,
+          revenue: 1275,
+          netProfit: 747,
+          operatingCashflow: 650,
+          totalAssets: 2550,
+          totalLiabilities: 420,
+          investmentAssets: 1260,
+          productionAssets: 1290,
+          interestBearingDebt: 180,
+          nonInterestBearingDebt: 240,
+          realAnnualReportSource: 1,
+          realFinancialReportDate: 20251231
+        }
+      }
+    ];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === "/api/market/tencent/ashare/quotes") {
+        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+      }
+      if (url.startsWith("/api/market/technical-indicators")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      return new Response("", { status: 500 });
+    });
+
+    const result = await syncTencentAllAshareMarketData(seedStocks, fetchMock);
+    const maotai = result.stocks.find((stock) => stock.code === "600519");
+
+    expect(result.ok).toBe(true);
+    expect(maotai?.metrics.price).toBe(1319);
+    expect(maotai?.metrics.marketCap).toBe(16576.08);
+    expect(maotai?.metrics.eps).toBe(59.49);
+    expect(maotai?.metrics.bps).toBe(230.5);
+    expect(maotai?.metrics.revenue).toBe(1275);
+    expect(maotai?.metrics.operatingCashflow).toBe(650);
+    expect(maotai?.metrics.totalAssets).toBe(2550);
+    expect(maotai?.metrics.totalLiabilities).toBe(420);
+    expect(maotai?.metrics.investmentAssets).toBe(1260);
+    expect(maotai?.metrics.realAnnualReportSource).toBe(1);
+    expect(maotai?.industry1).toBe("食品饮料");
+  });
+
+  it("uses Rust structured all-A-share quote rows on the local app proxy", async () => {
+    vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === "/api/market/tencent/ashare/quotes") {
+        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+      }
+      if (url.startsWith("/api/market/technical-indicators")) {
+        return new Response(JSON.stringify(rustTechnicalIndicatorRows), { status: 200 });
+      }
+      return new Response("", { status: 500 });
+    });
+
+    const result = await syncTencentAllAshareMarketData([], fetchMock);
+    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
+
+    expect(result.ok).toBe(true);
+    expect(result.stocks).toHaveLength(1);
+    expect(result.stocks[0]).toMatchObject({ code: "600519", name: "贵州茅台" });
+    expect(result.stocks[0].metrics.marketCap).toBeCloseTo(16576.08, 2);
+    expect(result.stocks[0].metrics.realTechnicalSource).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestedUrls[1]).toContain("/api/market/technical-indicators");
+  });
+
+  it("keeps all-market quotes visible when Rust technical indicators fail", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === "/api/market/tencent/ashare/quotes") {
+        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+      }
+      if (url.startsWith("/api/market/technical-indicators")) {
+        return new Response("upstream unavailable", { status: 503 });
+      }
+      return new Response("", { status: 500 });
+    });
 
     const result = await syncTencentAllAshareMarketData([], fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.stocks.find((stock) => stock.code === "920047")?.name).toBe("诺思兰德");
+    expect(result.stocks).toHaveLength(1);
+    expect(result.stocks[0].metrics.realQuoteSource).toBe(1);
+    expect(result.stocks[0].metrics.realTechnicalSource).toBeUndefined();
+    expect(result.technicalMatchedRows).toBe(0);
+    expect(result.details).toContain("Rust technical indicator API HTTP 503");
+    expect(result.details).toContain("upstream unavailable");
+  });
+
+  it("reports invalid Rust all-A-share quote payloads instead of treating them as no active stocks", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([{ foo: "bar" }]), { status: 200 }));
+
+    const result = await syncTencentAllAshareMarketData([], fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("Rust Tencent quote API returned invalid quote rows payload");
+    expect(result.sourceRows).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports invalid Rust all-A-share quote JSON explicitly", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
+
+    const result = await syncTencentAllAshareMarketData([], fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("invalid JSON");
   });
 
   it("returns a failure state when real kline history is unavailable", async () => {

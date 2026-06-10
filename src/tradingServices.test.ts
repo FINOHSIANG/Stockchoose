@@ -1,15 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { createDefaultStrategy } from "./storage";
 import type { SelectionRow } from "./types";
+import type { TradePlan } from "./tradingServices";
 import {
   bindTradeConnection,
+  createTradePlanExportRustFirst,
   createTradePlan,
+  createTradePlanRustFirst,
   defaultPaperTradeState,
+  defaultTradeAssetState,
   defaultTradeConnectionSettings,
   ensurePaperTradeState,
-  submitPaperTradePlan,
-  tradePlanToCsv
+  exportTradePlanRustFirst,
+  syncTradeAssetsRustFirst,
+  submitPaperTradePlanRustFirst,
+  submitPaperTradePlan
 } from "./tradingServices";
 
 const rows: SelectionRow[] = STOCKS.slice(0, 3).map((stock, index) => ({
@@ -18,6 +24,33 @@ const rows: SelectionRow[] = STOCKS.slice(0, 3).map((stock, index) => ({
   weight: 10,
   passedFilters: 1
 }));
+
+function tradePlanFixture(strategy = createDefaultStrategy(), mode: TradePlan["mode"] = "manual"): TradePlan {
+  const generatedAt = "2026-06-09T16:00:00.000Z";
+  return {
+    id: `plan-fixture-${mode}`,
+    strategyId: strategy.id,
+    strategyName: strategy.name,
+    accountId: "PAPER-0001",
+    mode,
+    generatedAt,
+    status: "draft",
+    orders: rows.map((row, index) => {
+      const price = Number(row.stock.metrics.price ?? 10);
+      const shares = 100 * (index + 1);
+      return {
+        clientOrderId: `fixture-${index}-${row.stock.code}`,
+        code: row.stock.code,
+        name: row.stock.name,
+        side: "\u4e70\u5165",
+        shares,
+        price,
+        amount: price * shares,
+        status: "\u5f85\u786e\u8ba4"
+      };
+    })
+  };
+}
 
 describe("tradingServices", () => {
   it("validates and binds the local paper trading interface", () => {
@@ -28,7 +61,7 @@ describe("tradingServices", () => {
     expect(result.message).toBe("交易接口已绑定");
   });
 
-  it("creates deterministic executable order fields", () => {
+  it("does not create browser-side executable order fields", () => {
     const strategy = createDefaultStrategy();
     const plan = createTradePlan({
       strategy,
@@ -37,24 +70,171 @@ describe("tradingServices", () => {
       accountId: "PAPER-0001"
     });
 
-    expect(plan.orders).toHaveLength(3);
-    expect(plan.orders[0]).toMatchObject({
-      code: rows[0].stock.code,
-      side: "买入",
-      status: "待确认"
+    expect(plan).toMatchObject({
+      strategyId: strategy.id,
+      accountId: "PAPER-0001",
+      status: "draft",
+      orders: []
     });
-    expect(plan.orders[0].shares % 100).toBe(0);
-    expect(plan.orders[0].amount).toBeGreaterThan(0);
   });
 
-  it("exports trade plan CSV and records paper fills", () => {
+  it("rejects when the Rust trade plan API fails instead of creating browser-side executable orders", async () => {
     const strategy = createDefaultStrategy();
-    const plan = createTradePlan({ strategy, rows, mode: "auto", accountId: "PAPER-0001" });
-    const csv = tradePlanToCsv(plan);
+    const localPlan = createTradePlan({ strategy, rows, mode: "manual", accountId: "PAPER-0001" });
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 }));
+
+    await expect(createTradePlanRustFirst(
+      { strategy, rows, mode: "manual", accountId: "PAPER-0001" },
+      fetchMock
+    )).rejects.toThrow("Rust trade API HTTP 503");
+
+    expect(localPlan.orders).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/trade/plan",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("uses Rust trade export payload for client-copyable instructions", async () => {
+    const strategy = createDefaultStrategy();
+    const rustPlan = tradePlanFixture(strategy);
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ plan: rustPlan, clientText: "600519\t买入\t100.000\t100", csv: "\"指令编号\"" }), { status: 200 })
+    );
+
+    const result = await createTradePlanExportRustFirst(
+      { strategy, rows, mode: "manual", accountId: "PAPER-0001", accountAsset: 300000, minimumAmount: 20000 },
+      fetchMock
+    );
+
+    expect(result.plan).toEqual(rustPlan);
+    expect(result.clientText).toBe("600519\t买入\t100.000\t100");
+    expect(result.csv).toBe("\"指令编号\"");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      accountAsset: 300000,
+      minimumAmount: 20000
+    });
+  });
+
+  it("asks Rust to render edited trade plans for export", async () => {
+    const strategy = createDefaultStrategy();
+    const plan = tradePlanFixture(strategy);
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ clientText: "600519\t买入\t100.000\t100", csv: "\"指令编号\"" }), { status: 200 })
+    );
+
+    const result = await exportTradePlanRustFirst(plan, fetchMock);
+
+    expect(result.clientText).toContain("\t");
+    expect(result.csv).toBe("\"指令编号\"");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/trade/export");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({ plan: { id: plan.id } });
+  });
+
+  it("rejects when Rust trade export fails instead of returning empty client text", async () => {
+    const strategy = createDefaultStrategy();
+    const plan = tradePlanFixture(strategy);
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "rust unavailable" }), { status: 503 }));
+
+    await expect(exportTradePlanRustFirst(plan, fetchMock)).rejects.toThrow("Rust trade export API HTTP 503");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/trade/export");
+  });
+
+  it("syncs manually edited asset state through Rust", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({
+        ok: true,
+        asset: {
+          netValue: 1.2346,
+          holdingValue: 100000,
+          strategyCash: 25000,
+          outsideAsset: 300000,
+          lastSyncedAt: "2026-06-09T16:00:00Z"
+        },
+        accountAsset: 425000,
+        strategyAsset: 125000,
+        message: "资产已由 Rust 交易接口同步"
+      }), { status: 200 })
+    );
+
+    const result = await syncTradeAssetsRustFirst({
+      netValue: 1.23456,
+      holdingValue: 100000,
+      strategyCash: 25000,
+      outsideAsset: 300000
+    }, fetchMock);
+
+    expect(result.ok).toBe(true);
+    expect(result.asset.netValue).toBe(1.2346);
+    expect(result.accountAsset).toBe(425000);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/trade/assets/sync");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      asset: {
+        holdingValue: 100000,
+        strategyCash: 25000
+      }
+    });
+  });
+
+  it("rejects when the Rust asset sync endpoint fails instead of returning fallback assets", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 }));
+
+    await expect(syncTradeAssetsRustFirst(defaultTradeAssetState, fetchMock)).rejects.toThrow("Rust asset sync API HTTP 503");
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/trade/assets/sync");
+  });
+
+  it("submits paper trade plans through the Rust paper trade endpoint", async () => {
+    const strategy = createDefaultStrategy();
+    const plan = tradePlanFixture(strategy, "auto");
+    const rustState = {
+      plans: [
+        {
+          ...plan,
+          status: "filled" as const,
+          orders: plan.orders.map((order) => ({ ...order, status: "\u5df2\u6210\u4ea4" as const }))
+        }
+      ],
+      fills: plan.orders.map((order) => ({
+        id: `fill-${order.clientOrderId}`,
+        planId: plan.id,
+        strategyId: strategy.id,
+        strategyName: strategy.name,
+        clientOrderId: order.clientOrderId,
+        code: order.code,
+        name: order.name,
+        side: order.side,
+        shares: order.shares,
+        price: order.price,
+        amount: order.amount,
+        filledAt: "2026-06-09T16:01:00Z"
+      }))
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(rustState), { status: 200 }));
+
+    const result = await submitPaperTradePlanRustFirst(defaultPaperTradeState, plan, fetchMock);
+
+    expect(result).toEqual(rustState);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/trade/paper/submit");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      state: { plans: [], fills: [] },
+      plan: { id: plan.id }
+    });
+  });
+
+  it("rejects when the Rust paper trade endpoint fails instead of creating local fills", async () => {
+    const plan = tradePlanFixture(createDefaultStrategy(), "auto");
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 }));
+
+    await expect(submitPaperTradePlanRustFirst(defaultPaperTradeState, plan, fetchMock)).rejects.toThrow("Rust paper trade API HTTP 503");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/trade/paper/submit");
+  });
+
+  it("records paper fills without browser-side trade CSV export", () => {
+    const strategy = createDefaultStrategy();
+    const plan = tradePlanFixture(strategy, "auto");
     const nextState = submitPaperTradePlan(defaultPaperTradeState, plan);
 
-    expect(csv).toContain("指令编号");
-    expect(csv).toContain(rows[0].stock.code);
     expect(nextState.plans[0].status).toBe("filled");
     expect(nextState.fills).toHaveLength(plan.orders.length);
     expect(nextState.fills[0]).toMatchObject({
@@ -66,7 +246,7 @@ describe("tradingServices", () => {
 
   it("migrates legacy paper fills to the matching strategy plan", () => {
     const strategy = createDefaultStrategy();
-    const plan = createTradePlan({ strategy, rows, mode: "auto", accountId: "PAPER-0001" });
+    const plan = tradePlanFixture(strategy, "auto");
     const order = plan.orders[0];
     const state = ensurePaperTradeState({
       plans: [plan],

@@ -2097,7 +2097,7 @@ main {
 
 .valuation-filters {
   display: grid;
-  grid-template-columns: minmax(230px, 1.4fr) repeat(7, minmax(112px, 0.7fr)) auto;
+  grid-template-columns: minmax(230px, 1.4fr) repeat(8, minmax(112px, 0.7fr)) auto;
   gap: 10px;
   align-items: end;
   padding: 14px 22px;
@@ -3133,6 +3133,20 @@ textarea {
   align-items: center;
 }
 
+.selection-table-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.selection-table-title span {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .rule-line {
   border-bottom: 1px solid #eee;
   padding: 8px 0;
@@ -4001,6 +4015,15 @@ button.text-link {
   font-weight: 600;
 }
 
+.run-status {
+  color: #17529a;
+  font-weight: 600;
+}
+
+.run-status.danger {
+  color: #b42318;
+}
+
 .preview-results,
 .backtest-results {
   padding: 15px;
@@ -4120,6 +4143,31 @@ button.text-link {
 
 .selection-table.compact {
   max-height: 360px;
+}
+
+.filter-pass-cell {
+  min-width: 86px;
+}
+
+.filter-pass-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #d4dbe7;
+  border-radius: 6px;
+  background: #f6f8fb;
+  color: #4b5563;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.filter-pass-chip.pass {
+  border-color: #b9dec5;
+  background: #eef8f1;
+  color: #1f7a3a;
 }
 
 .factor-correlation-panel {

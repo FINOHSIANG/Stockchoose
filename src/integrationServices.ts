@@ -20,13 +20,42 @@ export interface ConnectionTestResult {
 
 export const LOCAL_SAMPLE_PROVIDER = "本地模拟数据";
 export const AKSHARE_AKTOOLS_PROVIDER = "AKShare / AKTools 免费开源数据";
+export const ASHAREHUB_PROVIDER = "AShareHub";
 
 export const AKTOOLS_DEFAULT_BASE_URL = "/aktools/api/public";
+export const ASHAREHUB_DEFAULT_BASE_URL = "https://asharehub.com";
 const DIRECT_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:18080/api/public";
 const LEGACY_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:8080/api/public";
+const RUST_INFO_SOURCE_TEST_URL = "/api/integration/source-test";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function responseJson(response: Response) {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new Error(`Rust info source test API returned invalid JSON: ${errorMessage(error)}`);
+  }
+}
+
+function invalidInfoSourcePayloadResult(checkedAt: string): ConnectionTestResult {
+  return {
+    ok: false,
+    checkedAt,
+    message: "连接检测失败",
+    details: "Rust info source test API returned invalid payload: ok must be a boolean"
+  };
+}
 
 export const infoSourceProviderOptions = [
   { label: AKSHARE_AKTOOLS_PROVIDER, value: AKSHARE_AKTOOLS_PROVIDER, defaultBaseUrl: AKTOOLS_DEFAULT_BASE_URL },
+  { label: ASHAREHUB_PROVIDER, value: ASHAREHUB_PROVIDER, defaultBaseUrl: ASHAREHUB_DEFAULT_BASE_URL },
   { label: "聚宽 JQData", value: "聚宽 JQData", defaultBaseUrl: "https://api.example.com/jqdata" },
   { label: "Tushare Pro", value: "Tushare Pro", defaultBaseUrl: "https://api.example.com/tushare" },
   { label: "Wind 数据服务", value: "Wind 数据服务", defaultBaseUrl: "https://api.example.com/wind" },
@@ -44,7 +73,7 @@ export const defaultInfoSourceSettings: InfoSourceSettings = {
   provider: AKSHARE_AKTOOLS_PROVIDER,
   baseUrl: AKTOOLS_DEFAULT_BASE_URL,
   apiToken: "",
-  timeoutSeconds: 15,
+  timeoutSeconds: 60,
   refreshInterval: 5,
   modules: {
     market: true,
@@ -94,9 +123,14 @@ export function isAkShareProvider(settings: InfoSourceSettings) {
   return settings.provider === AKSHARE_AKTOOLS_PROVIDER;
 }
 
+export function isAshareHubProvider(settings: InfoSourceSettings) {
+  return settings.provider === ASHAREHUB_PROVIDER;
+}
+
 export function validateInfoSourceSettings(settings: InfoSourceSettings) {
   const errors: string[] = [];
   if (!settings.provider.trim()) errors.push("接口来源不能为空");
+  if (settings.provider === ASHAREHUB_PROVIDER && !settings.apiToken.trim()) errors.push("AShareHub 需要填写 API Key");
   if (!/^https?:\/\/.+/i.test(settings.baseUrl.trim()) && !settings.baseUrl.trim().startsWith("/")) {
     errors.push("接口地址必须以 http://、https:// 或本地代理 / 开头");
   }
@@ -125,51 +159,28 @@ export async function testInfoSourceConnection(
     };
   }
 
-  if (isAkShareProvider(settings)) {
-    const controller = new AbortController();
-    const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(settings.timeoutSeconds, 3) * 1000);
-    const baseUrl = settings.baseUrl.replace(/\/$/, "");
-    const query = new URLSearchParams({
-      symbol: "000001",
-      period: "daily",
-      start_date: "20240501",
-      end_date: "20240531",
-      adjust: "qfq"
-    });
-    try {
-      const response = await fetchImpl(`${baseUrl}/stock_zh_a_hist?${query.toString()}`, {
-        method: "GET",
-        signal: controller.signal
-      });
-      if (!response.ok) {
-        return { ok: false, checkedAt, message: "连接检测失败", details: `AKTools 返回 HTTP ${response.status}` };
-      }
-      const data = await response.json();
-      const rows = Array.isArray(data) ? data.length : 0;
-      if (!rows) {
-        return { ok: false, checkedAt, message: "连接检测失败", details: "AKTools 已响应，但没有返回 A 股历史行情" };
-      }
-      return { ok: true, checkedAt, message: "连接检测通过", details: `AKShare/AKTools 已返回 ${rows} 条 A 股历史行情` };
-    } catch (error) {
-      const detail = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";
-      return { ok: false, checkedAt, message: "连接检测失败", details: detail };
-    } finally {
-      globalThis.clearTimeout(timeout);
-    }
-  }
-
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(settings.timeoutSeconds, 3) * 1000);
   try {
-    const response = await fetchImpl(`${settings.baseUrl.replace(/\/$/, "")}/health`, {
-      method: "GET",
-      headers: settings.apiToken ? { Authorization: `Bearer ${settings.apiToken}` } : undefined,
+    const response = await fetchImpl(RUST_INFO_SOURCE_TEST_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(settings),
       signal: controller.signal
     });
     if (!response.ok) {
-      return { ok: false, checkedAt, message: "连接检测失败", details: `接口返回 HTTP ${response.status}` };
+      return { ok: false, checkedAt, message: "连接检测失败", details: `Rust 信息源代理返回 HTTP ${response.status}` };
     }
-    return { ok: true, checkedAt, message: "连接检测通过", details: "远程 /health 接口响应正常" };
+    const payload = await responseJson(response) as Partial<ConnectionTestResult> & { engine?: string; provider?: string; rowCount?: number };
+    if (!isRecord(payload) || typeof payload.ok !== "boolean") {
+      return invalidInfoSourcePayloadResult(checkedAt);
+    }
+    return {
+      ok: payload.ok,
+      checkedAt,
+      message: payload.message ?? (payload.ok ? "连接检测通过" : "连接检测失败"),
+      details: payload.details ?? "Rust 信息源代理未返回检测详情"
+    };
   } catch (error) {
     const detail = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";
     return { ok: false, checkedAt, message: "连接检测失败", details: detail };

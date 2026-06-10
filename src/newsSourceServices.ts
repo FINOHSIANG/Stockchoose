@@ -30,6 +30,7 @@ export interface NewsSourceTestResult {
 
 export const newsSourceProviderOptions: Array<{ label: NewsSourceProvider; value: NewsSourceProvider; defaultBaseUrl: string }> = [
   { label: "GDELT 2.1", value: "GDELT 2.1", defaultBaseUrl: "/gdelt-news" },
+  { label: "腾讯证券公告", value: "腾讯证券公告", defaultBaseUrl: "/api/filing/announcements" },
   { label: "NewsAPI", value: "NewsAPI", defaultBaseUrl: "https://newsapi.org" },
   { label: "自定义 RSS", value: "自定义 RSS", defaultBaseUrl: "https://example.com/rss.xml" },
   { label: "自定义 REST", value: "自定义 REST", defaultBaseUrl: "https://example.com/news" }
@@ -88,10 +89,55 @@ export function createDefaultNewsSourceEndpoint(id: string): NewsSourceEndpoint 
   };
 }
 
+const RUST_NEWS_SOURCE_TEST_URL = "/api/news/source-test";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function responseJson(response: Response) {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new Error(`Rust news source test API returned invalid JSON: ${errorMessage(error)}`);
+  }
+}
+
+function newsSourceTestResultFromPayload(
+  payload: unknown,
+  source: NewsSourceEndpoint,
+  checkedAt: string
+): NewsSourceTestResult {
+  if (!isRecord(payload) || typeof payload.ok !== "boolean") {
+    return {
+      ok: false,
+      checkedAt,
+      message: "新闻源检测失败",
+      details: "Rust news source test API returned invalid payload: ok must be a boolean"
+    };
+  }
+  return {
+    ok: payload.ok,
+    checkedAt,
+    message: typeof payload.message === "string" && payload.message.trim()
+      ? payload.message
+      : payload.ok
+        ? "新闻源检测通过"
+        : "新闻源检测失败",
+    details: typeof payload.details === "string" && payload.details.trim()
+      ? payload.details
+      : `${source.name} 已由 Rust 新闻采集器完成检测`
+  };
+}
+
 export function ensureNewsSourceEndpoint(endpoint: Partial<NewsSourceEndpoint> | null | undefined, index = 0): NewsSourceEndpoint {
   const gdeltDefault = defaultNewsSourceSettings.sources.find((source) => source.provider === "GDELT 2.1") ?? defaultNewsSourceSettings.sources[0];
   const isLegacyEastMoney = String(endpoint?.provider ?? "") === "东方财富财经新闻" || endpoint?.id === "news-eastmoney-finance";
-  const shouldMigrateToNews = isLegacyEastMoney || isAnnouncementNewsSource(endpoint) || isLocalSampleNewsSource(endpoint);
+  const shouldMigrateToNews = isLegacyEastMoney || isLocalSampleNewsSource(endpoint);
   const fallback = shouldMigrateToNews ? gdeltDefault : defaultNewsSourceSettings.sources[index] ?? createDefaultNewsSourceEndpoint(`news-source-${index + 1}`);
   const rawProvider = shouldMigrateToNews ? fallback.provider : endpoint?.provider ?? fallback.provider;
   const provider = newsSourceProviderOptions.some((item) => item.value === rawProvider) ? rawProvider as NewsSourceProvider : fallback.provider;
@@ -120,7 +166,7 @@ export function ensureNewsSourceSettings(settings: Partial<NewsSourceSettings> |
   const missingDefaults = defaultNewsSourceSettings.sources.filter((source) => !existingIds.has(source.id));
   const sourcesWithDefaults = [...normalizedSources, ...missingDefaults];
   const hasEnabledRemoteNewsSource = sourcesWithDefaults.some(
-    (source) => source.enabled && source.provider !== "本地舆情样本" && !isAnnouncementNewsSource(source)
+    (source) => source.enabled && source.provider !== "本地舆情样本"
   );
   const sources = hasEnabledRemoteNewsSource
     ? sourcesWithDefaults
@@ -133,7 +179,7 @@ export function ensureNewsSourceSettings(settings: Partial<NewsSourceSettings> |
 }
 
 export function enabledNewsSources(settings: NewsSourceSettings) {
-  return settings.sources.filter((source) => source.enabled && !isAnnouncementNewsSource(source) && !isLocalSampleNewsSource(source));
+  return settings.sources.filter((source) => source.enabled && !isLocalSampleNewsSource(source));
 }
 
 export function validateNewsSourceEndpoint(source: NewsSourceEndpoint) {
@@ -167,33 +213,28 @@ export async function testNewsSourceConnection(
     };
   }
 
-  if (isAnnouncementNewsSource(source)) {
-    return {
-      ok: false,
-      checkedAt,
-      message: "新闻源检测失败",
-      details: "公告源已按产品规则停用，不会发起公告接口请求"
-    };
-  }
-
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(source.refreshInterval, 1) * 1000);
-  const baseUrl = source.baseUrl.replace(/\/$/, "");
-  const headers = source.apiToken ? { Authorization: `Bearer ${source.apiToken}` } : undefined;
   try {
-    const url =
-      source.provider === "GDELT 2.1"
-        ? `${baseUrl}/doc/doc?query=${encodeURIComponent(source.query || "stock")}&mode=ArtList&format=json&maxrecords=1`
-        : source.provider === "NewsAPI"
-          ? `${baseUrl}/v2/everything?q=${encodeURIComponent(source.query || "stock")}&pageSize=1`
-          : source.provider === "自定义 RSS"
-            ? baseUrl
-            : `${baseUrl}/health`;
-    const response = await fetchImpl(url, { method: "GET", headers, signal: controller.signal });
+    const response = await fetchImpl(RUST_NEWS_SOURCE_TEST_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source }),
+      signal: controller.signal
+    });
     if (!response.ok) {
-      return { ok: false, checkedAt, message: "新闻源检测失败", details: `接口返回 HTTP ${response.status}` };
+      return { ok: false, checkedAt, message: "新闻源检测失败", details: `Rust 新闻采集器返回 HTTP ${response.status}` };
     }
-    return { ok: true, checkedAt, message: "新闻源检测通过", details: `${source.name} 已响应，可作为新闻事件输入源` };
+    const payload = await responseJson(response) as Partial<NewsSourceTestResult> & { rowCount?: number; engine?: string; provider?: string };
+    if (!isRecord(payload) || typeof payload.ok !== "boolean") {
+      return newsSourceTestResultFromPayload(payload, source, checkedAt);
+    }
+    return {
+      ok: payload.ok,
+      checkedAt,
+      message: payload.message ?? (payload.ok ? "新闻源检测通过" : "新闻源检测失败"),
+      details: payload.details ?? `${source.name} 已由 Rust 新闻采集器响应`
+    };
   } catch (error) {
     const details = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";
     return { ok: false, checkedAt, message: "新闻源检测失败", details };

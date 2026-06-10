@@ -50,15 +50,27 @@ describe("newsAnalysisModelServices", () => {
     );
   });
 
-  it("checks the local analysis model without network access", async () => {
-    const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings);
+  it("checks the local analysis model through the Rust model test endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ engine: "rust", ok: true, provider: "本地规则模型", model: "local-news-rule-v1", message: "分析模型检测通过", details: "Rust 本地新闻规则模型已启用 4 个分析任务" }), { status: 200 })
+    );
+
+    const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings, fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("本地规则模型可用");
+    expect(result.details).toContain("Rust 本地新闻规则模型");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news-analysis/model-test");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      provider: "本地规则模型",
+      model: "local-news-rule-v1",
+      tasks: ["sentiment", "eventExtraction", "stockMapping", "riskSummary"]
+    });
   });
 
-  it("checks OpenAI-compatible models through chat completions contract", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ choices: [] }), { status: 200 }));
+  it("checks OpenAI-compatible models through the Rust model test endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ engine: "rust", ok: true, message: "分析模型检测通过", details: "OpenAI Compatible / news-model 已由 Rust 代理完成响应" }), { status: 200 })
+    );
     const settings = ensureNewsAnalysisModelSettings({
       provider: "OpenAI Compatible",
       baseUrl: "https://api.example.com/v1",
@@ -69,7 +81,31 @@ describe("newsAnalysisModelServices", () => {
     const result = await testNewsAnalysisModelConnection(settings, fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(String(fetchMock.mock.calls[0][0])).toBe("https://api.example.com/v1/chat/completions");
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news-analysis/model-test");
     expect(fetchMock.mock.calls[0][1]?.method).toBe("POST");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      provider: "OpenAI Compatible",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "test-key",
+      model: "news-model"
+    });
+  });
+
+  it("reports invalid Rust analysis model JSON explicitly", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
+
+    const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings, fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("invalid JSON");
+  });
+
+  it("reports invalid Rust analysis model payloads explicitly", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "rust" }), { status: 200 }));
+
+    const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings, fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.details).toContain("invalid payload");
   });
 });

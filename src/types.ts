@@ -210,6 +210,11 @@ export interface BacktestResult {
   trades: Array<{ date: string; action: "买入" | "卖出" | "调仓"; code: string; name: string; weight: number; price: number }>;
 }
 
+export interface StrategyOptimizationResult {
+  candidate: StrategyConfig;
+  result: BacktestResult;
+}
+
 export interface RankingRow {
   stock: Stock;
   score: number;

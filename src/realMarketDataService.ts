@@ -11,6 +11,8 @@ export interface RealMarketDataResult {
   stocks: Stock[];
   matchedRows: number;
   sourceRows: number;
+  technicalMatchedRows?: number;
+  technicalSourceRows?: number;
 }
 
 export interface StockKlinePoint {
@@ -53,10 +55,28 @@ interface NormalizedQuote {
   marketType?: string;
 }
 
-const TENCENT_QUOTE_BASE = "https://qt.gtimg.cn/q=";
-const TENCENT_KLINE_BASE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get";
-const LOCAL_TENCENT_QUOTE_BASE = "/tencent-quote/q=";
-const LOCAL_TENCENT_KLINE_BASE = "/tencent-kline/appstock/app/fqkline/get";
+const RUST_TENCENT_QUOTE_ROWS_BASE = "/api/market/tencent/quote-rows";
+const RUST_TENCENT_ASHARE_QUOTE_ROWS_URL = "/api/market/tencent/ashare/quotes";
+const RUST_TENCENT_KLINE_POINTS_BASE = "/api/market/tencent/kline-points";
+const RUST_TECHNICAL_INDICATORS_BASE = "/api/market/technical-indicators";
+const TECHNICAL_INDICATOR_CODE_LIMIT = 200;
+const TECHNICAL_INDICATOR_KLINE_LIMIT = 120;
+const LISTED_ASHARE_CODE_PATTERN = /^(60[0-5]|688|689|000|001|002|003|300|301|302|920)\d{3}$/;
+
+interface RustTechnicalIndicatorRow {
+  code?: unknown;
+  name?: unknown;
+  reportDate?: unknown;
+  sourceRows?: unknown;
+  metrics?: Record<string, unknown>;
+}
+
+interface NormalizedTechnicalIndicatorRow {
+  code: string;
+  sourceRows: number;
+  reportDate?: string;
+  metrics: Record<string, number>;
+}
 
 const toNumber = (value: unknown) => {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
@@ -92,14 +112,6 @@ const withMetric = (metrics: Record<string, number>, key: string, value: number 
   return { ...metrics, [key]: round(value, precision) };
 };
 
-const keepCommaQuery = (params: URLSearchParams) => params.toString().replace(/%2C/g, ",");
-
-const shouldUseLocalProxy = () =>
-  typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname);
-
-const quoteBaseUrl = () => (shouldUseLocalProxy() ? LOCAL_TENCENT_QUOTE_BASE : TENCENT_QUOTE_BASE);
-const tencentKlineBaseUrl = () => (shouldUseLocalProxy() ? LOCAL_TENCENT_KLINE_BASE : TENCENT_KLINE_BASE);
-
 const TENCENT_KLINE_PERIOD_CODE: Record<StockKlinePeriod, string> = {
   day: "day",
   week: "week",
@@ -118,86 +130,157 @@ const KLINE_PERIOD_LIMIT: Record<StockKlinePeriod, number> = {
   month: 120
 };
 
-function parseTencentKlineHistory(payload: unknown, symbol: string, period: StockKlinePeriod): StockKlinePoint[] {
-  const periodKey = `qfq${TENCENT_KLINE_PERIOD_CODE[period]}`;
-  const rows = (payload as { data?: Record<string, Record<string, unknown>> })?.data?.[symbol]?.[periodKey];
-  if (!Array.isArray(rows)) return [];
-  return rows
+function stockKlinePointsFromPayload(payload: unknown): StockKlinePoint[] {
+  if (!Array.isArray(payload)) throw new Error("Rust Tencent K线接口返回结构无效：根节点不是数组");
+  const points = payload
     .map((row) => {
-      const parts = Array.isArray(row) ? row : String(row).split(",");
-      if (parts.length < 6) return null;
-      const open = toNumber(parts[1]);
-      const close = toNumber(parts[2]);
-      const high = toNumber(parts[3]);
-      const low = toNumber(parts[4]);
-      const volume = toNumber(parts[5]);
-      if ([open, close, high, low, volume].some((value) => value === undefined)) return null;
+      if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+      const point = row as Partial<StockKlinePoint>;
+      const open = toNumber(point.open);
+      const close = toNumber(point.close);
+      const high = toNumber(point.high);
+      const low = toNumber(point.low);
+      const volume = toNumber(point.volume);
+      if (!point.date || [open, close, high, low, volume].some((value) => value === undefined)) return null;
       return {
-        date: String(parts[0]),
+        date: String(point.date),
         open: round(open ?? 0, 2),
         close: round(close ?? 0, 2),
         high: round(high ?? 0, 2),
         low: round(low ?? 0, 2),
-        volume: round((volume ?? 0) / 10000, 2)
+        volume: round(volume ?? 0, 2)
       } satisfies StockKlinePoint;
     })
     .filter((point): point is StockKlinePoint => Boolean(point));
+  if (payload.length && !points.length) throw new Error("Rust Tencent K线接口返回结构无效：未识别到有效K线点");
+  return points;
 }
 
-function parseTencentQuoteLine(line: string): NormalizedQuote | null {
-  const matched = line.match(/v_(sh|sz|bj)(\d{6})="([^"]*)"/);
-  if (!matched) return null;
-  const prefix = matched[1] as NormalizedQuote["prefix"];
-  const queryCode = matched[2];
-  const parts = matched[3].split("~");
-  const code = String(parts[2] || queryCode);
-  const name = String(parts[1] || "").trim();
+function normalizedQuoteRowsFromPayload(payload: unknown): NormalizedQuote[] {
+  if (!Array.isArray(payload)) throw new Error("Rust Tencent quote API returned invalid quote rows payload");
+  const rows = payload.filter((row): row is NormalizedQuote => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const quote = row as Partial<NormalizedQuote>;
+    return Boolean(
+      typeof quote.symbol === "string" &&
+        (quote.prefix === "sh" || quote.prefix === "sz" || quote.prefix === "bj") &&
+        typeof quote.code === "string" &&
+        /^\d{6}$/.test(quote.code) &&
+        typeof quote.name === "string" &&
+        quote.name.trim()
+    );
+  });
+  if (payload.length && !rows.length) throw new Error("Rust Tencent quote API returned invalid quote rows payload");
+  return rows;
+}
+
+function normalizeTechnicalIndicatorRow(row: RustTechnicalIndicatorRow): NormalizedTechnicalIndicatorRow | null {
+  const digits = String(row.code ?? "").replace(/\D/g, "");
+  if (!digits) return null;
+  const code = digits.padStart(6, "0").slice(-6);
+  const rawMetrics = row.metrics && typeof row.metrics === "object" && !Array.isArray(row.metrics) ? row.metrics : {};
+  const metrics = Object.entries(rawMetrics).reduce<Record<string, number>>((result, [key, value]) => {
+    const parsed = toNumber(value);
+    if (parsed !== undefined) result[key] = parsed;
+    return result;
+  }, {});
+  if (!Object.keys(metrics).length) return null;
   return {
-    symbol: `${prefix}${queryCode}`,
-    prefix,
     code,
-    queryCode,
-    name,
-    price: toNumber(parts[3]),
-    pctChange: toNumber(parts[32]),
-    volumeWanShou: toNumber(parts[36]) === undefined ? undefined : (toNumber(parts[36]) ?? 0) / 10000,
-    amountYi: toNumber(parts[37]) === undefined ? undefined : (toNumber(parts[37]) ?? 0) / 10000,
-    turnover: toNumber(parts[38]),
-    pe: toNumber(parts[39]),
-    marketCapYi: toNumber(parts[44]),
-    floatMarketCapYi: toNumber(parts[45]),
-    pb: toNumber(parts[46]),
-    amplitude: toNumber(parts[43]),
-    statusFlag: String(parts[40] || "").trim(),
-    marketType: String(parts[61] || "").trim()
+    sourceRows: Math.max(1, Math.round(toNumber(row.sourceRows) ?? 1)),
+    reportDate: row.reportDate === undefined || row.reportDate === null ? undefined : String(row.reportDate),
+    metrics
   };
 }
 
-async function readTencentQuoteText(response: Response) {
-  const buffer = await response.arrayBuffer();
-  const utf8Text = new TextDecoder("utf-8").decode(buffer);
-  if (!utf8Text.includes("\uFFFD")) return utf8Text;
+function technicalIndicatorRowsFromPayload(payload: unknown): NormalizedTechnicalIndicatorRow[] {
+  if (!Array.isArray(payload)) throw new Error("Rust technical indicator API returned invalid payload");
+  const rows = payload
+    .map((row) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+      return normalizeTechnicalIndicatorRow(row as RustTechnicalIndicatorRow);
+    })
+    .filter((row): row is NormalizedTechnicalIndicatorRow => Boolean(row));
+  if (payload.length && !rows.length) throw new Error("Rust technical indicator API returned invalid payload");
+  return rows;
+}
 
+async function responseErrorSuffix(response: Response) {
+  const detail = await response.text().catch(() => "");
+  const trimmed = detail.trim();
+  return trimmed ? `: ${trimmed.slice(0, 300)}` : "";
+}
+
+async function jsonFromResponse(response: Response, label: string) {
   try {
-    return new TextDecoder("gb18030").decode(buffer);
-  } catch {
-    return new TextDecoder("gbk").decode(buffer);
+    return await response.json();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`${label} returned invalid JSON: ${detail}`);
   }
 }
 
-async function fetchTencentQuoteRows(stocks: Stock[], fetchImpl: FetchLike) {
+async function fetchRustTencentQuoteRowsBySymbols(symbols: string[], fetchImpl: FetchLike) {
   const rows: NormalizedQuote[] = [];
-  for (const group of chunk(stocks, 80)) {
-    try {
-      const response = await fetchImpl(`${quoteBaseUrl()}${group.map(tencentSymbolForStock).join(",")}`);
-      if (!response.ok) continue;
-      const text = await readTencentQuoteText(response);
-      rows.push(...text.split(";").map(parseTencentQuoteLine).filter((row): row is NormalizedQuote => Boolean(row)));
-    } catch {
-      continue;
-    }
+  for (const group of chunk(symbols, 80)) {
+    const response = await fetchImpl(`${RUST_TENCENT_QUOTE_ROWS_BASE}?q=${encodeURIComponent(group.join(","))}`);
+    if (!response.ok) throw new Error(`Rust Tencent quote API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    rows.push(...normalizedQuoteRowsFromPayload(await jsonFromResponse(response, "Rust Tencent quote API")));
   }
   return rows;
+}
+
+async function fetchRustTencentAshareQuoteRows(fetchImpl: FetchLike) {
+  const response = await fetchImpl(RUST_TENCENT_ASHARE_QUOTE_ROWS_URL);
+  if (!response.ok) throw new Error(`Rust Tencent all-A-share quote API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  return normalizedQuoteRowsFromPayload(await jsonFromResponse(response, "Rust Tencent all-A-share quote API"));
+}
+
+function stockListedAshareCode(stock: Stock) {
+  const digits = marketDataCodeForStock(stock).replace(/\D/g, "").padStart(6, "0").slice(-6);
+  return LISTED_ASHARE_CODE_PATTERN.test(digits) ? digits : undefined;
+}
+
+function technicalIndicatorSortScore(stock: Stock) {
+  const amount = Number.isFinite(stock.metrics.amount) ? stock.metrics.amount : 0;
+  const marketCap = Number.isFinite(stock.metrics.floatMarketCap)
+    ? stock.metrics.floatMarketCap
+    : Number.isFinite(stock.metrics.marketCap)
+      ? stock.metrics.marketCap
+      : 0;
+  const turnover = Number.isFinite(stock.metrics.turnover) ? stock.metrics.turnover : 0;
+  return amount * 1_000_000 + marketCap + turnover;
+}
+
+function technicalIndicatorCodesForStocks(stocks: Stock[]) {
+  const seen = new Set<string>();
+  const codes: string[] = [];
+  [...stocks]
+    .sort((left, right) => technicalIndicatorSortScore(right) - technicalIndicatorSortScore(left))
+    .forEach((stock) => {
+      const code = stockListedAshareCode(stock);
+      if (code && !seen.has(code)) {
+        seen.add(code);
+        codes.push(code);
+      }
+    });
+  return codes.slice(0, TECHNICAL_INDICATOR_CODE_LIMIT);
+}
+
+async function fetchRustTechnicalIndicatorRows(stocks: Stock[], fetchImpl: FetchLike) {
+  const codes = technicalIndicatorCodesForStocks(stocks);
+  if (!codes.length) return [];
+  const params = new URLSearchParams({
+    codes: codes.join(","),
+    limit: String(TECHNICAL_INDICATOR_KLINE_LIMIT)
+  });
+  const response = await fetchImpl(`${RUST_TECHNICAL_INDICATORS_BASE}?${params.toString()}`);
+  if (!response.ok) throw new Error(`Rust technical indicator API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  return technicalIndicatorRowsFromPayload(await jsonFromResponse(response, "Rust technical indicator API"));
+}
+
+async function fetchTencentQuoteRows(stocks: Stock[], fetchImpl: FetchLike) {
+  return fetchRustTencentQuoteRowsBySymbols(stocks.map(tencentSymbolForStock), fetchImpl);
 }
 
 interface TencentStockCandidate {
@@ -225,21 +308,6 @@ export function generateTencentAshareCandidates() {
     ...rangeCandidates("sz", 300000, 302999),
     ...rangeCandidates("bj", 920000, 920999)
   ];
-}
-
-async function fetchTencentQuoteRowsBySymbols(symbols: string[], fetchImpl: FetchLike) {
-  const rows: NormalizedQuote[] = [];
-  for (const group of chunk(symbols, 80)) {
-    try {
-      const response = await fetchImpl(`${quoteBaseUrl()}${group.join(",")}`);
-      if (!response.ok) continue;
-      const text = await readTencentQuoteText(response);
-      rows.push(...text.split(";").map(parseTencentQuoteLine).filter((row): row is NormalizedQuote => Boolean(row)));
-    } catch {
-      continue;
-    }
-  }
-  return rows;
 }
 
 function exchangeForQuotePrefix(prefix: NormalizedQuote["prefix"]): Stock["exchange"] {
@@ -286,6 +354,37 @@ function quoteDerivedMetric(row: NormalizedQuote): Record<string, number> {
   return metrics;
 }
 
+const technicalMetricPrecision = (key: string) =>
+  key.startsWith("real") || key.endsWith("Date") || key.endsWith("Source") || key.endsWith("Count") || key.endsWith("Shares") || key.endsWith("Days")
+    ? 0
+    : 2;
+
+function mergeTechnicalIndicatorRows(stocks: Stock[], rows: NormalizedTechnicalIndicatorRow[]) {
+  const rowByCode = new Map(rows.map((row) => [row.code, row]));
+  let matchedRows = 0;
+
+  const mergedStocks = stocks.map((stock) => {
+    const code = stockListedAshareCode(stock);
+    const row = code ? rowByCode.get(code) : undefined;
+    if (!row) return stock;
+
+    let metrics = { ...stock.metrics };
+    Object.entries(row.metrics).forEach(([key, value]) => {
+      metrics = withMetric(metrics, key, value, technicalMetricPrecision(key));
+    });
+    if (metrics.realTechnicalSource === 1) matchedRows += 1;
+
+    return { ...stock, metrics };
+  });
+
+  return {
+    stocks: mergedStocks,
+    matchedRows,
+    sourceRows: rows.reduce((sum, row) => sum + row.sourceRows, 0),
+    reportDate: rows.find((row) => row.reportDate)?.reportDate
+  };
+}
+
 function buildStockFromTencentQuote(row: NormalizedQuote): Stock {
   const exchange = exchangeForQuotePrefix(row.prefix);
   const board = boardForQuote(row.prefix, row.code);
@@ -307,14 +406,113 @@ function buildStockFromTencentQuote(row: NormalizedQuote): Stock {
   };
 }
 
-async function fetchTencentKlinePoints(stock: Stock, period: StockKlinePeriod, fetchImpl: FetchLike) {
-  const params = new URLSearchParams({
-    param: `${tencentSymbolForStock(stock)},${TENCENT_KLINE_PERIOD_CODE[period]},,,${KLINE_PERIOD_LIMIT[period]},qfq`
+const realFinancialMetricKeys = [
+  "eps",
+  "bps",
+  "revenue",
+  "netProfit",
+  "operatingCashflow",
+  "totalAssets",
+  "totalLiabilities",
+  "investmentAssets",
+  "productionAssets",
+  "interestBearingDebt",
+  "nonInterestBearingDebt",
+  "inventory",
+  "receivables",
+  "roe",
+  "roa",
+  "grossMargin",
+  "netMargin",
+  "revenueGrowth",
+  "profitGrowth",
+  "debtRatio",
+  "currentRatio",
+  "assetTurnover",
+  "cashProfitRatio",
+  "qualityScore",
+  "realAnnualReportSource",
+  "realFinancialReportDate",
+  "realFinancialReportDisclosureDate",
+  "realAnnualReportDate",
+  "realAnnualReportDisclosureDate",
+  "realAnalystForecastSource",
+  "targetPriceLow",
+  "targetPriceMid",
+  "targetPriceHigh",
+  "targetUpside",
+  "epsForecastGrowth",
+  "realMarginSource",
+  "marginBalance",
+  "financingBalance",
+  "securitiesLendingBalance",
+  "financingBuyAmount",
+  "financingRepayAmount",
+  "financingNetBuyAmount",
+  "marginTradeDate"
+];
+
+function stockQuoteKeys(stock: Stock) {
+  const marketCode = marketDataCodeForStock(stock);
+  const prefix: NormalizedQuote["prefix"] = stock.exchange === "沪市" ? "sh" : stock.exchange === "北交所" ? "bj" : "sz";
+  return Array.from(new Set([stock.code, marketCode, quoteStorageKey(prefix, stock.code), quoteStorageKey(prefix, marketCode)]));
+}
+
+function stocksByQuoteKey(stocks: Stock[]) {
+  const map = new Map<string, Stock>();
+  stocks.forEach((stock) => {
+    stockQuoteKeys(stock).forEach((key) => {
+      if (!map.has(key)) map.set(key, stock);
+    });
   });
-  const response = await fetchImpl(`${tencentKlineBaseUrl()}?${keepCommaQuery(params)}`);
-  if (!response.ok) throw new Error(`腾讯HTTP ${response.status}`);
-  const points = parseTencentKlineHistory(await response.json(), tencentSymbolForStock(stock), period);
-  if (!points.length) throw new Error(`腾讯${KLINE_PERIOD_LABEL[period]}接口未返回有效历史行情`);
+  return map;
+}
+
+function realFinancialMetrics(metrics: Record<string, number>) {
+  if (metrics.realAnnualReportSource !== 1 && metrics.realAnalystForecastSource !== 1 && metrics.realMarginSource !== 1) {
+    return {};
+  }
+  return realFinancialMetricKeys.reduce<Record<string, number>>((result, key) => {
+    const value = metrics[key];
+    if (Number.isFinite(value)) result[key] = value;
+    return result;
+  }, {});
+}
+
+function usefulExistingText(value: string, defaults: string[]) {
+  return value && !defaults.includes(value) ? value : "";
+}
+
+function mergeExistingStockWithTencentQuote(existing: Stock | undefined, quoteStock: Stock): Stock {
+  if (!existing) return quoteStock;
+  const preservedMetrics = realFinancialMetrics(existing.metrics);
+  const hasRealFinancialData = Object.keys(preservedMetrics).length > 0;
+  return {
+    ...quoteStock,
+    industry1: hasRealFinancialData ? usefulExistingText(existing.industry1, ["未分类"]) || quoteStock.industry1 : quoteStock.industry1,
+    industry2: hasRealFinancialData ? usefulExistingText(existing.industry2, ["未分类", "腾讯行情"]) || quoteStock.industry2 : quoteStock.industry2,
+    region: hasRealFinancialData ? usefulExistingText(existing.region, ["未分类", "未披露"]) || quoteStock.region : quoteStock.region,
+    property: hasRealFinancialData ? existing.property || quoteStock.property : quoteStock.property,
+    isMargin: hasRealFinancialData ? existing.isMargin || quoteStock.isMargin : quoteStock.isMargin,
+    indexes: hasRealFinancialData && existing.indexes.length ? existing.indexes : quoteStock.indexes,
+    metrics: {
+      ...preservedMetrics,
+      ...quoteStock.metrics
+    }
+  };
+}
+
+async function fetchTencentKlinePoints(stock: Stock, period: StockKlinePeriod, fetchImpl: FetchLike) {
+  const symbol = tencentSymbolForStock(stock);
+  const rustParams = new URLSearchParams({
+    symbol,
+    period: TENCENT_KLINE_PERIOD_CODE[period],
+    limit: String(KLINE_PERIOD_LIMIT[period])
+  });
+  const response = await fetchImpl(`${RUST_TENCENT_KLINE_POINTS_BASE}?${rustParams.toString()}`);
+  if (!response.ok) throw new Error(`Rust Tencent K线接口 HTTP ${response.status}`);
+  const points = stockKlinePointsFromPayload(await jsonFromResponse(response, "Rust Tencent kline API"));
+  if (!points.length) throw new Error("Rust Tencent K线接口未返回有效历史行情");
   return points;
 }
 
@@ -355,11 +553,14 @@ export async function syncTencentAllAshareMarketData(
   const checkedAt = new Date().toISOString();
   try {
     const candidates = generateTencentAshareCandidates();
-    const rows = await fetchTencentQuoteRowsBySymbols(candidates.map((candidate) => candidate.symbol), fetchImpl);
+    const rows = await fetchRustTencentAshareQuoteRows(fetchImpl);
+    const existingByKey = stocksByQuoteKey(seedStocks);
     const stockByKey = new Map<string, Stock>();
 
     rows.filter(isActiveAshareQuote).forEach((row) => {
-      stockByKey.set(quoteStorageKey(row.prefix, row.code), buildStockFromTencentQuote(row));
+      const key = quoteStorageKey(row.prefix, row.code);
+      const quoteStock = buildStockFromTencentQuote(row);
+      stockByKey.set(key, mergeExistingStockWithTencentQuote(existingByKey.get(key) ?? existingByKey.get(row.code), quoteStock));
     });
 
     const stocks = Array.from(stockByKey.values()).sort((a, b) => {
@@ -372,21 +573,38 @@ export async function syncTencentAllAshareMarketData(
         ok: false,
         checkedAt,
         message: "全市场接入失败",
-        details: "腾讯行情接口有响应，但未识别到有效 A 股股票",
+        details: "Rust Tencent 全市场行情接口未识别到有效 A 股股票",
         stocks: seedStocks,
         matchedRows: 0,
         sourceRows: rows.length
       };
     }
 
+    let technicalStocks = stocks;
+    let technicalMatchedRows = 0;
+    let technicalSourceRows = 0;
+    let technicalDetail = "";
+    try {
+      const technicalRows = await fetchRustTechnicalIndicatorRows(stocks, fetchImpl);
+      const technical = mergeTechnicalIndicatorRows(stocks, technicalRows);
+      technicalStocks = technical.stocks;
+      technicalMatchedRows = technical.matchedRows;
+      technicalSourceRows = technical.sourceRows;
+      technicalDetail = `；Rust 技术指标匹配 ${technicalMatchedRows}/${technicalRows.length} 只${technical.reportDate ? `，交易日 ${technical.reportDate}` : ""}`;
+    } catch (error) {
+      technicalDetail = `；Rust 技术指标未完成：${error instanceof Error ? error.message : "未知网络错误"}`;
+    }
+
     return {
       ok: true,
       checkedAt,
       message: "全市场接入完成",
-      details: `腾讯行情扫描 ${candidates.length} 个候选代码，识别 ${stocks.length} 只有效 A 股股票，已更新价格、市值、PE、PB、成交等真实行情字段；未接入真实财报、现金流、资产负债字段前不生成价值核算结果`,
-      stocks,
+      details: `Rust Tencent 行情采集候选 ${candidates.length} 个代码，返回 ${rows.length} 行结果，识别 ${stocks.length} 只有效 A 股股票，已更新价格、市值、PE、PB、成交等真实行情字段${technicalDetail}`,
+      stocks: technicalStocks,
       matchedRows: stocks.length,
-      sourceRows: rows.length
+      sourceRows: rows.length,
+      technicalMatchedRows,
+      technicalSourceRows
     };
   } catch (error) {
     return {
@@ -452,7 +670,7 @@ export async function syncTencentRealMarketData(
         ok: false,
         checkedAt,
         message: "真实数据接入失败",
-        details: "腾讯行情接口有响应，但没有匹配到当前股票池代码",
+        details: "Rust Tencent 行情接口未匹配到当前股票池代码",
         stocks: baseStocks,
         matchedRows: 0,
         sourceRows: tencentRows.length
@@ -463,7 +681,7 @@ export async function syncTencentRealMarketData(
       ok: true,
       checkedAt,
       message: "真实数据接入完成",
-      details: `腾讯真实行情匹配 ${matchedRows}/${baseStocks.length} 只股票，已更新价格、市值、PE、PB、成交等字段`,
+      details: `Rust Tencent 真实行情匹配 ${matchedRows}/${baseStocks.length} 只股票，已更新价格、市值、PE、PB、成交等字段`,
       stocks,
       matchedRows,
       sourceRows: tencentRows.length

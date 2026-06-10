@@ -1,14 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
+import { defaultNewsAnalysisModelSettings } from "./newsAnalysisModelServices";
 import type { NewsArticle } from "./newsPageServices";
 import {
+  buildSentimentAnalysisRustFirst,
   buildSentimentEventsFromNewsArticles,
+  buildSentimentEventsRustFirst,
   buildSentimentInsightReport,
   buildSentimentLinkedStocks,
   filterSentimentEvents,
   scoreSentimentEvent,
   type SentimentEvent
 } from "./sentimentServices";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const testSentimentEvents: SentimentEvent[] = [
   {
@@ -55,13 +62,72 @@ const testSentimentEvents: SentimentEvent[] = [
   }
 ];
 
+function makeNewsArticle(overrides: Partial<NewsArticle> = {}): NewsArticle {
+  return {
+    id: "rust-contract-news-001",
+    title: "贵州茅台完成回购，食品饮料板块走强",
+    summary: "贵州茅台公告完成回购，市场情绪改善。",
+    content: "公司公告显示回购实施完毕。",
+    source: "腾讯证券公告",
+    sourceIcon: "T",
+    category: "公司公告",
+    sentiment: "利好",
+    importance: "重要",
+    status: "unread",
+    publishedAt: "2026-05-27 18:42:12",
+    fetchedAt: "2026-05-27T18:45:00.000Z",
+    url: "https://proxy.finance.qq.com/notice/test",
+    imageUrl: "",
+    author: "腾讯证券公告",
+    readTime: 1,
+    linkedCodes: ["600519"],
+    linkedStocks: [{ code: "600519", name: "贵州茅台" }],
+    industries: ["食品饮料", "白酒"],
+    tags: ["公司公告", "回购", "腾讯"],
+    viewCount: 0,
+    commentCount: 0,
+    ...overrides
+  };
+}
+
+function makeRustSentimentEvent(article = makeNewsArticle()): SentimentEvent {
+  return {
+    id: `real-news-${article.id}`,
+    title: article.title,
+    summary: article.summary,
+    category: "资金市场",
+    direction: "利好",
+    horizon: "短期",
+    severity: "重大",
+    occurredAt: article.publishedAt,
+    source: article.source,
+    sourceWeight: 88,
+    impact: 86,
+    relevance: 88,
+    confidence: 88,
+    novelty: 58,
+    persistence: 58,
+    riskPenalty: 4,
+    industries: ["食品饮料", "白酒"],
+    keywords: ["公司公告", "利好", "回购", "腾讯", "贵州茅台"],
+    linkedCodes: ["600519"]
+  };
+}
+
 describe("sentimentServices", () => {
-  it("turns real news articles into sentiment events for stock picking", () => {
+  it("does not synthesize sentiment events in the browser", () => {
+    const article = makeNewsArticle({ id: "browser-local-disabled" });
+
+    expect(buildSentimentEventsFromNewsArticles([article], STOCKS)).toEqual([]);
+  });
+
+  it("uses Rust sentiment event generation on the local app proxy", async () => {
+    vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
     const article: NewsArticle = {
-      id: "tencent-nos-test-001",
-      title: "贵州茅台：关于回购股份实施结果暨股份变动的公告",
-      summary: "贵州茅台披露回购实施结果，管理层稳定市场预期。",
-      content: "公告显示公司完成回购并披露股份变动。",
+      id: "rust-news-001",
+      title: "贵州茅台完成回购，食品饮料板块走强",
+      summary: "贵州茅台公告完成回购，市场情绪改善。",
+      content: "公司公告显示回购实施完毕。",
       source: "腾讯证券公告",
       sourceIcon: "T",
       category: "公司公告",
@@ -81,18 +147,160 @@ describe("sentimentServices", () => {
       viewCount: 0,
       commentCount: 0
     };
-
-    const events = buildSentimentEventsFromNewsArticles([article], STOCKS);
-
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
+    const rustEvent: SentimentEvent = {
+      id: "real-news-rust-news-001",
       title: article.title,
-      source: "腾讯证券公告",
+      summary: article.summary,
       category: "资金市场",
       direction: "利好",
+      horizon: "短期",
+      severity: "重大",
+      occurredAt: article.publishedAt,
+      source: article.source,
+      sourceWeight: 88,
+      impact: 86,
+      relevance: 88,
+      confidence: 88,
+      novelty: 58,
+      persistence: 58,
+      riskPenalty: 4,
+      industries: ["食品饮料", "白酒"],
+      keywords: ["公司公告", "利好", "回购", "腾讯", "贵州茅台"],
       linkedCodes: ["600519"]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "/api/sentiment/events") {
+        return new Response(JSON.stringify({ engine: "rust", events: [rustEvent] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ events: [] }), { status: 404 });
     });
-    expect(scoreSentimentEvent(events[0])).toBeGreaterThan(60);
+
+    const events = await buildSentimentEventsRustFirst([article], STOCKS, fetchMock);
+
+    expect(events).toEqual([rustEvent]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/sentiment/events");
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
+      articles: [{ id: "rust-news-001" }]
+    });
+  });
+
+  it("uses Rust sentiment event generation without localhost gating", async () => {
+    vi.stubGlobal("window", { location: { hostname: "stockchoose.example" } });
+    const article = makeNewsArticle({ id: "rust-contract-news-002" });
+    const rustEvent = makeRustSentimentEvent(article);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "/api/sentiment/events") {
+        return new Response(JSON.stringify({ engine: "rust", events: [rustEvent] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ events: [] }), { status: 404 });
+    });
+
+    const events = await buildSentimentEventsRustFirst([article], STOCKS, fetchMock);
+
+    expect(events).toEqual([rustEvent]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/sentiment/events");
+  });
+
+  it("rejects when Rust sentiment event generation fails instead of using browser fallback", async () => {
+    const article = makeNewsArticle();
+    expect(buildSentimentEventsFromNewsArticles([article], STOCKS)).toEqual([]);
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "rust unavailable" }), { status: 503 }));
+
+    await expect(buildSentimentEventsRustFirst([article], STOCKS, fetchMock)).rejects.toThrow("Rust sentiment API HTTP 503");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses Rust sentiment analysis for linked stocks and insight reports on the local app proxy", async () => {
+    vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
+    const event = testSentimentEvents[0];
+    const stock = STOCKS.find((item) => item.code === "002594") ?? STOCKS[0];
+    const rustLinkedStock = {
+      stock,
+      events: [event],
+      direction: event.direction,
+      relationScore: 72.4,
+      relationLevel: "直接命中" as const,
+      reason: "Rust 关联股票分析",
+      evidence: ["Rust 真实新闻源代码直接关联"],
+      tags: [event.category]
+    };
+    const rustReport = {
+      title: "Rust 舆情洞察",
+      conclusion: "Rust 已完成关联股票分析。",
+      eventCount: 1,
+      topCategories: [{ category: event.category, count: 1 }],
+      topIndustries: [{ industry: event.industries[0], count: 1 }],
+      linkedStocks: [rustLinkedStock],
+      riskEvents: [],
+      validationPoints: ["Rust validation"]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input) === "/api/sentiment/analysis") {
+        return new Response(JSON.stringify({ engine: "rust", linkedStocks: [rustLinkedStock], report: rustReport }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ linkedStocks: [], report: rustReport }), { status: 404 });
+    });
+
+    const analysis = await buildSentimentAnalysisRustFirst([event], STOCKS, fetchMock);
+
+    expect(analysis.linkedStocks).toEqual([rustLinkedStock]);
+    expect(analysis.report).toEqual(rustReport);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/sentiment/analysis");
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      events: Array<{ id: string }>;
+      stocks: Array<{ code: string }>;
+    };
+    expect(requestBody.events[0].id).toBe(event.id);
+    expect(requestBody.stocks.some((item) => item.code === "600519")).toBe(true);
+  });
+
+  it("passes enabled news analysis model settings to the Rust sentiment analysis endpoint", async () => {
+    const event = testSentimentEvents[0];
+    const rustReport = {
+      title: "Rust 舆情洞察",
+      conclusion: "Rust 模型已参与分析。",
+      eventCount: 1,
+      topCategories: [{ category: event.category, count: 1 }],
+      topIndustries: [{ industry: event.industries[0], count: 1 }],
+      linkedStocks: [],
+      riskEvents: [],
+      validationPoints: ["Rust model validation"]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ engine: "rust", linkedStocks: [], report: rustReport }), { status: 200 })
+    );
+
+    await buildSentimentAnalysisRustFirst([event], STOCKS, {
+      ...defaultNewsAnalysisModelSettings,
+      provider: "OpenAI Compatible",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "test-key",
+      model: "news-model",
+      tasks: { ...defaultNewsAnalysisModelSettings.tasks, riskSummary: false }
+    }, fetchMock);
+
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      analysisModel?: { provider?: string; baseUrl?: string; apiKey?: string; model?: string; tasks?: string[] };
+    };
+    expect(requestBody.analysisModel).toMatchObject({
+      provider: "OpenAI Compatible",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "test-key",
+      model: "news-model",
+      tasks: ["sentiment", "eventExtraction", "stockMapping"]
+    });
+  });
+
+  it("rejects when Rust sentiment analysis fails instead of using browser fallback", async () => {
+    const event = makeRustSentimentEvent();
+    expect(buildSentimentLinkedStocks([event], STOCKS)).toEqual([]);
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "rust unavailable" }), { status: 503 }));
+
+    await expect(buildSentimentAnalysisRustFirst([event], STOCKS, fetchMock)).rejects.toThrow("Rust sentiment analysis API HTTP 503");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("scores high value events within a normalized range", () => {
@@ -131,7 +339,7 @@ describe("sentimentServices", () => {
     expect(events.every((event) => event.severity === "特别重大")).toBe(true);
   });
 
-  it("builds linked stocks and a report from matched events without recommendations", () => {
+  it("does not synthesize linked stocks or insight reports in the browser", () => {
     const events = filterSentimentEvents(testSentimentEvents, {
       category: "全部",
       direction: "全部",
@@ -143,11 +351,10 @@ describe("sentimentServices", () => {
     const linkedStocks = buildSentimentLinkedStocks(events, STOCKS);
     const report = buildSentimentInsightReport(events, linkedStocks);
 
-    expect(linkedStocks.length).toBeGreaterThan(0);
-    expect(linkedStocks[0].stock.code).toMatch(/^\d{6}$/);
-    expect(linkedStocks[0].relationScore).toBeGreaterThan(0);
+    expect(linkedStocks).toEqual([]);
     expect(report.title).toBe("舆情关联股票洞察");
-    expect(report.linkedStocks.length).toBeGreaterThan(0);
-    expect(report.validationPoints.length).toBeGreaterThan(2);
+    expect(report.eventCount).toBe(events.length);
+    expect(report.linkedStocks).toEqual([]);
+    expect(report.validationPoints).toEqual(expect.arrayContaining(["舆情事件、股票关联和洞察报告由 Rust 数据接口生成。"]));
   });
 });

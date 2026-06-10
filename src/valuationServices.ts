@@ -1,5 +1,9 @@
 import type { Stock } from "./types";
 
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+const RUST_VALUATION_ROWS_URL = "/api/valuation/rows";
+
 export type ValuationModel = "DCF现金流" | "PE盈利" | "PB-ROE" | "PS成长" | "股息资产";
 export type ValuationStyle = "严苛核算" | "均衡核算" | "保守核算" | "成长核算" | "资产核算";
 export type EnterpriseState = "高速成长" | "稳定成熟" | "周期修复" | "困境承压" | "资产防御";
@@ -54,6 +58,7 @@ export interface ValuationFilters {
   style: ValuationStyle;
   minSafetyMargin: number;
   minGovernanceScore: number;
+  displayLimit: number;
 }
 
 export interface ValuationRow {
@@ -156,8 +161,9 @@ export const defaultValuationFilters: ValuationFilters = {
   state: "全部",
   ownership: "全部",
   style: "严苛核算",
-  minSafetyMargin: -60,
-  minGovernanceScore: 0
+  minSafetyMargin: -999,
+  minGovernanceScore: 0,
+  displayLimit: 50
 };
 
 const realValuationRequiredFields: Array<{ key: string; label: string; positive?: boolean }> = [
@@ -492,7 +498,7 @@ function positionHintFor(row: Pick<ValuationRow, "safetyMargin" | "governanceSco
   return "0%";
 }
 
-export function calculateValuation(stock: Stock, style: ValuationStyle = "严苛核算"): ValuationRow {
+function calculateValuation(stock: Stock, style: ValuationStyle = "严苛核算"): ValuationRow {
   const rawProfile = getIndustryProfile(stock.industry1);
   const profile = styleAdjust(rawProfile, style);
   const m = stock.metrics;
@@ -656,17 +662,61 @@ export function calculateValuation(stock: Stock, style: ValuationStyle = "严苛
   };
 }
 
-export function buildValuationRows(stocks: Stock[], filters: ValuationFilters) {
-  return stocks
-    .filter(hasRequiredRealValuationData)
-    .map((stock) => calculateValuation(stock, filters.style))
-    .filter((row) => matchesBoardFilter(row.stock, filters.board))
-    .filter((row) => filters.industry === "全部" || row.stock.industry1 === filters.industry)
-    .filter((row) => filters.state === "全部" || row.state === filters.state)
-    .filter((row) => filters.ownership === "全部" || row.stock.property === filters.ownership)
-    .filter((row) => row.safetyMargin >= filters.minSafetyMargin)
-    .filter((row) => row.governanceScore >= filters.minGovernanceScore)
-    .sort((a, b) => b.safetyMargin - a.safetyMargin);
+export function buildValuationRows(_stocks: Stock[], _filters: ValuationFilters): ValuationRow[] {
+  return [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function finiteNumberField(row: Record<string, unknown>, key: keyof ValuationRow, index: number) {
+  const value = row[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Rust valuation API returned invalid valuation row ${index}: ${String(key)} must be a finite number`);
+  }
+}
+
+function valuationRowFromPayloadRow(row: unknown, index: number): ValuationRow {
+  if (!isRecord(row)) throw new Error(`Rust valuation API returned invalid valuation row ${index}: row must be an object`);
+  if (!isRecord(row.stock) || typeof row.stock.code !== "string" || typeof row.stock.name !== "string") {
+    throw new Error(`Rust valuation API returned invalid valuation row ${index}: stock must be a stock object`);
+  }
+  ["fairValue", "safetyMargin", "governanceScore", "qualityScore"].forEach((key) => finiteNumberField(row, key as keyof ValuationRow, index));
+  if (!isRecord(row.profile)) throw new Error(`Rust valuation API returned invalid valuation row ${index}: profile must be an object`);
+  if (!isRecord(row.components) || !Array.isArray(row.components.formulaRows)) {
+    throw new Error(`Rust valuation API returned invalid valuation row ${index}: components.formulaRows must be an array`);
+  }
+  return row as unknown as ValuationRow;
+}
+
+export async function buildValuationRowsRustFirst(
+  stocks: Stock[],
+  filters: ValuationFilters,
+  fetchImpl?: FetchLike
+): Promise<ValuationRow[]> {
+  const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust valuation API unavailable: fetch is not available");
+
+  const response = await request(RUST_VALUATION_ROWS_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ stocks, filters })
+  });
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
+    throw new Error(`Rust valuation API HTTP ${response.status}${suffix}`);
+  }
+  let rows: unknown;
+  try {
+    rows = await response.json();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`Rust valuation API returned invalid JSON: ${detail}`);
+  }
+  if (!Array.isArray(rows)) throw new Error("Rust valuation API returned invalid valuation rows");
+  return rows.map(valuationRowFromPayloadRow);
 }
 
 export function summarizeValuationRows(rows: ValuationRow[]) {

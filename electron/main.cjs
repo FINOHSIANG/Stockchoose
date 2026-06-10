@@ -1,8 +1,8 @@
 const { app, BrowserWindow, Menu, shell } = require("electron");
 const fs = require("fs");
 const http = require("http");
-const https = require("https");
 const path = require("path");
+const { handleRustAktoolsRequest, handleRustProxyRequest, stopRustApiSidecar } = require("./rust-api.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const distDir = path.join(__dirname, "..", "dist");
@@ -23,27 +23,26 @@ const mimeTypes = {
   ".woff2": "font/woff2"
 };
 
-const proxyRules = [
-  {
-    prefix: "/aktools",
-    target: "http://127.0.0.1:18080",
-    rewrite: (url) => url.replace(/^\/aktools/, "")
-  },
-  {
-    prefix: "/tencent-quote",
-    target: "https://qt.gtimg.cn",
-    rewrite: (url) => url.replace(/^\/tencent-quote/, "")
-  },
-  {
-    prefix: "/tencent-kline",
-    target: "https://web.ifzq.gtimg.cn",
-    rewrite: (url) => url.replace(/^\/tencent-kline/, "")
-  },
-  {
-    prefix: "/gdelt-news",
-    target: "https://api.gdeltproject.org/api/v2",
-    rewrite: (url) => url.replace(/^\/gdelt-news/, "")
-  }
+function rewriteTencentQuoteUrl(requestUrl) {
+  const symbols = decodeURIComponent(requestUrl.replace(/^\/tencent-quote\/q=/, ""));
+  return `/api/market/tencent/quote?q=${encodeURIComponent(symbols)}`;
+}
+
+function rewriteTencentKlineUrl(requestUrl) {
+  const parsed = new URL(requestUrl, "http://127.0.0.1");
+  return `/api/market/tencent/kline${parsed.search}`;
+}
+
+function rewriteGdeltNewsUrl(requestUrl) {
+  const parsed = new URL(requestUrl, "http://127.0.0.1");
+  return `/api/news/gdelt${parsed.search}`;
+}
+
+const rustProxyRules = [
+  { prefix: "/api", requireSuccess: false },
+  { prefix: "/tencent-quote", rewrite: rewriteTencentQuoteUrl },
+  { prefix: "/tencent-kline", rewrite: rewriteTencentKlineUrl },
+  { prefix: "/gdelt-news", rewrite: rewriteGdeltNewsUrl }
 ];
 
 function sendText(response, statusCode, text) {
@@ -52,44 +51,6 @@ function sendText(response, statusCode, text) {
     "cache-control": "no-store"
   });
   response.end(text);
-}
-
-function proxyRequest(request, response, rule) {
-  const targetUrl = new URL(rule.rewrite(request.url || "/"), rule.target);
-  const client = targetUrl.protocol === "https:" ? https : http;
-  const headers = { ...request.headers, host: targetUrl.host };
-  delete headers.origin;
-  delete headers.referer;
-
-  const upstream = client.request(
-    targetUrl,
-    {
-      method: request.method,
-      headers,
-      timeout: 15000
-    },
-    (upstreamResponse) => {
-      response.writeHead(upstreamResponse.statusCode || 502, {
-        ...upstreamResponse.headers,
-        "access-control-allow-origin": "*"
-      });
-      upstreamResponse.pipe(response);
-    }
-  );
-
-  upstream.on("timeout", () => {
-    upstream.destroy(new Error("upstream timeout"));
-  });
-
-  upstream.on("error", (error) => {
-    if (!response.headersSent) {
-      sendText(response, 502, `Proxy request failed: ${error.message}`);
-    } else {
-      response.end();
-    }
-  });
-
-  request.pipe(upstream);
 }
 
 function safeStaticPath(urlPath) {
@@ -119,13 +80,38 @@ function serveStaticFile(request, response) {
 }
 
 function handleLocalRequest(request, response) {
+  handleLocalRequestAsync(request, response).catch((error) => {
+    if (!response.headersSent) {
+      sendText(response, 502, `Local request failed: ${error.message}`);
+    } else {
+      response.end();
+    }
+  });
+}
+
+async function handleLocalRequestAsync(request, response) {
   const requestUrl = request.url || "/";
-  const rule = proxyRules.find((item) => requestUrl.startsWith(item.prefix));
-  if (rule) {
-    proxyRequest(request, response, rule);
+  if (requestUrl.startsWith("/aktools")) {
+    await handleAktoolsRequest(request, response);
     return;
   }
+  const rustRule = rustProxyRules.find((item) => requestUrl.startsWith(item.prefix));
+  if (rustRule) {
+    if (await handleRustProxyRequest(request, response, rustRule)) return;
+    if (requestUrl.startsWith("/api")) {
+      sendText(response, 502, "Rust API is unavailable");
+      return;
+    }
+  }
   serveStaticFile(request, response);
+}
+
+async function handleAktoolsRequest(request, response) {
+  if (await handleRustAktoolsRequest(request, response, { prefix: "/aktools" })) return;
+
+  if (!response.headersSent) {
+    sendText(response, 502, "Rust AKTools data API is unavailable");
+  }
 }
 
 function startLocalServer() {
@@ -178,6 +164,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
+  stopRustApiSidecar();
   if (localServer) {
     localServer.close();
     localServer = null;

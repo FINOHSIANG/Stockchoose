@@ -8,7 +8,8 @@ import type {
   SelectionRow,
   Stock,
   StockPool,
-  StrategyConfig
+  StrategyConfig,
+  StrategyOptimizationResult
 } from "./types";
 import { normalizeStockCodeKey, stockCodeCandidates } from "./stockIdentity";
 
@@ -74,7 +75,7 @@ export function evaluateFormula(formula: string, stock: Stock, factors: Factor[]
   if (!allowed.test(formula)) {
     return 0;
   }
-  const metricKeys = Array.from(new Set(factors.map((factor) => factor.key)));
+  const metricKeys = Array.from(new Set([...Object.keys(stock.metrics), ...factors.map((factor) => factor.key)]));
   const args = metricKeys;
   const values = metricKeys.map((key) => stock.metrics[key] ?? 0);
   const helpers = {
@@ -104,43 +105,133 @@ function normalize(value: number, min: number, max: number, order: "asc" | "desc
   return (order === "desc" ? normalized : 1 - normalized) * 100;
 }
 
-function poolCodes(poolId: string, pools: StockPool[]): string[] {
+function textIncludes(value: string | undefined, patterns: string[]) {
+  const text = value ?? "";
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
+function isAll(value: string | undefined) {
+  const text = (value ?? "").trim();
+  return !text || text.toLowerCase() === "all" || text.includes("全") || text.includes("鍏");
+}
+
+function isAllPoolId(poolId: string | undefined) {
+  return !poolId || poolId === "all" || isAll(poolId);
+}
+
+function positiveInt(value: number | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : fallback;
+}
+
+function positiveMetricValue(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function positiveValuationFactor(key: string) {
+  return ["pe", "pb", "ps", "pcf", "peg", "evEbitda", "dividendYield"].includes(key);
+}
+
+function factorMetricValue(stock: Stock, factor: Factor | undefined, factors: Factor[]): number | undefined {
+  if (!factor) {
+    return undefined;
+  }
+  const value = factor.formula ? evaluateFormula(factor.formula, stock, factors) : stock.metrics[factor.key];
+  return positiveMetricValue(value);
+}
+
+function rankMetricValue(stock: Stock, factor: Factor | undefined, factors: Factor[]): number | undefined {
+  const value = factorMetricValue(stock, factor, factors);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (positiveValuationFactor(factor?.key ?? "") && value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
+function normalizedRankScore(value: number | undefined, min: number, max: number, order: "asc" | "desc") {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return 50;
+  }
+  return value === undefined ? 0 : normalize(value, min, max, order);
+}
+
+function allStockCodeSet(stocks: Stock[]) {
+  return new Set(stocks.map((stock) => normalizeStockCodeKey(stock.code)));
+}
+
+function staticPoolCodeSet(pool: StockPool, stocks: Stock[]) {
+  if (pool.id === "all" && !pool.codes.length) {
+    return allStockCodeSet(stocks);
+  }
+  return new Set(pool.codes.map((code) => normalizeStockCodeKey(code)));
+}
+
+function poolCodeSet(poolId: string, pools: StockPool[], stocks: Stock[], factors: Factor[], visiting = new Set<string>()): Set<string> {
+  if (isAllPoolId(poolId) && !pools.some((item) => item.id === "all")) {
+    return allStockCodeSet(stocks);
+  }
+  if (visiting.has(poolId)) {
+    return new Set();
+  }
   const pool = pools.find((item) => item.id === poolId);
   if (!pool) {
-    return [];
+    return new Set();
   }
-  if (pool.type !== "compound") {
-    return pool.codes;
+  visiting.add(poolId);
+  let codes: Set<string>;
+  if (pool.type === "compound") {
+    const source = poolCodeSet(pool.sourcePoolId ?? "all", pools, stocks, factors, visiting);
+    const target = poolCodeSet(pool.targetPoolId ?? "all", pools, stocks, factors, visiting);
+    if (pool.operator === "and") {
+      codes = new Set(Array.from(source).filter((code) => target.has(code)));
+    } else if (pool.operator === "sub") {
+      codes = new Set(Array.from(source).filter((code) => !target.has(code)));
+    } else {
+      codes = new Set([...source, ...target]);
+    }
+  } else if (pool.type === "dynamic") {
+    const baseCodes = staticPoolCodeSet(pool, stocks);
+    const universe = stocks.filter((stock) => baseCodes.size === 0 || poolHasStock(baseCodes, stock));
+    const poolStrategy = { filters: pool.dynamicFilters ?? [] } as StrategyConfig;
+    codes = new Set(applyFilters(universe, poolStrategy, factors).map((row) => normalizeStockCodeKey(row.stock.code)));
+  } else {
+    codes = staticPoolCodeSet(pool, stocks);
   }
-  const source = new Set(poolCodes(pool.sourcePoolId ?? "all", pools));
-  const target = new Set(poolCodes(pool.targetPoolId ?? "all", pools));
-  if (pool.operator === "and") {
-    return Array.from(source).filter((code) => target.has(code));
-  }
-  if (pool.operator === "sub") {
-    return Array.from(source).filter((code) => !target.has(code));
-  }
-  return Array.from(new Set([...source, ...target]));
+  visiting.delete(poolId);
+  return codes;
 }
 
 function poolHasStock(codeSet: Set<string>, stock: Stock) {
   return stockCodeCandidates(stock).some((code) => codeSet.has(normalizeStockCodeKey(code)));
 }
 
+function rangeScopeKey(stock: Stock, range: FilterCondition["range"] | RankCondition["range"]) {
+  if (textIncludes(range, ["一级", "涓€绾", "industry1"])) return `industry1:${stock.industry1 || "-"}`;
+  if (textIncludes(range, ["二级", "浜岀骇", "industry2"])) return `industry2:${stock.industry1 || "-"}:${stock.industry2 || "-"}`;
+  if (isAll(range)) return "all";
+  if (range === "一级行业") return `industry1:${stock.industry1 || "-"}`;
+  if (range === "二级行业") return `industry2:${stock.industry1 || "-"}:${stock.industry2 || "-"}`;
+  return "all";
+}
+
 function applySelector(strategy: StrategyConfig, stock: Stock) {
-  if (strategy.indexMember !== "全部" && !stock.indexes.includes(strategy.indexMember)) return false;
-  if (strategy.board !== "全部" && stock.board !== strategy.board) return false;
-  if (strategy.industry1 !== "全部" && stock.industry1 !== strategy.industry1) return false;
-  if (strategy.industry2 !== "全部" && stock.industry2 !== strategy.industry2) return false;
-  if (strategy.exchange !== "全部" && stock.exchange !== strategy.exchange) return false;
-  if (strategy.region !== "全部" && stock.region !== strategy.region) return false;
-  if (strategy.property !== "全部" && stock.property !== strategy.property) return false;
-  if (strategy.marginFlag === "融资融券" && !stock.isMargin) return false;
-  if (strategy.marginFlag === "非融资融券" && stock.isMargin) return false;
-  if (strategy.stMode === "排除ST" && stock.isST) return false;
-  if (strategy.stMode === "仅有ST" && !stock.isST) return false;
-  if (strategy.starMode === "排除科创板" && stock.isSTAR) return false;
-  if (strategy.starMode === "仅有科创板" && !stock.isSTAR) return false;
+  if (!isAll(strategy.indexMember) && !stock.indexes.includes(strategy.indexMember)) return false;
+  if (!isAll(strategy.board) && stock.board !== strategy.board) return false;
+  if (!isAll(strategy.industry1) && stock.industry1 !== strategy.industry1) return false;
+  if (!isAll(strategy.industry2) && stock.industry2 !== strategy.industry2) return false;
+  if (!isAll(strategy.exchange) && stock.exchange !== strategy.exchange) return false;
+  if (!isAll(strategy.region) && stock.region !== strategy.region) return false;
+  if (!isAll(strategy.property) && stock.property !== strategy.property) return false;
+  if (textIncludes(strategy.marginFlag, ["融资融券", "铻嶈祫"]) && !textIncludes(strategy.marginFlag, ["非", "闈"]) && !stock.isMargin) return false;
+  if (textIncludes(strategy.marginFlag, ["非融资融券", "闈炶瀺"]) && stock.isMargin) return false;
+  if (textIncludes(strategy.stMode, ["排除ST", "鎺掗櫎ST"]) && stock.isST) return false;
+  if (textIncludes(strategy.stMode, ["仅有ST", "浠呮湁ST"]) && !stock.isST) return false;
+  if (textIncludes(strategy.starMode, ["排除科创板", "鎺掗櫎绉戝垱"]) && stock.isSTAR) return false;
+  if (textIncludes(strategy.starMode, ["仅有科创板", "浠呮湁绉戝垱"]) && !stock.isSTAR) return false;
   if (strategy.filterSuspended && stock.isSuspended) return false;
   return true;
 }
@@ -193,18 +284,32 @@ function applyFilters(stocks: Stock[], strategy: StrategyConfig, factors: Factor
     return stocks.map((stock) => ({ stock, passedFilters: 0 }));
   }
 
-  const valuesByFactor = new Map<string, number[]>();
+  const valuesByCondition = new Map<string, Map<string, number[]>>();
   enabled.forEach((condition) => {
     const factor = factorByKey(factors, condition.factorKey);
-    valuesByFactor.set(condition.factorKey, stocks.map((stock) => metricValue(stock, factor, factors)));
+    const valuesByScope = new Map<string, number[]>();
+    stocks.forEach((stock) => {
+      const value = rankMetricValue(stock, factor, factors);
+      if (value === undefined) {
+        return;
+      }
+      const scopeKey = rangeScopeKey(stock, condition.range);
+      valuesByScope.set(scopeKey, [...(valuesByScope.get(scopeKey) ?? []), value]);
+    });
+    valuesByCondition.set(condition.id, valuesByScope);
   });
 
   return stocks
     .map((stock) => {
       const failed = enabled.find((condition) => {
         const factor = factorByKey(factors, condition.factorKey);
-        const value = metricValue(stock, factor, factors);
-        return !conditionPass(value, condition, valuesByFactor.get(condition.factorKey) ?? []);
+        const value = rankMetricValue(stock, factor, factors);
+        if (value === undefined) {
+          return true;
+        }
+        const scopeKey = rangeScopeKey(stock, condition.range);
+        const scopedValues = valuesByCondition.get(condition.id)?.get(scopeKey) ?? [];
+        return !conditionPass(value, condition, scopedValues);
       });
       return {
         stock,
@@ -225,14 +330,30 @@ function scoreRows(rows: Array<{ stock: Stock; passedFilters: number }>, ranks: 
     }));
   }
 
-  const factorStats = new Map<string, { min: number; max: number }>();
+  const statsByRank = new Map<string, Map<string, { min: number; max: number }>>();
   enabled.forEach((rank) => {
     const factor = factorByKey(factors, rank.factorKey);
-    const values = rows.map((row) => metricValue(row.stock, factor, factors));
-    factorStats.set(rank.factorKey, {
-      min: Math.min(...values),
-      max: Math.max(...values)
+    const valuesByScope = new Map<string, number[]>();
+    rows.forEach((row) => {
+      const value = rankMetricValue(row.stock, factor, factors);
+      if (value === undefined) {
+        return;
+      }
+      const scopeKey = rangeScopeKey(row.stock, rank.range);
+      valuesByScope.set(scopeKey, [...(valuesByScope.get(scopeKey) ?? []), value]);
     });
+    statsByRank.set(
+      rank.id,
+      new Map(
+        Array.from(valuesByScope.entries()).map(([scopeKey, values]) => [
+          scopeKey,
+          {
+            min: Math.min(...values),
+            max: Math.max(...values)
+          }
+        ])
+      )
+    );
   });
 
   const totalWeight = enabled.reduce((sum, rank) => sum + rank.weight, 0);
@@ -240,9 +361,9 @@ function scoreRows(rows: Array<{ stock: Stock; passedFilters: number }>, ranks: 
     let score = 0;
     enabled.forEach((rank) => {
       const factor = factorByKey(factors, rank.factorKey);
-      const stats = factorStats.get(rank.factorKey) ?? { min: 0, max: 1 };
-      const value = metricValue(row.stock, factor, factors);
-      score += normalize(value, stats.min, stats.max, rank.order) * (rank.weight / totalWeight);
+      const stats = statsByRank.get(rank.id)?.get(rangeScopeKey(row.stock, rank.range)) ?? { min: 0, max: 1 };
+      const value = rankMetricValue(row.stock, factor, factors);
+      score += normalizedRankScore(value, stats.min, stats.max, rank.order) * (rank.weight / totalWeight);
     });
     return {
       ...row,
@@ -252,66 +373,199 @@ function scoreRows(rows: Array<{ stock: Stock; passedFilters: number }>, ranks: 
   });
 }
 
-function applyWeights(rows: SelectionRow[], strategy: StrategyConfig) {
-  const selected = rows.slice(0, strategy.trading.maxHoldings);
-  if (!selected.length) {
-    return selected;
+interface ScreenStocksOptions {
+  resultLimit?: number;
+  weightLimit?: number;
+}
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+function applyWeights(rows: SelectionRow[], strategy: StrategyConfig, weightLimit = strategy.trading.maxHoldings) {
+  const selectedRows = rows.slice(0, positiveInt(weightLimit, positiveInt(strategy.trading.maxHoldings, 1)));
+  if (!selectedRows.length) {
+    return rows;
   }
-  const valueOf = (row: SelectionRow) => {
-    if (strategy.trading.weightMethod === "流通市值") return row.stock.metrics.floatMarketCap;
-    if (strategy.trading.weightMethod === "总市值") return row.stock.metrics.marketCap;
-    if (strategy.trading.weightMethod === "流通市值平方根") return Math.sqrt(row.stock.metrics.floatMarketCap);
-    if (strategy.trading.weightMethod === "总市值平方根") return Math.sqrt(row.stock.metrics.marketCap);
-    return 1;
+  const weightValueOf = (row: SelectionRow) => {
+    const method = strategy.trading.weightMethod ?? "";
+    const useFloatMarketCap = textIncludes(method, ["流通", "娴侀€"]);
+    const useTotalMarketCap = textIncludes(method, ["总市值", "鎬诲競"]);
+    const useSqrt = textIncludes(method, ["平方根", "钩鏂规牴"]);
+    const rawValue = useFloatMarketCap ? row.stock.metrics.floatMarketCap : useTotalMarketCap ? row.stock.metrics.marketCap : 1;
+    const value = positiveMetricValue(rawValue) ?? 0;
+    return useSqrt ? Math.sqrt(Math.max(0, value)) : Math.max(0, value);
   };
-  const total = selected.reduce((sum, row) => sum + valueOf(row), 0);
-  return selected.map((row) => ({
+  const selectedTotal = selectedRows.reduce((sum, row) => sum + weightValueOf(row), 0);
+  const selectedWeightByCode = new Map(
+    selectedRows.map((row) => [
+      row.stock.code,
+      selectedTotal > 0 ? round((weightValueOf(row) / selectedTotal) * Math.min(strategy.trading.maxBuyPosition, 100), 2) : 0
+    ])
+  );
+  return rows.map((row) => ({
     ...row,
-    weight: round((valueOf(row) / total) * Math.min(strategy.trading.maxBuyPosition, 100), 2)
+    weight: selectedWeightByCode.get(row.stock.code) ?? 0
   }));
 }
 
-export function screenStocks(strategy: StrategyConfig, stocks: Stock[], pools: StockPool[], factors: Factor[]): SelectionRow[] {
-  const primaryCodes = new Set(poolCodes(strategy.poolId, pools).map(normalizeStockCodeKey));
-  const hotCodes = strategy.hotPoolId === "all" ? primaryCodes : new Set(poolCodes(strategy.hotPoolId, pools).map(normalizeStockCodeKey));
+export function screenStocks(
+  strategy: StrategyConfig,
+  stocks: Stock[],
+  pools: StockPool[],
+  factors: Factor[],
+  options: ScreenStocksOptions = {}
+): SelectionRow[] {
+  const primaryCodes = poolCodeSet(strategy.poolId || "all", pools, stocks, factors);
+  const hotCodes = isAllPoolId(strategy.hotPoolId) ? primaryCodes : poolCodeSet(strategy.hotPoolId, pools, stocks, factors);
   const universe = stocks
     .filter((stock) => poolHasStock(primaryCodes, stock))
-    .filter((stock) => poolHasStock(hotCodes, stock) || strategy.hotPoolId === "all")
+    .filter((stock) => isAllPoolId(strategy.hotPoolId) || poolHasStock(hotCodes, stock))
     .filter((stock) => applySelector(strategy, stock));
   const filtered = applyFilters(universe, strategy, factors);
   const scored = scoreRows(filtered, strategy.ranks, factors).sort((a, b) => b.score - a.score);
-  return applyWeights(scored.slice(0, strategy.poolLimit), strategy);
+  const strategyLimit = positiveInt(strategy.poolLimit, 1);
+  const resultLimit = Math.min(strategyLimit, positiveInt(options.resultLimit, strategyLimit));
+  return applyWeights(scored.slice(0, resultLimit), strategy, positiveInt(options.weightLimit, positiveInt(strategy.trading.maxHoldings, 1)));
+}
+
+async function readRustJson(response: Response, label: string): Promise<unknown> {
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
+    throw new Error(`${label} HTTP ${response.status}${suffix}`);
+  }
+  try {
+    return await response.json();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`${label} returned invalid JSON: ${detail}`);
+  }
+}
+
+function requireRustFetch(request: FetchLike | undefined, label: string): FetchLike {
+  if (!request) throw new Error(`${label} unavailable: fetch is not available`);
+  return request;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function selectionRowFromPayload(row: unknown, index: number, label: string): SelectionRow {
+  if (!isRecord(row)) throw new Error(`${label} returned invalid selection row ${index}: row must be an object`);
+  if (!isRecord(row.stock) || typeof row.stock.code !== "string" || typeof row.stock.name !== "string") {
+    throw new Error(`${label} returned invalid selection row ${index}: stock must be a stock object`);
+  }
+  if (typeof row.score !== "number" || !Number.isFinite(row.score)) {
+    throw new Error(`${label} returned invalid selection row ${index}: score must be a finite number`);
+  }
+  if (typeof row.weight !== "number" || !Number.isFinite(row.weight)) {
+    throw new Error(`${label} returned invalid selection row ${index}: weight must be a finite number`);
+  }
+  if (typeof row.passedFilters !== "number" || !Number.isFinite(row.passedFilters)) {
+    throw new Error(`${label} returned invalid selection row ${index}: passedFilters must be a finite number`);
+  }
+  return row as unknown as SelectionRow;
+}
+
+function rankingRowFromPayload(row: unknown, index: number, label: string): RankingRow {
+  if (!isRecord(row)) throw new Error(`${label} returned invalid ranking row ${index}: row must be an object`);
+  if (!isRecord(row.stock) || typeof row.stock.code !== "string" || typeof row.stock.name !== "string") {
+    throw new Error(`${label} returned invalid ranking row ${index}: stock must be a stock object`);
+  }
+  if (typeof row.score !== "number" || !Number.isFinite(row.score)) {
+    throw new Error(`${label} returned invalid ranking row ${index}: score must be a finite number`);
+  }
+  if (typeof row.rank !== "number" || !Number.isFinite(row.rank)) {
+    throw new Error(`${label} returned invalid ranking row ${index}: rank must be a finite number`);
+  }
+  if (!isRecord(row.values)) {
+    throw new Error(`${label} returned invalid ranking row ${index}: values must be an object`);
+  }
+  return row as unknown as RankingRow;
+}
+
+export async function screenStocksRustFirst(
+  strategy: StrategyConfig,
+  stocks: Stock[],
+  pools: StockPool[],
+  factors: Factor[],
+  options: ScreenStocksOptions = {},
+  fetchImpl?: FetchLike
+): Promise<SelectionRow[]> {
+  const label = "Rust strategy screen API";
+  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const response = await request("/api/strategy/screen", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      strategy,
+      stocks,
+      pools,
+      factors,
+      resultLimit: options.resultLimit,
+      weightLimit: options.weightLimit
+    })
+  });
+  const rows = await readRustJson(response, label);
+  if (!Array.isArray(rows)) throw new Error(`${label} returned invalid selection rows`);
+  return rows.map((row, index) => selectionRowFromPayload(row, index, label));
+}
+
+function emptyBacktestResult(): BacktestResult {
+  return {
+    rows: [],
+    curve: [],
+    metrics: {
+      cumulativeReturn: 0,
+      annualReturn: 0,
+      maxDrawdown: 0,
+      sharpe: 0,
+      volatility: 0,
+      winRate: 0,
+      turnover: 0
+    },
+    yearly: [],
+    trades: []
+  };
+}
+
+function emptyOptimizationResult(strategy: StrategyConfig): StrategyOptimizationResult {
+  return {
+    candidate: strategy,
+    result: emptyBacktestResult()
+  };
 }
 
 function benchmarkReturn(benchmark: string, date: string, index: number) {
-  const base = hash(`${benchmark}-${date}`) % 100;
-  return (Math.sin(base + index / 3) * 0.012 + 0.004 + (benchmark === "中证500" ? 0.001 : 0)) * 100;
+  const robustBase = hash(`${benchmark}-${date}`) % 100;
+  return (Math.sin(robustBase + index / 3) * 0.012 + 0.004 + (benchmark.includes("500") ? 0.001 : 0)) * 100;
 }
 
 function stockReturn(row: SelectionRow, date: string, index: number) {
-  const m = row.stock.metrics;
-  const style =
-    m.momentum60 * 0.002 +
-    m.qualityScore * 0.0015 +
-    m.revenueGrowth * 0.001 -
-    m.pe * 0.0009 -
-    m.volatility20 * 0.0007 +
+  const metrics = row.stock.metrics;
+  const robustStyle =
+    (metrics.momentum60 ?? 0) * 0.002 +
+    (metrics.qualityScore ?? 0) * 0.0015 +
+    (metrics.revenueGrowth ?? 0) * 0.001 -
+    (metrics.pe ?? 0) * 0.0009 -
+    (metrics.volatility20 ?? 0) * 0.0007 +
     row.score * 0.002;
-  const noise = Math.sin(hash(`${row.stock.code}-${date}`) / 30 + index) * 1.8;
-  return clamp(style + noise, -12, 14);
+  const robustNoise = Math.sin(hash(`${row.stock.code}-${date}`) / 30 + index) * 1.8;
+  return clamp(robustStyle + robustNoise, -12, 14);
 }
 
 function timingExposure(strategy: StrategyConfig, date: string, factorMean: number) {
-  if (strategy.timing.mode === "不择时") {
+  const mode = strategy.timing.mode ?? "";
+  if (!mode || textIncludes(mode, ["不择时", "涓嶆嫨"])) {
     return 1;
   }
-  const pulse = 50 + Math.sin(hash(`${strategy.timing.index}-${date}`) / 70) * 30 + factorMean / 5;
-  if (strategy.timing.mode === "使用择时模板") {
-    if (strategy.timing.template.includes("MA60")) return pulse > 50 + strategy.timing.threshold ? 1 : 0.15;
-    if (strategy.timing.template.includes("估值")) return factorMean > 45 ? 1 : 0.25;
-    return pulse > strategy.timing.threshold ? 1 : 0.25;
+  const robustPulse = 50 + Math.sin(hash(`${strategy.timing.index}-${date}`) / 70) * 30 + factorMean / 5;
+  if (textIncludes(mode, ["使用择时模板", "浣跨敤"])) {
+    if ((strategy.timing.template ?? "").includes("MA60")) return robustPulse > 50 + strategy.timing.threshold ? 1 : 0.15;
+    if (textIncludes(strategy.timing.template, ["估值", "浼板"])) return factorMean > 45 ? 1 : 0.25;
+    return robustPulse > strategy.timing.threshold ? 1 : 0.25;
   }
-  return pulse + factorMean / 3 > 70 + strategy.timing.threshold ? 1 : 0.2;
+  return robustPulse + factorMean / 3 > 70 + strategy.timing.threshold ? 1 : 0.2;
 }
 
 export function runBacktest(
@@ -321,8 +575,12 @@ export function runBacktest(
   factors: Factor[],
   config: BacktestConfig
 ): BacktestResult {
-  const rows = screenStocks(strategy, stocks, pools, factors);
-  const dates = dateRange(config.startDate, config.endDate, Math.max(7, strategy.trading.period * 4));
+  const holdingLimit = positiveInt(strategy.trading.maxHoldings, 1);
+  const rows = screenStocks(strategy, stocks, pools, factors, {
+    resultLimit: holdingLimit,
+    weightLimit: holdingLimit
+  });
+  const dates = dateRange(config.startDate, config.endDate, Math.max(7, positiveInt(strategy.trading.period, 1) * 4));
   let strategyNet = 1;
   let benchmarkNet = 1;
   let hedgeNet = 1;
@@ -330,22 +588,23 @@ export function runBacktest(
   let maxDrawdown = 0;
   let wins = 0;
   const returns: number[] = [];
+
   const curve = dates.map((date, index) => {
-    const rawStockReturn = rows.length
-      ? rows.reduce((sum, row) => sum + stockReturn(row, date, index) * (row.weight / 100), 0)
-      : 0;
+    const rawStockReturn = rows.reduce((sum, row) => sum + stockReturn(row, date, index) * (row.weight / 100), 0);
     const factorMean = rows.length ? rows.reduce((sum, row) => sum + row.score, 0) / rows.length : 0;
     const exposure = timingExposure(strategy, date, factorMean);
-    const benchRet = benchmarkReturn(config.benchmark, date, index);
-    const hedgeImpact = strategy.hedge.enabled ? -benchRet * (strategy.hedge.ratio / 100) - strategy.hedge.cost / 100 : 0;
+    const benchmarkPeriodReturn = benchmarkReturn(config.benchmark, date, index);
+    const hedgeImpact = strategy.hedge.enabled ? -benchmarkPeriodReturn * (strategy.hedge.ratio / 100) - strategy.hedge.cost / 100 : 0;
     const costDrag = (config.cost / 1000) * (index === 0 ? 1 : 0.35);
     const periodReturn = rawStockReturn * exposure + hedgeImpact - costDrag * 100;
     strategyNet *= 1 + periodReturn / 100;
-    benchmarkNet *= 1 + benchRet / 100;
+    benchmarkNet *= 1 + benchmarkPeriodReturn / 100;
     hedgeNet *= 1 + (periodReturn - hedgeImpact) / 100;
     high = Math.max(high, strategyNet);
     maxDrawdown = Math.min(maxDrawdown, strategyNet / high - 1);
-    wins += periodReturn > benchRet ? 1 : 0;
+    if (periodReturn > benchmarkPeriodReturn) {
+      wins += 1;
+    }
     returns.push(periodReturn / 100);
     return {
       date,
@@ -355,28 +614,57 @@ export function runBacktest(
     };
   });
 
+  const returnCount = Math.max(returns.length, 1);
+  const avg = returns.reduce((sum, item) => sum + item, 0) / returnCount;
+  const volatility =
+    Math.sqrt(returns.reduce((sum, item) => sum + (item - avg) ** 2, 0) / returnCount) *
+    Math.sqrt(252 / positiveInt(strategy.trading.period, 1));
+  const start = new Date(`${config.startDate}T00:00:00`);
+  const end = new Date(`${config.endDate}T00:00:00`);
+  const years =
+    Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())
+      ? 0.1
+      : Math.max((end.getTime() - start.getTime()) / (365 * 24 * 60 * 60 * 1000), 0.1);
   const cumulativeReturn = strategyNet - 1;
-  const years = Math.max((new Date(config.endDate).getTime() - new Date(config.startDate).getTime()) / (365 * 86400000), 0.1);
-  const avg = returns.reduce((sum, item) => sum + item, 0) / Math.max(returns.length, 1);
-  const volatility = Math.sqrt(returns.reduce((sum, item) => sum + (item - avg) ** 2, 0) / Math.max(returns.length, 1)) * Math.sqrt(252 / Math.max(strategy.trading.period, 1));
   const yearlyMap = new Map<string, { startS: number; endS: number; startB: number; endB: number }>();
   curve.forEach((point) => {
     const year = point.date.slice(0, 4);
-    const existing = yearlyMap.get(year);
-    if (!existing) {
-      yearlyMap.set(year, { startS: 1, endS: point.strategy, startB: 1, endB: point.benchmark });
+    const current = yearlyMap.get(year);
+    if (current) {
+      current.endS = point.strategy;
+      current.endB = point.benchmark;
     } else {
-      existing.endS = point.strategy;
-      existing.endB = point.benchmark;
+      yearlyMap.set(year, { startS: 1, endS: point.strategy, startB: 1, endB: point.benchmark });
     }
   });
-
+  const yearly = Array.from(yearlyMap.entries()).map(([year, item]) => ({
+    year,
+    strategy: round((item.endS / item.startS - 1) * 100, 2),
+    benchmark: round((item.endB / item.startB - 1) * 100, 2),
+    excess: round((item.endS / item.startS - item.endB / item.startB) * 100, 2)
+  }));
+  const firstDate = dates[0] ?? config.startDate;
+  const lastIndex = Math.max(0, dates.length - 1);
   const trades = rows.flatMap((row, index) => {
-    const firstDate = dates[0] ?? config.startDate;
-    const rebalanceDate = dates[Math.min(index + 1, Math.max(dates.length - 1, 0))] ?? config.endDate;
+    const rebalanceDate = dates[Math.min(index + 1, lastIndex)] ?? config.endDate;
+    const price = positiveMetricValue(row.stock.metrics.price) ?? 0;
     return [
-      { date: firstDate, action: "买入" as const, code: row.stock.code, name: row.stock.name, weight: row.weight, price: row.stock.metrics.price },
-      { date: rebalanceDate, action: "调仓" as const, code: row.stock.code, name: row.stock.name, weight: row.weight, price: round(row.stock.metrics.price * (1 + row.score / 8000), 2) }
+      {
+        date: firstDate,
+        action: "\u4e70\u5165" as BacktestResult["trades"][number]["action"],
+        code: row.stock.code,
+        name: row.stock.name,
+        weight: row.weight,
+        price
+      },
+      {
+        date: rebalanceDate,
+        action: "\u8c03\u4ed3" as BacktestResult["trades"][number]["action"],
+        code: row.stock.code,
+        name: row.stock.name,
+        weight: row.weight,
+        price: round(price * (1 + row.score / 8000), 2)
+      }
     ];
   });
 
@@ -387,24 +675,41 @@ export function runBacktest(
       cumulativeReturn: round(cumulativeReturn * 100, 2),
       annualReturn: round(((1 + cumulativeReturn) ** (1 / years) - 1) * 100, 2),
       maxDrawdown: round(maxDrawdown * 100, 2),
-      sharpe: round(volatility ? (avg * (252 / Math.max(strategy.trading.period, 1))) / volatility : 0, 2),
+      sharpe: round(volatility > 0 ? (avg * (252 / positiveInt(strategy.trading.period, 1))) / volatility : 0, 2),
       volatility: round(volatility * 100, 2),
-      winRate: round((wins / Math.max(returns.length, 1)) * 100, 2),
-      turnover: round(Math.min(220, strategy.trading.maxHoldings * 9 + strategy.trading.backupCount * 5 + config.cost * 8), 2)
+      winRate: round((wins / returnCount) * 100, 2),
+      turnover: round(Math.min(220, holdingLimit * 9 + strategy.trading.backupCount * 5 + config.cost * 8), 2)
     },
-    yearly: Array.from(yearlyMap.entries()).map(([year, item]) => ({
-      year,
-      strategy: round((item.endS / item.startS - 1) * 100, 2),
-      benchmark: round((item.endB / item.startB - 1) * 100, 2),
-      excess: round((item.endS / item.startS - item.endB / item.startB) * 100, 2)
-    })),
+    yearly,
     trades
   };
 }
 
+export async function runBacktestRustFirst(
+  strategy: StrategyConfig,
+  stocks: Stock[],
+  pools: StockPool[],
+  factors: Factor[],
+  config: BacktestConfig,
+  fetchImpl?: FetchLike
+): Promise<BacktestResult> {
+  const label = "Rust strategy backtest API";
+  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const response = await request("/api/strategy/backtest", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ strategy, stocks, pools, factors, config })
+  });
+  const result = await readRustJson(response, label);
+  if (!result || !Array.isArray((result as BacktestResult).rows) || !Array.isArray((result as BacktestResult).curve)) {
+    throw new Error(`${label} returned invalid backtest result`);
+  }
+  return result as BacktestResult;
+}
+
 export function rankingAnalysis(strategy: StrategyConfig, stocks: Stock[], pools: StockPool[], factors: Factor[]): RankingRow[] {
-  const codes = new Set(poolCodes(strategy.poolId, pools).map(normalizeStockCodeKey));
-  const universe = stocks.filter((stock) => poolHasStock(codes, stock)).filter((stock) => applySelector(strategy, stock));
+  const primaryCodes = poolCodeSet(strategy.poolId || "all", pools, stocks, factors);
+  const universe = stocks.filter((stock) => poolHasStock(primaryCodes, stock)).filter((stock) => applySelector(strategy, stock));
   const rows = scoreRows(
     universe.map((stock) => ({ stock, passedFilters: 0 })),
     strategy.ranks,
@@ -418,22 +723,74 @@ export function rankingAnalysis(strategy: StrategyConfig, stocks: Stock[], pools
   }));
 }
 
+export async function rankingAnalysisRustFirst(
+  strategy: StrategyConfig,
+  stocks: Stock[],
+  pools: StockPool[],
+  factors: Factor[],
+  fetchImpl?: FetchLike
+): Promise<RankingRow[]> {
+  const label = "Rust strategy rank API";
+  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const response = await request("/api/strategy/rank", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ strategy, stocks, pools, factors })
+  });
+  const rows = await readRustJson(response, label);
+  if (!Array.isArray(rows)) throw new Error(`${label} returned invalid ranking rows`);
+  return rows.map((row, index) => rankingRowFromPayload(row, index, label));
+}
+
 export function optimizeStrategy(
   strategy: StrategyConfig,
   stocks: Stock[],
   pools: StockPool[],
   factors: Factor[],
   config: BacktestConfig
-) {
-  const candidates = [6, 8, 10, 12, 15].map((maxHoldings) => ({
-    ...strategy,
-    trading: { ...strategy.trading, maxHoldings }
-  }));
-  const scored = candidates
-    .map((candidate) => ({
+): StrategyOptimizationResult {
+  const candidates = Array.from(new Set([positiveInt(strategy.trading.maxHoldings, 10), 6, 8, 10, 12, 15])).map((maxHoldings) => {
+    const candidate = {
+      ...strategy,
+      trading: {
+        ...strategy.trading,
+        maxHoldings
+      }
+    };
+    return {
       candidate,
       result: runBacktest(candidate, stocks, pools, factors, config)
-    }))
-    .sort((a, b) => b.result.metrics.sharpe - a.result.metrics.sharpe);
-  return scored[0];
+    };
+  });
+  return candidates.reduce<StrategyOptimizationResult | null>((best, current) => {
+    if (!best || current.result.metrics.sharpe > best.result.metrics.sharpe) {
+      return current;
+    }
+    return best;
+  }, null) ?? {
+    candidate: strategy,
+    result: runBacktest(strategy, stocks, pools, factors, config)
+  };
+}
+
+export async function optimizeStrategyRustFirst(
+  strategy: StrategyConfig,
+  stocks: Stock[],
+  pools: StockPool[],
+  factors: Factor[],
+  config: BacktestConfig,
+  fetchImpl?: FetchLike
+): Promise<StrategyOptimizationResult> {
+  const label = "Rust strategy optimize API";
+  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const response = await request("/api/strategy/optimize", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ strategy, stocks, pools, factors, config })
+  });
+  const result = await readRustJson(response, label);
+  if (!(result as StrategyOptimizationResult)?.candidate || !(result as StrategyOptimizationResult)?.result?.metrics) {
+    throw new Error(`${label} returned invalid optimization result`);
+  }
+  return result as StrategyOptimizationResult;
 }

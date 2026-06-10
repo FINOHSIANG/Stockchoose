@@ -1,5 +1,8 @@
 ﻿import type { NewsArticle, NewsCategory, NewsImportance, NewsSentiment } from "./newsPageServices";
+import type { NewsAnalysisModelSettings } from "./newsAnalysisModelServices";
 import type { Stock } from "./types";
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export type SentimentCategory = "政策监管" | "财报业绩" | "订单合同" | "产品技术" | "供需价格" | "产业链事件" | "风险负面" | "资金市场";
 export type SentimentDirection = "利好" | "利空" | "中性" | "不确定";
@@ -74,6 +77,11 @@ export interface SentimentInsightReport {
   validationPoints: string[];
 }
 
+export interface SentimentAnalysisResult {
+  linkedStocks: SentimentLinkedStock[];
+  report: SentimentInsightReport;
+}
+
 const round = (value: number, precision = 2) => {
   const scale = 10 ** precision;
   return Math.round(value * scale) / scale;
@@ -120,6 +128,8 @@ const newsImportanceToSeverity: Record<NewsImportance, SentimentSeverity> = {
 const severePositiveWords = ["重大", "中标", "回购", "增持", "获批", "签约", "高增长", "分红", "突破", "创新高"];
 const severeNegativeWords = ["退市", "处罚", "调查", "减持", "亏损", "违约", "终止", "立案", "风险警示", "下修"];
 const genericIndustryLabels = new Set(["未分类", "腾讯行情", "其他", "--", ""]);
+const RUST_SENTIMENT_EVENTS_URL = "/api/sentiment/events";
+const RUST_SENTIMENT_ANALYSIS_URL = "/api/sentiment/analysis";
 
 function clampScore(value: number, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
@@ -175,32 +185,149 @@ function scoreArticleSignals(article: NewsArticle) {
   return { sourceWeight, impact, relevance, confidence, novelty, persistence, riskPenalty };
 }
 
-export function buildSentimentEventsFromNewsArticles(articles: NewsArticle[], stocks: Stock[]): SentimentEvent[] {
-  return articles
-    .filter((article) => article.title.trim())
-    .map((article, index) => {
-      const signals = scoreArticleSignals(article);
-      const text = articleText(article);
-      const direction = newsSentimentToDirection[article.sentiment] ?? "不确定";
-      const hasSevereRisk = severeNegativeWords.some((word) => text.includes(word));
-      return {
-        id: `real-news-${article.id || index}`,
-        title: article.title,
-        summary: article.summary || article.title,
-        category: hasSevereRisk ? "风险负面" : newsCategoryToSentimentCategory[article.category] ?? "资金市场",
-        direction,
-        horizon: inferEventHorizon(article),
-        severity: hasSevereRisk ? "重大" : newsImportanceToSeverity[article.importance] ?? "一般",
-        occurredAt: article.publishedAt,
-        source: article.source,
-        ...signals,
-        industries: resolveArticleIndustries(article, stocks),
-        keywords: uniqueArticleKeywords(article),
-        linkedCodes: uniqueTexts(article.linkedCodes)
-      } satisfies SentimentEvent;
-    })
-    .filter((event) => event.linkedCodes.length > 0 || event.industries.length > 0)
-    .sort((a, b) => scoreSentimentEvent(b) - scoreSentimentEvent(a));
+export function buildSentimentEventsFromNewsArticles(_articles: NewsArticle[], _stocks: Stock[]): SentimentEvent[] {
+  return [];
+}
+
+function validSentimentEventsFromPayload(payload: unknown): SentimentEvent[] | null {
+  const rows = Array.isArray((payload as { events?: unknown })?.events)
+    ? (payload as { events: unknown[] }).events
+    : null;
+  if (!rows) return null;
+  return rows.filter((row): row is SentimentEvent => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const event = row as Partial<SentimentEvent>;
+    return Boolean(
+      event.id &&
+        event.title &&
+        event.occurredAt &&
+        Array.isArray(event.industries) &&
+        Array.isArray(event.keywords) &&
+        Array.isArray(event.linkedCodes) &&
+        typeof event.impact === "number" &&
+        typeof event.relevance === "number"
+    );
+  });
+}
+
+export function createEmptySentimentAnalysis(events: SentimentEvent[] = []): SentimentAnalysisResult {
+  return {
+    linkedStocks: [],
+    report: {
+      title: "舆情关联股票洞察",
+      conclusion: events.length ? "Rust 舆情分析接口未返回有效关联股票。" : "当前没有可分析的真实新闻事件。",
+      eventCount: events.length,
+      topCategories: [],
+      topIndustries: [],
+      linkedStocks: [],
+      riskEvents: [],
+      validationPoints: [
+        "舆情事件、股票关联和洞察报告由 Rust 数据接口生成。",
+        "接口不可用或返回结构无效时不使用前端本地算法补齐结果。"
+      ]
+    }
+  };
+}
+
+function sentimentAnalysisModelPayload(settings: NewsAnalysisModelSettings | undefined) {
+  if (!settings?.enabled) return undefined;
+  return {
+    enabled: settings.enabled,
+    provider: settings.provider,
+    baseUrl: settings.baseUrl,
+    apiKey: settings.apiKey,
+    model: settings.model,
+    timeoutSeconds: settings.timeoutSeconds,
+    maxTokens: settings.maxTokens,
+    temperature: settings.temperature,
+    systemPrompt: settings.systemPrompt,
+    tasks: Object.entries(settings.tasks)
+      .filter(([, enabled]) => enabled)
+      .map(([key]) => key)
+  };
+}
+
+function validSentimentAnalysisFromPayload(payload: unknown): SentimentAnalysisResult | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const linkedStocks = (payload as { linkedStocks?: unknown }).linkedStocks;
+  const report = (payload as { report?: unknown }).report;
+  if (!Array.isArray(linkedStocks) || !report || typeof report !== "object" || Array.isArray(report)) return null;
+  const candidate = report as Partial<SentimentInsightReport>;
+  if (
+    typeof candidate.title !== "string" ||
+    typeof candidate.conclusion !== "string" ||
+    typeof candidate.eventCount !== "number" ||
+    !Array.isArray(candidate.topCategories) ||
+    !Array.isArray(candidate.topIndustries) ||
+    !Array.isArray(candidate.linkedStocks) ||
+    !Array.isArray(candidate.riskEvents) ||
+    !Array.isArray(candidate.validationPoints)
+  ) {
+    return null;
+  }
+  return {
+    linkedStocks: linkedStocks as SentimentLinkedStock[],
+    report: candidate as SentimentInsightReport
+  };
+}
+
+export async function buildSentimentEventsRustFirst(articles: NewsArticle[], stocks: Stock[], fetchImpl?: FetchLike): Promise<SentimentEvent[]> {
+  const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust sentiment API unavailable: fetch is not available");
+
+  const response = await request(RUST_SENTIMENT_EVENTS_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ articles, stocks })
+  });
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
+    throw new Error(`Rust sentiment API HTTP ${response.status}${suffix}`);
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`Rust sentiment API returned invalid JSON: ${detail}`);
+  }
+  const events = validSentimentEventsFromPayload(payload);
+  if (!events) throw new Error("Rust sentiment API returned invalid sentiment events");
+  return events;
+}
+
+export async function buildSentimentAnalysisRustFirst(
+  events: SentimentEvent[],
+  stocks: Stock[],
+  analysisModelOrFetch?: NewsAnalysisModelSettings | FetchLike,
+  fetchImpl?: FetchLike
+): Promise<SentimentAnalysisResult> {
+  const analysisModel = typeof analysisModelOrFetch === "function" ? undefined : analysisModelOrFetch;
+  const request = (typeof analysisModelOrFetch === "function" ? analysisModelOrFetch : fetchImpl) ?? (typeof fetch === "function" ? fetch : undefined);
+  if (!request) throw new Error("Rust sentiment analysis API unavailable: fetch is not available");
+  const analysisModelPayload = sentimentAnalysisModelPayload(analysisModel);
+
+  const response = await request(RUST_SENTIMENT_ANALYSIS_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ events, stocks, ...(analysisModelPayload ? { analysisModel: analysisModelPayload } : {}) })
+  });
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
+    throw new Error(`Rust sentiment analysis API HTTP ${response.status}${suffix}`);
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid JSON";
+    throw new Error(`Rust sentiment analysis API returned invalid JSON: ${detail}`);
+  }
+  const analysis = validSentimentAnalysisFromPayload(payload);
+  if (!analysis) throw new Error("Rust sentiment analysis API returned invalid analysis payload");
+  return analysis;
 }
 
 export function scoreSentimentEvent(event: SentimentEvent) {
@@ -373,83 +500,12 @@ function mergeDirection(events: SentimentEvent[]): SentimentDirection {
   return events[0]?.direction ?? "不确定";
 }
 
-export function buildSentimentRecommendations(events: SentimentEvent[], stocks: Stock[]) {
-  const byCode = new Map<string, EventStockMatch[]>();
-  events.forEach((event) => {
-    stocks.forEach((stock) => {
-      const match = calculateEventStockMatch(event, stock);
-      if (!shouldKeepStockMatch(match)) return;
-      byCode.set(stock.code, [...(byCode.get(stock.code) ?? []), match]);
-    });
-  });
-
-  return Array.from(byCode.entries())
-    .map(([code, matches]) => {
-      const stock = stocks.find((item) => item.code === code);
-      if (!stock) return null;
-      const linkedEvents = matches.map((match) => match.event);
-      const weightedTotal = matches.reduce((sum, match) => sum + scoreSentimentEvent(match.event) * (0.7 + match.matchScore / 100), 0);
-      const weightBase = matches.reduce((sum, match) => sum + 0.7 + match.matchScore / 100, 0);
-      const eventScore = weightedTotal / Math.max(weightBase, 1);
-      const matchScore = matches.reduce((sum, match) => sum + match.matchScore, 0) / matches.length;
-      const direction = mergeDirection(linkedEvents);
-      const negativeCount = linkedEvents.filter((event) => event.direction === "利空").length;
-      const weakMatchPenalty = matches.filter((match) => match.matchScore < 50).length * 3;
-      const score = round(Math.max(0, Math.min(100, eventScore * 0.64 + matchScore * 0.36 + stockScoreBoost(stock) * 0.5 - negativeCount * 10 - weakMatchPenalty)), 2);
-      const topMatch = [...matches].sort((a, b) => b.matchScore + scoreSentimentEvent(b.event) / 10 - (a.matchScore + scoreSentimentEvent(a.event) / 10))[0];
-      const topEvent = topMatch.event;
-      const risk = negativeCount > 0 || (stock.metrics.volatility20 ?? 0) > 45 || matchScore < 48 ? "高" : score >= 78 && matchScore >= 62 ? "低" : "中";
-      const evidence = uniqueTexts(matches.flatMap((match) => match.evidence)).slice(0, 5);
-      const roundedMatchScore = round(matchScore, 1);
-      return {
-        stock,
-        events: linkedEvents,
-        score,
-        direction,
-        reason: `${topEvent.category}：${topEvent.summary}｜关联证据：${evidence.slice(0, 3).join("、")}`,
-        risk,
-        tags: Array.from(new Set(linkedEvents.flatMap((event) => [event.category, ...event.keywords.slice(0, 2)]))).slice(0, 4),
-        matchScore: roundedMatchScore,
-        matchLevel: relationMatchLevel(roundedMatchScore, matches.some((match) => match.direct)),
-        evidence
-      } satisfies SentimentRecommendation;
-    })
-    .filter((item): item is SentimentRecommendation => Boolean(item))
-    .sort((a, b) => b.score - a.score);
+export function buildSentimentRecommendations(_events: SentimentEvent[], _stocks: Stock[]): SentimentRecommendation[] {
+  return [];
 }
 
-export function buildSentimentLinkedStocks(events: SentimentEvent[], stocks: Stock[]) {
-  const byCode = new Map<string, EventStockMatch[]>();
-  events.forEach((event) => {
-    stocks.forEach((stock) => {
-      const match = calculateEventStockMatch(event, stock);
-      if (!shouldKeepStockMatch(match)) return;
-      byCode.set(stock.code, [...(byCode.get(stock.code) ?? []), match]);
-    });
-  });
-
-  return Array.from(byCode.entries())
-    .map(([code, matches]) => {
-      const stock = stocks.find((item) => item.code === code);
-      if (!stock) return null;
-      const linkedEvents = matches.map((match) => match.event);
-      const relationScore = round(matches.reduce((sum, match) => sum + match.matchScore, 0) / matches.length, 1);
-      const topMatch = [...matches].sort((a, b) => b.matchScore + scoreSentimentEvent(b.event) / 10 - (a.matchScore + scoreSentimentEvent(a.event) / 10))[0];
-      const topEvent = topMatch.event;
-      const evidence = uniqueTexts(matches.flatMap((match) => match.evidence)).slice(0, 5);
-      return {
-        stock,
-        events: linkedEvents,
-        direction: mergeDirection(linkedEvents),
-        relationScore,
-        relationLevel: relationMatchLevel(relationScore, matches.some((match) => match.direct)),
-        reason: `${topEvent.category}：${topEvent.summary}`,
-        evidence,
-        tags: Array.from(new Set(linkedEvents.flatMap((event) => [event.category, ...event.keywords.slice(0, 2)]))).slice(0, 4)
-      } satisfies SentimentLinkedStock;
-    })
-    .filter((item): item is SentimentLinkedStock => Boolean(item))
-    .sort((a, b) => b.relationScore - a.relationScore || scoreSentimentEvent(b.events[0]) - scoreSentimentEvent(a.events[0]));
+export function buildSentimentLinkedStocks(_events: SentimentEvent[], _stocks: Stock[]): SentimentLinkedStock[] {
+  return [];
 }
 
 function topCounts<T extends string>(items: T[], limit: number) {
@@ -461,28 +517,7 @@ function topCounts<T extends string>(items: T[], limit: number) {
     .slice(0, limit);
 }
 
-export function buildSentimentInsightReport(events: SentimentEvent[], linkedStocks: SentimentLinkedStock[]): SentimentInsightReport {
-  const topCategories = topCounts(events.map((event) => event.category), 3).map(({ item, count }) => ({ category: item, count }));
-  const topIndustries = topCounts(events.flatMap((event) => event.industries), 5).map(({ item, count }) => ({ industry: item, count }));
-  const topLinkedStocks = linkedStocks.slice(0, 5);
-  const riskEvents = events.filter((event) => event.direction === "利空" || event.category === "风险负面");
-  const strongest = topLinkedStocks[0];
-  return {
-    title: "舆情关联股票洞察",
-    conclusion: strongest
-      ? `当前高价值事件集中在${topIndustries[0]?.industry ?? "核心行业"}，${strongest.stock.name}与${strongest.events[0].category}事件存在${strongest.relationLevel}关联。`
-      : "当前筛选条件下没有形成明确的股票关联关系。",
-    eventCount: events.length,
-    topCategories,
-    topIndustries,
-    linkedStocks: topLinkedStocks,
-    riskEvents,
-    validationPoints: [
-      "核对事件是否来自公告、政策原文或多家权威媒体交叉确认。",
-      "观察事件后 1-3 个交易日成交额、换手率和相对强弱是否同步放大。",
-      "当前列表只表达新闻与股票的关联关系，不构成买入、卖出或持仓建议。",
-      "对利空事件单独核查公告原文，避免把短期风险误判为机会。"
-    ]
-  };
+export function buildSentimentInsightReport(events: SentimentEvent[], _linkedStocks: SentimentLinkedStock[]): SentimentInsightReport {
+  return createEmptySentimentAnalysis(events).report;
 }
 

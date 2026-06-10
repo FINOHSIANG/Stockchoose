@@ -1,6 +1,5 @@
 ﻿import type { Stock } from "./types";
-import { isAnnouncementNewsSource, type NewsSourceEndpoint } from "./newsSourceServices";
-import { displayStockCode } from "./stockIdentity";
+import type { NewsSourceEndpoint } from "./newsSourceServices";
 
 // --- Types ---
 
@@ -86,13 +85,7 @@ export const defaultNewsPageState: NewsPageState = {
   pageSize: 20
 };
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-
-interface GdeltArticleRow {
-  url?: string;
-  title?: string;
-  seendate?: string;
-  domain?: string;
-}
+const RUST_NEWS_ARTICLES_URL = "/api/news/articles";
 
 export interface NewsArticleFetchResult {
   ok: boolean;
@@ -102,6 +95,7 @@ export interface NewsArticleFetchResult {
   articles: NewsArticle[];
   sourceRows: number;
   stats: NewsFetchStats;
+  sourceDiagnostics: NewsSourceDiagnostic[];
 }
 
 export interface NewsArticleFetchOptions {
@@ -117,9 +111,18 @@ export interface NewsFetchStats {
   validArticles: number;
 }
 
+export interface NewsSourceDiagnostic {
+  sourceId: string;
+  sourceName: string;
+  provider: string;
+  fallbackSource?: string;
+  fallbackReason?: string;
+}
+
 interface NewsSourceFetchResult {
   articles: NewsArticle[];
   stats: NewsFetchStats;
+  sourceDiagnostics: NewsSourceDiagnostic[];
 }
 
 export const newsFetchModeOptions: Array<{ value: NewsFetchMode; label: string; description: string }> = [
@@ -140,123 +143,196 @@ function emptyNewsFetchStats(mode: NewsFetchMode): NewsFetchStats {
   return { ...defaultNewsFetchStats, mode };
 }
 
-function mergeNewsFetchStats(items: NewsFetchStats[], mode: NewsFetchMode): NewsFetchStats {
-  return items.reduce(
-    (sum, item) => ({
-      mode,
-      scannedStocks: sum.scannedStocks + item.scannedStocks,
-      requestCount: sum.requestCount + item.requestCount,
-      returnedRows: sum.returnedRows + item.returnedRows,
-      validArticles: sum.validArticles + item.validArticles
-    }),
-    emptyNewsFetchStats(mode)
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-const positiveWords = ["利好", "增长", "创新高", "中标", "回购", "增持", "支持", "突破", "上涨", "扩产", "获批", "签约"];
-const negativeWords = ["利空", "下跌", "承压", "风险", "处罚", "调查", "亏损", "减持", "违约", "退市", "下修", "终止"];
-
-const categoryRules: Array<{ category: NewsCategory; words: string[] }> = [
-  { category: "公司公告", words: ["公告", "回购", "增持", "减持", "股东", "董事会", "分红"] },
-  { category: "财报业绩", words: ["财报", "业绩", "净利润", "营收", "利润", "预告"] },
-  { category: "宏观政策", words: ["国务院", "央行", "证监会", "发改委", "政策", "通知", "规划", "会议"] },
-  { category: "国际财经", words: ["美联储", "美元", "美国", "欧洲", "全球", "海外"] },
-  { category: "基金持仓", words: ["基金", "ETF", "持仓", "北向", "外资"] },
-  { category: "产业链", words: ["产业链", "订单", "招标", "供需", "价格", "产能"] }
-];
-
-const stripHtml = (value: string) => value.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-const withQueryParams = (baseUrl: string, params: URLSearchParams) => `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}${params.toString()}`;
-
-function inferNewsCategory(text: string): NewsCategory {
-  return categoryRules.find((rule) => rule.words.some((word) => text.includes(word)))?.category ?? "市场评论";
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function inferNewsSentiment(text: string): NewsSentiment {
-  const positive = positiveWords.some((word) => text.includes(word));
-  const negative = negativeWords.some((word) => text.includes(word));
-  if (positive && !negative) return "利好";
-  if (negative && !positive) return "利空";
-  return "中性";
+function requireString(row: Record<string, unknown>, key: keyof NewsArticle, index: number, allowEmpty = true) {
+  const value = row[key];
+  if (typeof value !== "string" || (!allowEmpty && !value.trim())) {
+    throw new Error(`Rust news API returned invalid article row ${index}: ${String(key)} must be a string`);
+  }
+  return value;
 }
 
-function inferNewsImportance(text: string, index: number): NewsImportance {
-  if (index < 3 || ["国务院", "央行", "证监会", "重大", "突发"].some((word) => text.includes(word))) return "头条";
-  if (index < 10 || ["公告", "业绩", "政策", "回购", "风险"].some((word) => text.includes(word))) return "重要";
-  return "一般";
+function requireNumber(row: Record<string, unknown>, key: keyof NewsArticle, index: number) {
+  const value = row[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Rust news API returned invalid article row ${index}: ${String(key)} must be a finite number`);
+  }
+  return value;
 }
 
-function matchLinkedStocks(text: string, stocks: Stock[]) {
-  const upperText = text.toUpperCase();
-  return stocks
-    .filter((stock) => upperText.includes(stock.name.toUpperCase()) || upperText.includes(stock.code) || upperText.includes(displayStockCode(stock)))
-    .slice(0, 8)
-    .map((stock) => ({ code: stock.code, name: stock.name }));
+function requireStringArray(row: Record<string, unknown>, key: keyof NewsArticle, index: number) {
+  const value = row[key];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`Rust news API returned invalid article row ${index}: ${String(key)} must be a string array`);
+  }
+  return value;
 }
 
-function inferIndustries(text: string, stocks: Stock[], linkedStocks: Array<{ code: string; name: string }>) {
-  const linkedCodes = new Set(linkedStocks.map((stock) => stock.code));
-  const stockIndustries = stocks.filter((stock) => linkedCodes.has(stock.code)).map((stock) => stock.industry1);
-  const mentionedIndustries = Array.from(new Set(stocks.map((stock) => stock.industry1))).filter((industry) => text.includes(industry));
-  return Array.from(new Set([...stockIndustries, ...mentionedIndustries])).slice(0, 6);
+function requireLinkedStocks(row: Record<string, unknown>, index: number) {
+  const value = row.linkedStocks;
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => !isRecord(item) || typeof item.code !== "string" || typeof item.name !== "string")
+  ) {
+    throw new Error(`Rust news API returned invalid article row ${index}: linkedStocks must be stock references`);
+  }
+  return value as Array<{ code: string; name: string }>;
 }
 
-function buildArticleFromGdelt(row: GdeltArticleRow, source: NewsSourceEndpoint, stocks: Stock[], index: number): NewsArticle | null {
-  const title = stripHtml(row.title ?? "");
-  if (!title || !row.url) return null;
-  const linkedStocks = matchLinkedStocks(title, stocks);
-  const industries = inferIndustries(title, stocks, linkedStocks);
-  const category = inferNewsCategory(title);
-  const sentiment = inferNewsSentiment(title);
+function optionalString(row: Record<string, unknown>, key: string, context: string) {
+  const value = row[key];
+  if (value == null) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`Rust news API returned invalid ${context}: ${key} must be a string when provided`);
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function newsArticleFromPayloadRow(row: unknown, index: number): NewsArticle {
+  if (!isRecord(row)) throw new Error(`Rust news API returned invalid article row ${index}: row must be an object`);
   return {
-    id: `${source.id}-${index}-${row.url}`,
-    title,
-    summary: title,
-    content: title,
-    source: row.domain || source.name,
-    sourceIcon: (row.domain || source.name).slice(0, 1).toUpperCase(),
-    category,
-    sentiment,
-    importance: inferNewsImportance(title, index),
-    status: "unread",
-    publishedAt: row.seendate || new Date().toISOString(),
-    fetchedAt: new Date().toISOString(),
-    url: row.url,
-    imageUrl: "",
-    author: row.domain || source.name,
-    readTime: 1,
-    linkedCodes: linkedStocks.map((stock) => stock.code),
-    linkedStocks,
-    industries,
-    tags: Array.from(new Set([category, sentiment, ...industries])).slice(0, 6),
-    viewCount: 0,
-    commentCount: 0
+    id: requireString(row, "id", index, false),
+    title: requireString(row, "title", index, false),
+    summary: requireString(row, "summary", index),
+    content: requireString(row, "content", index),
+    source: requireString(row, "source", index, false),
+    sourceIcon: requireString(row, "sourceIcon", index),
+    category: requireString(row, "category", index, false) as NewsCategory,
+    sentiment: requireString(row, "sentiment", index, false) as NewsSentiment,
+    importance: requireString(row, "importance", index, false) as NewsImportance,
+    status: requireString(row, "status", index, false) as NewsStatus,
+    publishedAt: requireString(row, "publishedAt", index, false),
+    fetchedAt: requireString(row, "fetchedAt", index),
+    url: requireString(row, "url", index, false),
+    imageUrl: requireString(row, "imageUrl", index),
+    author: requireString(row, "author", index),
+    readTime: requireNumber(row, "readTime", index),
+    linkedCodes: requireStringArray(row, "linkedCodes", index),
+    linkedStocks: requireLinkedStocks(row, index),
+    industries: requireStringArray(row, "industries", index),
+    tags: requireStringArray(row, "tags", index),
+    viewCount: requireNumber(row, "viewCount", index),
+    commentCount: requireNumber(row, "commentCount", index)
   };
 }
 
-async function fetchGdeltNews(source: NewsSourceEndpoint, stocks: Stock[], fetchImpl: FetchLike, mode: NewsFetchMode): Promise<NewsSourceFetchResult> {
-  const params = new URLSearchParams({
-    query: source.query || "A股 OR 中国上市公司",
-    mode: "ArtList",
-    format: "json",
-    maxrecords: String(Math.min(Math.max(source.maxItems || 50, 1), 100)),
-    sort: "HybridRel"
+function rustNewsStatsFromPayload(payload: unknown, mode: NewsFetchMode): NewsFetchStats {
+  if (!isRecord(payload) || !isRecord(payload.stats)) {
+    throw new Error("Rust news API returned invalid stats payload");
+  }
+  const stats = payload.stats;
+  const statNumber = (key: keyof Omit<NewsFetchStats, "mode">) => {
+    const value = stats[key];
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      throw new Error(`Rust news API returned invalid stats payload: ${key} must be a non-negative number`);
+    }
+    return parsed;
+  };
+  return {
+    mode,
+    scannedStocks: statNumber("scannedStocks"),
+    requestCount: statNumber("requestCount"),
+    returnedRows: statNumber("returnedRows"),
+    validArticles: statNumber("validArticles")
+  };
+}
+
+function newsArticlesFromPayload(payload: unknown): NewsArticle[] {
+  if (!isRecord(payload)) throw new Error("Rust news API returned invalid payload: root must be an object");
+  if (!Array.isArray(payload.articles)) throw new Error("Rust news API returned invalid payload: articles must be an array");
+  return payload.articles.map(newsArticleFromPayloadRow);
+}
+
+function newsSourceDiagnosticsFromPayload(payload: unknown): NewsSourceDiagnostic[] {
+  if (!isRecord(payload)) throw new Error("Rust news API returned invalid payload: root must be an object");
+  const diagnostics = payload.sourceDiagnostics;
+  if (diagnostics == null) return [];
+  if (!Array.isArray(diagnostics)) {
+    throw new Error("Rust news API returned invalid payload: sourceDiagnostics must be an array");
+  }
+  return diagnostics.map((item, index) => {
+    if (!isRecord(item)) throw new Error(`Rust news API returned invalid source diagnostic ${index}: row must be an object`);
+    const context = `source diagnostic ${index}`;
+    const sourceId = optionalString(item, "sourceId", context);
+    const sourceName = optionalString(item, "sourceName", context);
+    const provider = optionalString(item, "provider", context);
+    if (!sourceId || !sourceName || !provider) {
+      throw new Error(`Rust news API returned invalid source diagnostic ${index}: sourceId, sourceName and provider are required`);
+    }
+    return {
+      sourceId,
+      sourceName,
+      provider,
+      fallbackSource: optionalString(item, "fallbackSource", context),
+      fallbackReason: optionalString(item, "fallbackReason", context)
+    };
   });
-  const response = await fetchImpl(withQueryParams(`${source.baseUrl.replace(/\/$/, "")}/doc/doc`, params));
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const payload = await response.json();
-  const rows = Array.isArray(payload?.articles) ? payload.articles as GdeltArticleRow[] : [];
-  const articles = rows.map((row, index) => buildArticleFromGdelt(row, source, stocks, index)).filter((article): article is NewsArticle => Boolean(article));
+}
+
+async function responseErrorSuffix(response: Response) {
+  const detail = await response.text().catch(() => "");
+  const trimmed = detail.trim();
+  return trimmed ? `: ${trimmed.slice(0, 300)}` : "";
+}
+
+async function responseJson(response: Response) {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new Error(`Rust news API returned invalid JSON: ${errorMessage(error)}`);
+  }
+}
+
+async function fetchRustNewsArticles(
+  sources: NewsSourceEndpoint[],
+  stocks: Stock[],
+  fetchImpl: FetchLike,
+  mode: NewsFetchMode
+): Promise<NewsSourceFetchResult> {
+  const response = await fetchImpl(RUST_NEWS_ARTICLES_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sources, stocks, mode })
+  });
+  if (!response.ok) throw new Error(`Rust news API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  const payload = await responseJson(response);
+  const articles = newsArticlesFromPayload(payload);
+  const sourceDiagnostics = newsSourceDiagnosticsFromPayload(payload);
   return {
     articles,
+    sourceDiagnostics,
     stats: {
-      mode,
-      scannedStocks: 0,
-      requestCount: 1,
-      returnedRows: rows.length,
+      ...rustNewsStatsFromPayload(payload, mode),
       validArticles: articles.length
     }
   };
+}
+
+function newsFallbackSourceLabel(source: string) {
+  const normalized = source.trim().toLowerCase();
+  if (normalized === "eastmoney") return "东方财富";
+  return source;
+}
+
+function newsSourceDiagnosticsSummary(diagnostics: NewsSourceDiagnostic[]) {
+  const fallbackDiagnostics = diagnostics.filter((diagnostic) => diagnostic.fallbackSource);
+  if (!fallbackDiagnostics.length) return "";
+  return fallbackDiagnostics
+    .map((diagnostic) => {
+      const target = newsFallbackSourceLabel(diagnostic.fallbackSource ?? "");
+      const reason = diagnostic.fallbackReason ? `，原因：${diagnostic.fallbackReason}` : "";
+      return `${diagnostic.sourceName || diagnostic.provider} 失败，Rust 已切换 ${target} 真实新闻源${reason}`;
+    })
+    .join("；");
 }
 
 export async function fetchNewsArticlesFromSources(
@@ -267,66 +343,64 @@ export async function fetchNewsArticlesFromSources(
 ): Promise<NewsArticleFetchResult> {
   const checkedAt = new Date().toISOString();
   const mode = options.mode ?? "fast";
-  const realSources = sources.filter((source) => source.enabled && source.provider !== "本地舆情样本" && !isAnnouncementNewsSource(source));
+  const realSources = sources.filter((source) => source.enabled && source.provider !== "本地舆情样本");
   if (!realSources.length) {
     return {
       ok: false,
       checkedAt,
       message: "新闻刷新失败",
-      details: "未启用可用真实新闻源；公告源已停用，请在设置中启用 GDELT 2.1、NewsAPI 或自定义新闻接口",
+      details: "未启用可用真实新闻源；请在设置中启用 GDELT 2.1、腾讯证券公告、NewsAPI 或自定义新闻接口",
       articles: [],
       sourceRows: 0,
-      stats: emptyNewsFetchStats(mode)
+      stats: emptyNewsFetchStats(mode),
+      sourceDiagnostics: []
     };
   }
 
-  const articles: NewsArticle[] = [];
-  const sourceStats: NewsFetchStats[] = [];
-  const errors: string[] = [];
-  for (const source of realSources) {
-    try {
-      const result =
-        source.provider === "GDELT 2.1"
-          ? await fetchGdeltNews(source, stocks, fetchImpl, mode)
-          : { articles: [], stats: emptyNewsFetchStats(mode) };
-      articles.push(...result.articles);
-      sourceStats.push(result.stats);
-    } catch (error) {
-      errors.push(`${source.name}：${error instanceof Error ? error.message : "未知错误"}`);
-      sourceStats.push({
-        ...emptyNewsFetchStats(mode),
-        requestCount: source.provider === "GDELT 2.1" || source.provider === "NewsAPI" || source.provider === "自定义 RSS" || source.provider === "自定义 REST" ? 1 : 0
-      });
+  try {
+    const rustResult = await fetchRustNewsArticles(realSources, stocks, fetchImpl, mode);
+    if (rustResult.articles.length) {
+      const deduped = Array.from(new Map(rustResult.articles.map((article) => [article.id || article.url, article])).values()).sort(
+        (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
+      );
+      const modeLabel = newsFetchModeOptions.find((option) => option.value === mode)?.label ?? "快速";
+      const diagnosticsSummary = newsSourceDiagnosticsSummary(rustResult.sourceDiagnostics);
+      return {
+        ok: true,
+        checkedAt,
+        message: "新闻刷新完成",
+        details: `已按${modeLabel}模式从 Rust 新闻接口拉取 ${deduped.length} 条真实新闻${diagnosticsSummary ? `；${diagnosticsSummary}` : ""}`,
+        articles: deduped,
+        sourceRows: deduped.length,
+        stats: {
+          ...rustResult.stats,
+          validArticles: deduped.length
+        },
+        sourceDiagnostics: rustResult.sourceDiagnostics
+      };
     }
-  }
-
-  const stats = mergeNewsFetchStats(sourceStats, mode);
-  const deduped = Array.from(new Map(articles.map((article) => [article.id || article.url, article])).values()).sort(
-    (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
-  );
-  stats.validArticles = deduped.length;
-  if (!deduped.length) {
     return {
       ok: false,
       checkedAt,
       message: "新闻刷新失败",
-      details: errors.join("；") || "真实新闻源未返回有效新闻",
+      details: "Rust 新闻接口未返回有效新闻；当前不再使用浏览器端采集解析",
       articles: [],
       sourceRows: 0,
-      stats
+      stats: rustResult.stats,
+      sourceDiagnostics: rustResult.sourceDiagnostics
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      checkedAt,
+      message: "新闻刷新失败",
+      details: `Rust 新闻接口请求失败：${error instanceof Error ? error.message : "未知错误"}`,
+      articles: [],
+      sourceRows: 0,
+      stats: emptyNewsFetchStats(mode),
+      sourceDiagnostics: []
     };
   }
-
-  const modeLabel = newsFetchModeOptions.find((option) => option.value === mode)?.label ?? "快速";
-  return {
-    ok: true,
-    checkedAt,
-    message: "新闻刷新完成",
-    details: `已按${modeLabel}模式从 ${realSources.map((source) => source.name).join("、")} 拉取 ${deduped.length} 条真实新闻`,
-    articles: deduped,
-    sourceRows: deduped.length,
-    stats
-  };
 }
 
 // --- Utility functions ---
