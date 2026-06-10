@@ -182,6 +182,7 @@ import {
   isCodeLikeStockQuery,
   normalizeStockCodeInput,
   resolveStockByCode,
+  stockCodeCandidates,
   stockCodeForStorage,
   stockMatchesCodeQuery
 } from "./stockIdentity";
@@ -966,7 +967,12 @@ function formatKlineAxisDate(date: string) {
   return date;
 }
 
+function formatKlinePointDate(date: string) {
+  return date.replace("T", " ").slice(0, 16);
+}
+
 function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const width = 780;
   const height = 320;
   const left = 46;
@@ -976,6 +982,7 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
   const volumeTop = 244;
   const volumeHeight = 48;
   const plotWidth = width - left - right;
+  const plotRight = width - right;
   const priceMax = Math.max(...points.map((point) => point.high));
   const priceMin = Math.min(...points.map((point) => point.low));
   const priceRange = Math.max(priceMax - priceMin, 0.01);
@@ -994,17 +1001,24 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
       .filter(Boolean)
       .join(" ");
   };
+  const hoveredPoint = hoveredIndex === null ? null : points[hoveredIndex] ?? null;
+  const hoveredX = hoveredIndex === null ? 0 : xPoint(hoveredIndex);
+  const tooltipWidth = 168;
+  const tooltipHeight = 104;
+  const tooltipX = hoveredX > plotRight - tooltipWidth - 12 ? hoveredX - tooltipWidth - 12 : hoveredX + 12;
+  const tooltipY = hoveredPoint ? Math.max(top + 4, Math.min(volumeTop - tooltipHeight - 8, yPrice(hoveredPoint.high) - 18)) : top;
+  const closeChange = hoveredPoint && hoveredPoint.open ? ((hoveredPoint.close - hoveredPoint.open) / hoveredPoint.open) * 100 : 0;
 
   return (
     <>
       <div className="stock-kline-chart-wrap">
-        <svg className="stock-kline-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="股票真实K线图">
+        <svg className="stock-kline-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="股票真实K线图" onMouseLeave={() => setHoveredIndex(null)}>
           {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
             const y = top + ratio * priceHeight;
             const price = priceMax - ratio * priceRange;
             return (
               <g key={ratio}>
-                <line x1={left} y1={y} x2={width - right} y2={y} className="kline-grid" />
+                <line x1={left} y1={y} x2={plotRight} y2={y} className="kline-grid" />
                 <text x={8} y={y + 4} className="kline-axis">{price.toFixed(2)}</text>
               </g>
             );
@@ -1029,10 +1043,44 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
               </g>
             );
           })}
-          <line x1={left} y1={volumeTop} x2={width - right} y2={volumeTop} className="kline-grid strong" />
+          <line x1={left} y1={volumeTop} x2={plotRight} y2={volumeTop} className="kline-grid strong" />
           {[0, Math.floor(points.length / 2), points.length - 1].map((index) => (
             <text key={index} x={xPoint(index)} y={height - 8} textAnchor="middle" className="kline-axis">{formatKlineAxisDate(points[index].date)}</text>
           ))}
+          {points.map((point, index) => {
+            const x = xPoint(index);
+            return (
+              <rect
+                aria-label={`${formatKlinePointDate(point.date)} 开盘 ${point.open.toFixed(2)} 收盘 ${point.close.toFixed(2)}`}
+                className="kline-hit-area"
+                key={`hit-${point.date}-${index}`}
+                x={Math.max(left, x - step / 2)}
+                y={top}
+                width={Math.min(step, plotRight - Math.max(left, x - step / 2))}
+                height={volumeTop + volumeHeight - top}
+                onMouseEnter={() => setHoveredIndex(index)}
+                onMouseMove={() => setHoveredIndex(index)}
+              >
+                <title>{`${formatKlinePointDate(point.date)} 开盘 ${point.open.toFixed(2)} 收盘 ${point.close.toFixed(2)}`}</title>
+              </rect>
+            );
+          })}
+          {hoveredPoint && hoveredIndex !== null ? (
+            <g className="kline-hover-layer">
+              <line x1={hoveredX} y1={top} x2={hoveredX} y2={volumeTop + volumeHeight} className="kline-crosshair" />
+              <circle cx={hoveredX} cy={yPrice(hoveredPoint.close)} r={3.5} className={hoveredPoint.close >= hoveredPoint.open ? "kline-hover-point up" : "kline-hover-point down"} />
+              <rect x={tooltipX} y={tooltipY} width={tooltipWidth} height={tooltipHeight} rx={6} className="kline-tooltip-box" />
+              <text x={tooltipX + 10} y={tooltipY + 18} className="kline-tooltip-title">{formatKlinePointDate(hoveredPoint.date)}</text>
+              <text x={tooltipX + 10} y={tooltipY + 39} className="kline-tooltip-text">开盘 {hoveredPoint.open.toFixed(2)}</text>
+              <text x={tooltipX + 92} y={tooltipY + 39} className="kline-tooltip-text">收盘 {hoveredPoint.close.toFixed(2)}</text>
+              <text x={tooltipX + 10} y={tooltipY + 59} className="kline-tooltip-text">最高 {hoveredPoint.high.toFixed(2)}</text>
+              <text x={tooltipX + 92} y={tooltipY + 59} className="kline-tooltip-text">最低 {hoveredPoint.low.toFixed(2)}</text>
+              <text x={tooltipX + 10} y={tooltipY + 79} className={closeChange >= 0 ? "kline-tooltip-change positive" : "kline-tooltip-change negative"}>
+                涨跌 {pct(closeChange)}
+              </text>
+              <text x={tooltipX + 10} y={tooltipY + 96} className="kline-tooltip-text">成交量 {hoveredPoint.volume.toFixed(2)} 万手</text>
+            </g>
+          ) : null}
         </svg>
       </div>
       <div className="stock-kline-legend">
@@ -1342,6 +1390,142 @@ function stockIndustryTags(stock: Stock) {
     stock.board,
     ...stock.indexes
   ]).filter((tag) => !["未分类", "腾讯行情", "东方财富行情"].includes(tag)).slice(0, 12);
+}
+
+const unusableIndustryTexts = ["未分类", "腾讯行情", "东方财富行情", "暂无", "未披露", "-", "--"];
+
+function isUsefulIndustryText(value: string | undefined) {
+  const text = value?.trim();
+  return Boolean(text && !unusableIndustryTexts.includes(text));
+}
+
+function usefulIndustryText<T extends string>(primary: T | undefined, fallback: T): T {
+  return isUsefulIndustryText(primary) ? primary ?? fallback : fallback;
+}
+
+function compactIndustryTagTexts(values: Array<string | undefined>) {
+  const seen = new Set<string>();
+  const items: string[] = [];
+  values.forEach((value) => {
+    const text = value?.trim();
+    if (!text || unusableIndustryTexts.includes(text)) return;
+    const key = text.normalize("NFKC").replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "").toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(text);
+  });
+  return items;
+}
+
+function industryTagDisplayScore(tag: string) {
+  const longIndustryPenalty = tag.length > 12 ? 40 : 0;
+  const broadIndustryPenalty = /制造业|金融业|批发|科学研究/.test(tag) && tag.length > 8 ? 20 : 0;
+  return tag.length + longIndustryPenalty + broadIndustryPenalty;
+}
+
+function selectionIndustryTags(stock: Stock) {
+  return compactIndustryTagTexts([
+    stock.industry1,
+    stock.industry2,
+    ...(stock.industryTags ?? [])
+  ]).sort((left, right) => industryTagDisplayScore(left) - industryTagDisplayScore(right)).slice(0, 5);
+}
+
+function StockIndustryTagsCell({ stock }: { stock: Stock }) {
+  const tags = selectionIndustryTags(stock);
+  if (!tags.length) {
+    return <span className="selection-industry-empty">{stock.industry1 || "--"}</span>;
+  }
+  return (
+    <div className="selection-industry-tags" title={tags.join("、")}>
+      {tags.map((tag, index) => (
+        <span className={index < 2 ? "selection-industry-tag primary" : "selection-industry-tag"} key={tag}>
+          {tag}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function buildStockMetadataMap(stocks: Stock[]) {
+  const map = new Map<string, Stock>();
+  stocks.forEach((stock) => {
+    stockCodeCandidates(stock).forEach((key) => {
+      if (!map.has(key)) map.set(key, stock);
+    });
+  });
+  return map;
+}
+
+function findStockMetadata(stock: Stock, map: Map<string, Stock>) {
+  return stockCodeCandidates(stock).map((key) => map.get(key)).find((item): item is Stock => Boolean(item));
+}
+
+function mergeStockDisplayMetadata(stock: Stock, source: Stock): Stock {
+  return {
+    ...stock,
+    exchange: stock.exchange || source.exchange,
+    board: usefulIndustryText(stock.board, source.board),
+    industry1: usefulIndustryText(stock.industry1, source.industry1),
+    industry2: usefulIndustryText(stock.industry2, source.industry2),
+    website: stock.website ?? source.website,
+    industryTags: compactIndustryTagTexts([
+      ...(source.industryTags ?? []),
+      ...(stock.industryTags ?? []),
+      source.industry1,
+      source.industry2,
+      stock.industry1,
+      stock.industry2
+    ]),
+    region: usefulIndustryText(stock.region, source.region),
+    property: stock.property || source.property,
+    indexes: stock.indexes?.length ? stock.indexes : source.indexes,
+    metrics: {
+      ...source.metrics,
+      ...stock.metrics
+    }
+  };
+}
+
+function hydrateSelectionRowsWithStockMetadata(rows: SelectionRow[], stocks: Stock[]) {
+  const stockMap = buildStockMetadataMap(stocks);
+  return rows.map((row) => {
+    const source = findStockMetadata(row.stock, stockMap);
+    return source ? { ...row, stock: mergeStockDisplayMetadata(row.stock, source) } : row;
+  });
+}
+
+function shouldMatchIndustryProfile(stock: Stock) {
+  return !stock.industryTags?.length || !isUsefulIndustryText(stock.industry1) || !isUsefulIndustryText(stock.industry2);
+}
+
+function mergeStocksWithProfiles(stocks: Stock[], profiles: Stock[]) {
+  const profileMap = buildStockMetadataMap(profiles);
+  return stocks.map((stock) => {
+    const profile = findStockMetadata(stock, profileMap);
+    return profile ? mergeStockDisplayMetadata(stock, profile) : stock;
+  });
+}
+
+async function hydrateSelectionRowsWithMatchedIndustryTags(rows: SelectionRow[], stocks: Stock[]) {
+  const candidates = rows.filter((row) => shouldMatchIndustryProfile(row.stock)).slice(0, Math.max(1, rows.length));
+  const matchedProfiles: Stock[] = [];
+  const concurrency = 4;
+  for (let index = 0; index < candidates.length; index += concurrency) {
+    const batch = candidates.slice(index, index + concurrency);
+    const results = await Promise.all(batch.map((row) => fetchStockProfileAutoMatch(row.stock)));
+    results.forEach((result) => {
+      if (result.ok && selectionIndustryTags(result.stock).length) {
+        matchedProfiles.push(result.stock);
+      }
+    });
+  }
+  if (!matchedProfiles.length) {
+    return { rows, stocks, matchedCount: 0 };
+  }
+  const nextStocks = mergeStocksWithProfiles(stocks, matchedProfiles);
+  const nextRows = hydrateSelectionRowsWithStockMetadata(rows, nextStocks);
+  return { rows: nextRows, stocks: nextStocks, matchedCount: matchedProfiles.length };
 }
 
 function StockOfficialInfoSection({
@@ -2194,9 +2378,24 @@ function App() {
           resultLimit: strategy.poolLimit,
           weightLimit: strategy.trading.maxHoldings
         });
-        setSelectionRows(rows);
+        const hydratedRows = hydrateSelectionRowsWithStockMetadata(rows, strategyStocks);
+        setSelectionRows(hydratedRows);
         setBacktestTab(tab);
-        setStrategyRunStatus(`Rust 选股完成，返回 ${rows.length}/${strategy.poolLimit} 只股票。`);
+        setStrategyRunStatus(`Rust 选股完成，返回 ${hydratedRows.length}/${strategy.poolLimit} 只股票，正在自动匹配行业标签...`);
+        void hydrateSelectionRowsWithMatchedIndustryTags(hydratedRows, strategyStocks)
+          .then((result) => {
+            setSelectionRows((currentRows) => hydrateSelectionRowsWithStockMetadata(currentRows, result.rows.map((row) => row.stock)));
+            if (result.matchedCount > 0) {
+              setStocks(result.stocks);
+              saveLocal("openSourceStocks", result.stocks);
+              setStrategyRunStatus(`Rust 选股完成，返回 ${hydratedRows.length}/${strategy.poolLimit} 只股票，行业标签已匹配 ${result.matchedCount} 只。`);
+            } else {
+              setStrategyRunStatus(`Rust 选股完成，返回 ${hydratedRows.length}/${strategy.poolLimit} 只股票，暂无新增行业标签。`);
+            }
+          })
+          .catch((error) => {
+            setStrategyRunStatus(`Rust 选股完成，返回 ${hydratedRows.length}/${strategy.poolLimit} 只股票，行业标签匹配失败：${readableError(error)}`);
+          });
         return;
       }
       const next = await runBacktestRustFirst(strategy, strategyStocks, strategyPools, factors, backtestConfig);
@@ -3619,6 +3818,27 @@ function NewsFetchStatsBar({
   );
 }
 
+function NewsSourceInterfaceBar({ sources }: { sources: NewsSourceEndpoint[] }) {
+  const enabledSources = enabledNewsSources({ sources });
+  return (
+    <div className="news-source-interface-bar">
+      <span>舆情新闻接口</span>
+      <div>
+        {enabledSources.length ? (
+          enabledSources.map((source) => (
+            <span className="news-source-interface-chip" key={source.id} title={source.query}>
+              <strong>{source.name}</strong>
+              <em>{source.provider}</em>
+            </span>
+          ))
+        ) : (
+          <span className="news-source-interface-empty">未启用真实新闻源</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SentimentWorkspace({
   stocks,
   newsSourceSettings,
@@ -3805,6 +4025,7 @@ function SentimentWorkspace({
         onRefresh={() => refreshSentimentData("手动")}
       />
       <NewsFetchModeBar mode={sentimentFetchMode} onModeChange={updateSentimentFetchMode} />
+      <NewsSourceInterfaceBar sources={newsSourceSettings.sources} />
       <NewsFetchStatsBar
         stats={sentimentFetchStats}
         effectiveEventCount={sentimentFetchEventCount}
@@ -4166,6 +4387,7 @@ function NewsPage({
         onRefresh={() => refreshNewsData("手动")}
       />
       <NewsFetchModeBar mode={newsFetchMode} onModeChange={updateNewsFetchMode} />
+      <NewsSourceInterfaceBar sources={newsSourceSettings.sources} />
       <NewsFetchStatsBar
         stats={newsFetchStats}
         effectiveEventCount={newsFetchStats.validArticles}
@@ -4358,8 +4580,10 @@ function ValuationWorkspace({
 }) {
   const [filters, setFilters] = useState<ValuationFilters>(defaultValuationFilters);
   const [valuationQuery, setValuationQuery] = useState("");
-  const [valuationRecalcKey, setValuationRecalcKey] = useState(0);
-  const [valuationCalculatedAt, setValuationCalculatedAt] = useState(() => new Date().toISOString());
+  const [valuationRunRequest, setValuationRunRequest] = useState(0);
+  const [valuationRunFilters, setValuationRunFilters] = useState<ValuationFilters | null>(null);
+  const [valuationRunStocks, setValuationRunStocks] = useState<Stock[]>([]);
+  const [valuationCalculatedAt, setValuationCalculatedAt] = useState<string | undefined>();
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [valuationDetailCollapsed, setValuationDetailCollapsed] = useState(false);
   const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
@@ -4373,7 +4597,6 @@ function ValuationWorkspace({
   const [valuationPage, setValuationPage] = useState(1);
   const [valuationPageSize, setValuationPageSize] = useState(defaultValuationPageSize);
   const industryOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.industry1))).sort()], [stocks]);
-  const ownershipOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.property))).sort()], [stocks]);
   const missingRealValuationCount = useMemo(
     () => (isRealDataReady ? stocks.filter((stock) => !hasRequiredRealValuationData(stock)).length : stocks.length),
     [isRealDataReady, stocks]
@@ -4383,11 +4606,22 @@ function ValuationWorkspace({
     let cancelled = false;
     if (!isRealDataReady) {
       setRows([]);
+      setExactValuationRows([]);
+      setValuationRunFilters(null);
+      setValuationRunStocks([]);
+      setValuationRunRequest(0);
+      setValuationCalculatedAt(undefined);
       setValuationApiStatus("等待真实行情和真实财报字段后再运行 Rust 估值接口");
       return;
     }
+    if (valuationRunRequest <= 0 || !valuationRunFilters || !valuationRunStocks.length) {
+      setRows([]);
+      setExactValuationRows([]);
+      setValuationApiStatus("点击开始核算后运行 Rust 估值接口");
+      return;
+    }
     setValuationApiStatus("正在通过 Rust 估值接口核算...");
-    buildValuationRowsRustFirst(stocks, filters)
+    buildValuationRowsRustFirst(valuationRunStocks, valuationRunFilters)
       .then((nextRows) => {
         if (!cancelled) {
           setRows(nextRows);
@@ -4403,18 +4637,25 @@ function ValuationWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [isRealDataReady, stocks, filters, valuationRecalcKey]);
+  }, [isRealDataReady, valuationRunFilters, valuationRunRequest, valuationRunStocks]);
   const normalizedValuationQuery = valuationQuery.trim().toLowerCase();
   const valuationCodeQuery = useMemo(() => normalizeStockCodeInput(valuationQuery), [valuationQuery]);
+  const hasStartedValuation = valuationRunRequest > 0 && Boolean(valuationRunFilters);
+  const valuationFiltersPending = useMemo(
+    () => hasStartedValuation && valuationRunFilters !== null && JSON.stringify(filters) !== JSON.stringify(valuationRunFilters),
+    [filters, hasStartedValuation, valuationRunFilters]
+  );
   const exactValuationStock = useMemo(
-    () => (valuationCodeQuery.isCodeLike ? resolveStockByCode(stocks, valuationQuery) ?? null : null),
-    [stocks, valuationCodeQuery.isCodeLike, valuationQuery]
+    () => (hasStartedValuation && valuationCodeQuery.isCodeLike ? resolveStockByCode(valuationRunStocks, valuationQuery) ?? null : null),
+    [hasStartedValuation, valuationRunStocks, valuationCodeQuery.isCodeLike, valuationQuery]
   );
   useEffect(() => {
     let cancelled = false;
     const alreadyVisible = Boolean(exactValuationStock && rows.some((row) => stockMatchesCodeQuery(row.stock, exactValuationStock.code)));
     if (
       !isRealDataReady ||
+      !hasStartedValuation ||
+      !valuationRunFilters ||
       !exactValuationStock ||
       alreadyVisible ||
       !hasRequiredRealValuationData(exactValuationStock)
@@ -4422,7 +4663,7 @@ function ValuationWorkspace({
       setExactValuationRows([]);
       return;
     }
-    buildValuationRowsRustFirst([exactValuationStock], filters)
+    buildValuationRowsRustFirst([exactValuationStock], valuationRunFilters)
       .then((nextRows) => {
         if (!cancelled) {
           setExactValuationRows(nextRows);
@@ -4437,7 +4678,7 @@ function ValuationWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [exactValuationStock, filters, isRealDataReady, rows, valuationRecalcKey]);
+  }, [exactValuationStock, hasStartedValuation, isRealDataReady, rows, valuationRunFilters]);
   const searchedRows = useMemo(() => {
     if (!normalizedValuationQuery) return rows;
     if (valuationCodeQuery.isCodeLike) {
@@ -4456,7 +4697,6 @@ function ValuationWorkspace({
         stock.industry1,
         stock.industry2,
         stock.region,
-        stock.property,
         row.state,
         row.model,
         row.action,
@@ -4480,7 +4720,7 @@ function ValuationWorkspace({
   const valuationPageEnd = valuationPageStart + valuationPageRows.length;
   const summary = useMemo(() => summarizeValuationRows(searchedRows), [searchedRows]);
   const selected = sortedRows.find((row) => row.stock.code === selectedCode) ?? valuationPageRows[0] ?? sortedRows[0] ?? null;
-  const unmatchedCodeQuery = Boolean(normalizedValuationQuery && valuationCodeQuery.isCodeLike && !searchedRows.length);
+  const unmatchedCodeQuery = Boolean(hasStartedValuation && normalizedValuationQuery && valuationCodeQuery.isCodeLike && !searchedRows.length);
   const firstMissingRealFields = useMemo(() => {
     if (!isRealDataReady) return "";
     const sample = stocks.find((stock) => !hasRequiredRealValuationData(stock));
@@ -4507,13 +4747,23 @@ function ValuationWorkspace({
   const resetValuationControls = () => {
     setFilters(defaultValuationFilters);
     setValuationQuery("");
+    setValuationRunFilters(null);
+    setValuationRunStocks([]);
+    setValuationRunRequest(0);
+    setValuationCalculatedAt(undefined);
+    setRows([]);
+    setExactValuationRows([]);
+    setValuationApiStatus(isRealDataReady ? "点击开始核算后运行 Rust 估值接口" : "等待真实行情和真实财报字段后再运行 Rust 估值接口");
     setSelectedCode(null);
     setValuationPage(1);
     setValuationPageSize(defaultValuationPageSize);
   };
   const recalculateValuation = () => {
-    setValuationRecalcKey((current) => current + 1);
+    setValuationRunFilters(filters);
+    setValuationRunStocks(stocks);
+    setValuationRunRequest((current) => current + 1);
     setValuationCalculatedAt(new Date().toISOString());
+    setExactValuationRows([]);
     setSelectedCode(null);
     setValuationPage(1);
   };
@@ -4538,6 +4788,9 @@ function ValuationWorkspace({
   const financeMatchedRows = financeSummary.financeMatchedRows ?? 0;
   const financeSourceRows = financeSummary.financeSourceRows ?? 0;
   const valuationReadyRows = financeSummary.valuationReadyRows ?? valuationInputReadyCount;
+  const valuationStatusText = valuationFiltersPending
+    ? `${valuationApiStatus} · 筛选条件已调整，点击开始核算后应用`
+    : valuationApiStatus;
 
   return (
     <section className="valuation-workspace">
@@ -4551,14 +4804,14 @@ function ValuationWorkspace({
       <div className="valuation-data-bar">
         <div>
           <span>
-            {valuationApiStatus} 路{" "}
+            {valuationStatusText} 路{" "}
             {realDataStatus} · 可核算 {valuationInputReadyCount}/{stocks.length} · 财报匹配 {financeMatchedRows}/{financeSourceRows} · 估值可用 {valuationReadyRows} · 缺少真实财报 {missingRealValuationCount} · 最近核算 {formatDateTime(valuationCalculatedAt)}
           </span>
         </div>
         <div className="valuation-data-actions">
           <button className="btn" type="button" onClick={recalculateValuation} disabled={!isRealDataReady}>
             <RefreshCcw size={15} />
-            重新核算
+            开始核算
           </button>
           <button className="btn" type="button" onClick={onSyncFinancialReports}>
             <FileText size={15} />
@@ -4647,14 +4900,6 @@ function ValuationWorkspace({
           <select value={filters.state} onChange={(event) => patchFilters({ state: event.target.value as ValuationFilters["state"] })}>
             {enterpriseStateOptions.map((state) => (
               <option key={state} value={state}>{state}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>企业属性</span>
-          <select value={filters.ownership} onChange={(event) => patchFilters({ ownership: event.target.value })}>
-            {ownershipOptions.map((ownership) => (
-              <option key={ownership} value={ownership}>{ownership}</option>
             ))}
           </select>
         </label>
@@ -4784,28 +5029,37 @@ function ValuationWorkspace({
                 ? "当前不会使用本地样本或推导财务数据生成核算结果。"
                 : rows.length
                   ? "当前检索条件下没有匹配股票，请调整关键词。"
-                  : "当前筛选条件下没有符合要求的股票，请降低安全边际或治理分限制。"}
+                  : hasStartedValuation
+                    ? "当前筛选条件下没有符合要求的股票，请降低安全边际或治理分限制。"
+                    : "请先选择核算范围并点击开始核算。"}
             </EmptyState>
           ) : null}
         </section>
 
         <section className={`valuation-panel valuation-detail-panel ${valuationDetailCollapsed ? "collapsed" : ""}`}>
-          {selected ? (
-            valuationDetailCollapsed ? (
-              <div className="valuation-side-rail">
-                <button className="valuation-side-toggle" type="button" onClick={() => setValuationDetailCollapsed(false)} aria-label="展开价值核算详情">
-                  <ChevronDown size={16} />
-                  <span>展开详情</span>
-                </button>
+          {valuationDetailCollapsed ? (
+            <div className="valuation-side-rail">
+              <button className="valuation-side-toggle" type="button" onClick={() => setValuationDetailCollapsed(false)} aria-label="展开价值核算详情">
+                <ChevronDown size={16} />
+                <span>展开详情</span>
+              </button>
+              {selected ? (
                 <div className="valuation-side-summary">
                   <strong>{selected.stock.name}</strong>
                   <span>{displayStockCode(selected.stock)}</span>
                   <em>{selected.verdict}</em>
                   <b className={selected.safetyMargin >= 0 ? "positive" : "negative"}>{formatValue(selected.safetyMargin, "%")}</b>
                 </div>
-              </div>
-            ) : (
-              <>
+              ) : (
+                <div className="valuation-side-summary valuation-side-summary-empty">
+                  <strong>价值核算拆解</strong>
+                  <span>待选择</span>
+                  <em>未选择股票</em>
+                </div>
+              )}
+            </div>
+          ) : selected ? (
+            <>
               <div className="valuation-detail-head">
                 <div>
                   <h3>
@@ -4814,7 +5068,7 @@ function ValuationWorkspace({
                       <span>{displayStockCode(selected.stock)}</span>
                     </button>
                   </h3>
-                  <p>{selected.stock.industry1} / {selected.stock.industry2} / {selected.stock.property}</p>
+                  <p>{selected.stock.industry1} / {selected.stock.industry2}</p>
                 </div>
                 <div className="valuation-detail-actions">
                   <span className={`valuation-verdict ${selected.safetyMargin >= 15 ? "good" : selected.safetyMargin < -10 ? "bad" : ""}`}>{selected.verdict}</span>
@@ -4925,9 +5179,22 @@ function ValuationWorkspace({
                 </div>
               </div>
               </>
-            )
           ) : (
-            <EmptyState>请选择一只股票查看价值核算拆解。</EmptyState>
+            <>
+              <div className="valuation-detail-head">
+                <div>
+                  <h3>价值核算拆解</h3>
+                  <p>选择左侧股票后显示核算价值、市值、安全边际和模型拆解。</p>
+                </div>
+                <div className="valuation-detail-actions">
+                  <button className="valuation-collapse-button" type="button" onClick={() => setValuationDetailCollapsed(true)}>
+                    收起
+                    <ChevronDown size={15} />
+                  </button>
+                </div>
+              </div>
+              <EmptyState>请选择一只股票查看价值核算拆解。</EmptyState>
+            </>
           )}
         </section>
       </div>
@@ -6929,10 +7196,10 @@ function BacktestPanel({
 }) {
   const [factorCorrelationPeriod, setFactorCorrelationPeriod] = useState(20);
   const tabs: Array<{ key: BacktestTab; label: string; icon: React.ReactNode }> = [
-    { key: "backtest", label: "策略回测", icon: <Activity size={15} /> },
     { key: "daily", label: "每日选股", icon: <CalendarDays size={15} /> },
     { key: "realtime", label: "实时选股", icon: <Filter size={15} /> },
     { key: "rank", label: "排名分析", icon: <BarChart3 size={15} /> },
+    { key: "backtest", label: "策略回测", icon: <Activity size={15} /> },
     { key: "factorCorrelation", label: "因子相关性", icon: <LineChart size={15} /> }
   ];
   const description =
@@ -6950,10 +7217,7 @@ function BacktestPanel({
           <button
             key={item.key}
             className={tab === item.key ? "active" : ""}
-            onClick={() => {
-              setTab(item.key);
-              if (item.key !== "backtest") runCurrentTask(item.key);
-            }}
+            onClick={() => setTab(item.key)}
           >
             {item.icon}
             {item.label}
@@ -7154,6 +7418,8 @@ function EquityChart({ result, hedge }: { result: BacktestResult; hedge: boolean
   );
 }
 
+const selectionPageSizeOptions = [20, 50, 100];
+
 function SelectionTable({
   rows,
   factors,
@@ -7169,14 +7435,38 @@ function SelectionTable({
   compact?: boolean;
   onOpenStockInfo?: (stock: StockReference) => void;
 }) {
+  const [selectionPage, setSelectionPage] = useState(1);
+  const [selectionPageSize, setSelectionPageSize] = useState(selectionPageSizeOptions[0]);
   const rankFactors = getResultFactorKeys(strategy);
   const enabledFilters = strategy.filters.filter((condition) => condition.enabled);
   const filterTitle = enabledFilters.length ? enabledFilters.map((condition) => getFilterConditionLabel(condition, factors)).join("；") : "未设置筛选条件";
   const showFilterMetric = !compact;
   const title = realtime ? "实时选股结果" : compact ? "候选股票" : "每日选股结果";
+  const enablePagination = !compact;
+  const totalSelectionPages = enablePagination ? Math.max(1, Math.ceil(rows.length / selectionPageSize)) : 1;
+  const safeSelectionPage = Math.min(selectionPage, totalSelectionPages);
+  const selectionPageStart = enablePagination && rows.length ? (safeSelectionPage - 1) * selectionPageSize : 0;
+  const selectionPageRows = enablePagination ? rows.slice(selectionPageStart, selectionPageStart + selectionPageSize) : rows;
+  const selectionPageEnd = selectionPageStart + selectionPageRows.length;
   const targetCount = Math.max(1, Math.floor(strategy.poolLimit || 1));
   const weightedCount = Math.min(rows.length, Math.max(1, strategy.trading.maxHoldings));
-  const countLabel = compact ? `已选 ${rows.length} 只` : `已选 ${rows.length} / 目标 ${targetCount} 只，权重分配 ${weightedCount} 只`;
+  const countLabel = compact
+    ? `已选 ${rows.length} 只`
+    : `已选 ${rows.length} / 目标 ${targetCount} 只，权重分配 ${weightedCount} 只，本页 ${selectionPageRows.length ? `${selectionPageStart + 1}-${selectionPageEnd}` : "0"}`;
+  useEffect(
+    function clampSelectionPage() {
+      if (!enablePagination) return;
+      setSelectionPage((current) => Math.min(Math.max(current, 1), totalSelectionPages));
+    },
+    [enablePagination, totalSelectionPages]
+  );
+  useEffect(
+    function resetSelectionPageAfterRowsChange() {
+      if (!enablePagination) return;
+      setSelectionPage(1);
+    },
+    [enablePagination, rows.length, selectionPageSize]
+  );
   if (!rows.length) {
     return (
       <div className={`selection-table ${compact ? "compact" : ""}`}>
@@ -7198,6 +7488,31 @@ function SelectionTable({
         {title}
         <span>{countLabel}</span>
       </h3>
+      {enablePagination ? (
+        <div className="selection-pagination" aria-label={`${title}分页`}>
+          <button className="btn" type="button" disabled={safeSelectionPage <= 1} onClick={() => setSelectionPage((page) => Math.max(1, page - 1))}>
+            上一页
+          </button>
+          <span>第 {safeSelectionPage} / {totalSelectionPages} 页，共 {rows.length} 条</span>
+          <button className="btn" type="button" disabled={safeSelectionPage >= totalSelectionPages} onClick={() => setSelectionPage((page) => Math.min(totalSelectionPages, page + 1))}>
+            下一页
+          </button>
+          <label>
+            <span>每页</span>
+            <select
+              value={selectionPageSize}
+              onChange={(event) => {
+                setSelectionPageSize(Number(event.target.value));
+                setSelectionPage(1);
+              }}
+            >
+              {selectionPageSizeOptions.map((size) => (
+                <option key={size} value={size}>{size}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      ) : null}
       <table>
         <thead>
           <tr>
@@ -7214,16 +7529,18 @@ function SelectionTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => {
+          {selectionPageRows.map((row, index) => {
             const filterMetrics = enabledFilters.map((condition) => getFilterMetricItem(row, condition, factors));
             return (
               <tr key={row.stock.code}>
-                <td>{index + 1}</td>
+                <td>{selectionPageStart + index + 1}</td>
                 <td>{displayStockCode(row.stock)}</td>
                 <td>
                   <StockNameAction stock={row.stock} onOpen={onOpenStockInfo} />
                 </td>
-                <td>{row.stock.industry1}</td>
+                <td>
+                  <StockIndustryTagsCell stock={row.stock} />
+                </td>
                 <td>{row.score.toFixed(2)}</td>
                 <td>{row.weight}%</td>
                 {showFilterMetric ? (

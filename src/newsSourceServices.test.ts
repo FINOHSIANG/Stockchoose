@@ -16,10 +16,31 @@ describe("newsSourceServices", () => {
   it("migrates missing news source settings with defaults", () => {
     const settings = ensureNewsSourceSettings(null);
 
-    expect(settings.sources.length).toBeGreaterThanOrEqual(1);
+    expect(settings.sources.length).toBeGreaterThanOrEqual(3);
     expect(enabledNewsSources(settings).map((source) => source.provider)).toEqual(expect.arrayContaining(["GDELT 2.1"]));
+    expect(enabledNewsSources(settings).map((source) => source.name)).toEqual(
+      expect.arrayContaining(["GDELT 全球新闻", "国际新闻接口", "热点事件接口"])
+    );
     expect(enabledNewsSources(settings).some((source) => source.provider === "本地舆情样本")).toBe(false);
     expect(enabledNewsSources(settings).some((source) => source.provider === "腾讯证券公告")).toBe(false);
+  });
+
+  it("adds international news and hot event interfaces to persisted legacy settings", () => {
+    const settings = ensureNewsSourceSettings({
+      sources: [
+        {
+          ...defaultNewsSourceSettings.sources[0],
+          enabled: true
+        }
+      ]
+    });
+
+    expect(settings.sources.map((source) => source.id)).toEqual(
+      expect.arrayContaining(["news-gdelt-global", "news-gdelt-international", "news-gdelt-hot-events"])
+    );
+    expect(enabledNewsSources(settings).map((source) => source.name)).toEqual(
+      expect.arrayContaining(["国际新闻接口", "热点事件接口"])
+    );
   });
 
   it("migrates legacy EastMoney news settings to a non-announcement source", () => {

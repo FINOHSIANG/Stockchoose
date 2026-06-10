@@ -55,7 +55,6 @@ export interface ValuationFilters {
   boards: ValuationBoardFilter[];
   industries: string[];
   state: "全部" | EnterpriseState;
-  ownership: string;
   style: ValuationStyle;
   stockRiskExclusions: ValuationRiskExclusion[];
   minSafetyMargin: number;
@@ -160,7 +159,6 @@ export const defaultValuationFilters: ValuationFilters = {
   boards: ["全部"],
   industries: ["全部"],
   state: "全部",
-  ownership: "全部",
   style: "严苛核算",
   stockRiskExclusions: ["ST", "*ST", "退市"],
   minSafetyMargin: -999,

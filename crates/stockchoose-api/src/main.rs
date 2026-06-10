@@ -4003,35 +4003,170 @@ fn top_sentiment_counts(items: Vec<String>, limit: usize) -> Vec<(String, usize)
 
 fn industry_keyword_profile(industry: &str) -> &'static [&'static str] {
     match industry {
-        "汽车" => &["新能源汽车", "汽车", "整车", "乘用车", "充电", "县域消费"],
-        "电力设备" => &["电池", "储能", "光伏", "特高压", "电网", "充电"],
-        "电子" => &["半导体", "芯片", "先进封装", "国产替代", "算力", "设备"],
-        "食品饮料" => &["白酒", "批价", "渠道", "库存", "消费"],
-        "银行" => &["银行", "低估值", "回购", "增持", "分红"],
-        "家用电器" => &["家电", "白色家电", "回购", "增持", "消费"],
-        "非银金融" => &["保险", "证券", "低估值", "回购", "增持"],
-        "公用事业" => &["电网", "电力", "绿电", "水电", "特高压", "储能"],
-        "计算机" => &["软件", "人工智能", "AI", "算力", "信创", "数据"],
-        "医药生物" => &["创新药", "医疗", "生物", "临床", "获批", "出海"],
+        "汽车" => &[
+            "新能源汽车",
+            "汽车",
+            "整车",
+            "乘用车",
+            "充电",
+            "县域消费",
+            "ev",
+            "electric vehicle",
+            "vehicle",
+        ],
+        "电力设备" => &[
+            "电池",
+            "储能",
+            "光伏",
+            "特高压",
+            "电网",
+            "充电",
+            "battery",
+            "energy storage",
+            "solar",
+            "grid",
+        ],
+        "电子" => &[
+            "半导体",
+            "芯片",
+            "先进封装",
+            "国产替代",
+            "算力",
+            "设备",
+            "semiconductor",
+            "chip",
+            "advanced packaging",
+        ],
+        "食品饮料" => &[
+            "白酒",
+            "批价",
+            "渠道",
+            "库存",
+            "消费",
+            "consumer staples",
+            "beverage",
+            "liquor",
+        ],
+        "银行" => &[
+            "银行",
+            "低估值",
+            "回购",
+            "增持",
+            "分红",
+            "bank",
+            "rate cut",
+            "interest rate",
+        ],
+        "家用电器" => &[
+            "家电",
+            "白色家电",
+            "回购",
+            "增持",
+            "消费",
+            "appliance",
+            "consumer electronics",
+        ],
+        "非银金融" => &[
+            "保险",
+            "证券",
+            "低估值",
+            "回购",
+            "增持",
+            "insurance",
+            "brokerage",
+            "securities",
+        ],
+        "公用事业" => &[
+            "电网",
+            "电力",
+            "绿电",
+            "水电",
+            "特高压",
+            "储能",
+            "utility",
+            "power",
+            "renewable",
+        ],
+        "计算机" => &[
+            "软件",
+            "人工智能",
+            "AI",
+            "算力",
+            "信创",
+            "数据",
+            "artificial intelligence",
+            "cloud",
+            "data center",
+        ],
+        "医药生物" => &[
+            "创新药",
+            "医疗",
+            "生物",
+            "临床",
+            "获批",
+            "出海",
+            "biotech",
+            "pharma",
+            "clinical",
+        ],
         _ => &[],
     }
 }
 
 fn industry2_keyword_profile(industry: &str) -> &'static [&'static str] {
     match industry {
-        "乘用车" => &["新能源汽车", "整车", "乘用车", "汽车", "县域消费"],
-        "电池" => &["动力电池", "电池", "储能", "新能源汽车"],
-        "光伏设备" => &["光伏", "硅片", "组件", "绿电"],
-        "半导体" => &["半导体", "芯片", "先进封装", "国产替代", "设备"],
+        "乘用车" => &[
+            "新能源汽车",
+            "整车",
+            "乘用车",
+            "汽车",
+            "县域消费",
+            "ev",
+            "electric vehicle",
+        ],
+        "电池" => &[
+            "动力电池",
+            "电池",
+            "储能",
+            "新能源汽车",
+            "battery",
+            "lithium",
+        ],
+        "光伏设备" => &["光伏", "硅片", "组件", "绿电", "solar", "photovoltaic"],
+        "半导体" => &[
+            "半导体",
+            "芯片",
+            "先进封装",
+            "国产替代",
+            "设备",
+            "semiconductor",
+            "chip",
+        ],
         "白酒" => &["白酒", "批价", "渠道库存", "动销"],
         "股份行" => &["银行", "低估值", "分红", "回购", "增持"],
         "白色家电" => &["家电", "白色家电", "回购", "增持"],
         "保险" => &["保险", "低估值", "回购", "增持"],
-        "水电" => &["水电", "电力", "公用事业", "绿电"],
-        "软件开发" => &["软件", "信创", "人工智能", "数据"],
-        "通信设备" => &["通信", "算力", "设备", "国产替代"],
-        "生物制品" => &["生物", "疫苗", "创新药", "临床"],
-        "化学制药" => &["创新药", "药品", "临床", "出海"],
+        "水电" => &["水电", "电力", "公用事业", "绿电", "hydropower", "utility"],
+        "软件开发" => &[
+            "软件",
+            "信创",
+            "人工智能",
+            "数据",
+            "software",
+            "AI",
+            "cloud",
+        ],
+        "通信设备" => &[
+            "通信",
+            "算力",
+            "设备",
+            "国产替代",
+            "telecom",
+            "network",
+            "compute",
+        ],
+        "生物制品" => &["生物", "疫苗", "创新药", "临床", "biotech", "vaccine"],
+        "化学制药" => &["创新药", "药品", "临床", "出海", "pharma", "clinical"],
         _ => &[],
     }
 }
@@ -5075,7 +5210,10 @@ fn strip_html(value: &str) -> String {
 }
 
 fn text_has_any(text: &str, words: &[&str]) -> bool {
-    words.iter().any(|word| text.contains(word))
+    let text_lower = text.to_lowercase();
+    words
+        .iter()
+        .any(|word| text_lower.contains(&word.to_lowercase()))
 }
 
 fn infer_news_category(text: &str) -> String {
@@ -5097,14 +5235,56 @@ fn infer_news_category(text: &str) -> String {
             "通知",
             "规划",
             "会议",
+            "policy",
+            "stimulus",
+            "central bank",
+            "regulation",
+            "rate cut",
+            "rate hike",
         ],
     ) {
         "宏观政策"
-    } else if text_has_any(text, &["美联储", "美元", "美国", "欧洲", "全球", "海外"]) {
+    } else if text_has_any(
+        text,
+        &[
+            "美联储",
+            "美元",
+            "美国",
+            "欧洲",
+            "全球",
+            "海外",
+            "federal reserve",
+            "dollar",
+            "europe",
+            "global",
+            "overseas",
+            "geopolitics",
+            "oil price",
+            "exchange rate",
+            "tariff",
+        ],
+    ) {
         "国际财经"
     } else if text_has_any(text, &["基金", "ETF", "持仓", "北向", "外资"]) {
         "基金持仓"
-    } else if text_has_any(text, &["产业链", "订单", "招标", "供需", "价格", "产能"]) {
+    } else if text_has_any(
+        text,
+        &[
+            "产业链",
+            "订单",
+            "招标",
+            "供需",
+            "价格",
+            "产能",
+            "supply chain",
+            "semiconductor",
+            "chip",
+            "AI",
+            "new energy",
+            "battery",
+            "lithium",
+        ],
+    ) {
         "产业链"
     } else {
         "市场评论"
@@ -5128,13 +5308,22 @@ fn infer_news_sentiment(text: &str) -> String {
             "扩产",
             "获批",
             "签约",
+            "growth",
+            "rally",
+            "surge",
+            "record",
+            "support",
+            "breakthrough",
+            "gain",
+            "approve",
         ],
     );
     let negative = text_has_any(
         text,
         &[
             "利空", "下跌", "承压", "风险", "处罚", "调查", "亏损", "减持", "违约", "退市", "下修",
-            "终止",
+            "终止", "risk", "fall", "drop", "pressure", "probe", "loss", "default", "sanction",
+            "conflict", "weak",
         ],
     );
     match (positive, negative) {
@@ -5195,9 +5384,17 @@ fn infer_industries(text: &str, stocks: &[Stock], linked_stocks: &[LinkedStock])
         .iter()
         .map(|stock| stock.code.as_str())
         .collect();
+    let text_lower = text.to_lowercase();
     let mut industries = Vec::new();
     for stock in stocks {
-        if linked_codes.contains(stock.code.as_str()) || text.contains(&stock.industry1) {
+        let industry_hit = text.contains(&stock.industry1)
+            || industry_keyword_profile(&stock.industry1)
+                .iter()
+                .any(|keyword| text_lower.contains(&keyword.to_lowercase()))
+            || industry2_keyword_profile(&stock.industry2)
+                .iter()
+                .any(|keyword| text_lower.contains(&keyword.to_lowercase()));
+        if linked_codes.contains(stock.code.as_str()) || industry_hit {
             if is_specific_industry(&stock.industry1) {
                 industries.push(stock.industry1.clone());
             }
@@ -5538,6 +5735,41 @@ mod tests {
         assert_eq!(article.author, "Reporter");
         assert_eq!(article.linked_codes, vec!["600519"]);
         assert!(article.industries.contains(&"食品饮料".to_string()));
+    }
+
+    #[test]
+    fn builds_sentiment_event_from_international_hot_news_keywords() {
+        let mut chip_stock = test_stock();
+        chip_stock.code = "688981".to_string();
+        chip_stock.name = "中芯国际".to_string();
+        chip_stock.board = "科创板".to_string();
+        chip_stock.industry1 = "电子".to_string();
+        chip_stock.industry2 = "半导体".to_string();
+        chip_stock.is_star = true;
+
+        let mut source = test_news_source("GDELT 2.1");
+        source.id = "news-gdelt-international".to_string();
+        source.name = "国际新闻接口".to_string();
+        source.query = Some("semiconductor AI global markets".to_string());
+        let row = serde_json::json!({
+            "title": "Global semiconductor rally supports AI chip demand",
+            "url": "https://example.com/news/global-chip",
+            "domain": "Example Global",
+            "seendate": "2026-06-10T09:00:00Z",
+            "summary": "Global markets saw a semiconductor rally as AI demand surged",
+            "content": "Chip supply chain growth supports Asian technology shares"
+        });
+
+        let article = build_news_article(&row, &source, &[chip_stock.clone()], 0)
+            .expect("international hot news article");
+        let events = build_sentiment_events(&[article.clone()], &[chip_stock]);
+
+        assert_eq!(article.category, "国际财经");
+        assert_eq!(article.sentiment, "利好");
+        assert!(article.industries.contains(&"电子".to_string()));
+        assert_eq!(events.len(), 1);
+        assert!(events[0].industries.contains(&"电子".to_string()));
+        assert!(events[0].keywords.contains(&"国际财经".to_string()));
     }
 
     #[test]

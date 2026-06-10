@@ -9,7 +9,6 @@ pub struct ValuationFilters {
     #[serde(default = "default_all_filter_values")]
     pub industries: Vec<String>,
     pub state: String,
-    pub ownership: String,
     pub style: String,
     #[serde(default = "default_stock_risk_exclusions")]
     pub stock_risk_exclusions: Vec<String>,
@@ -874,7 +873,6 @@ pub fn build_valuation_rows(stocks: &[Stock], filters: &ValuationFilters) -> Vec
         .filter(|row| matches_any_board(&row.stock, &filters.boards))
         .filter(|row| matches_any_industry(&row.stock, &filters.industries))
         .filter(|row| is_all(&filters.state) || row.state == filters.state)
-        .filter(|row| is_all(&filters.ownership) || row.stock.property == filters.ownership)
         .filter(|row| row.safety_margin >= filters.min_safety_margin)
         .filter(|row| row.governance_score >= filters.min_governance_score)
         .collect::<Vec<_>>();
@@ -933,7 +931,6 @@ mod tests {
             boards: vec!["全部".to_string()],
             industries: vec!["全部".to_string()],
             state: "全部".to_string(),
-            ownership: "全部".to_string(),
             style: "严苛核算".to_string(),
             stock_risk_exclusions: default_stock_risk_exclusions(),
             min_safety_margin: -999.0,

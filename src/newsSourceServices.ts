@@ -55,6 +55,30 @@ export const defaultNewsSourceSettings: NewsSourceSettings = {
       refreshInterval: 30,
       maxItems: 100,
       query: "China stock market OR A-shares OR listed companies"
+    },
+    {
+      id: "news-gdelt-international",
+      name: "国际新闻接口",
+      provider: "GDELT 2.1",
+      baseUrl: "/gdelt-news",
+      apiToken: "",
+      enabled: true,
+      language: "en-US",
+      refreshInterval: 30,
+      maxItems: 120,
+      query: "global markets OR Federal Reserve OR oil prices OR exchange rates OR geopolitics"
+    },
+    {
+      id: "news-gdelt-hot-events",
+      name: "热点事件接口",
+      provider: "GDELT 2.1",
+      baseUrl: "/gdelt-news",
+      apiToken: "",
+      enabled: true,
+      language: "all",
+      refreshInterval: 15,
+      maxItems: 120,
+      query: "breaking news OR policy stimulus OR supply chain OR semiconductor OR AI OR new energy"
     }
   ]
 };
