@@ -1,4 +1,4 @@
-﻿import type { Stock } from "./types";
+import type { Stock } from "./types";
 import type { NewsSourceEndpoint } from "./newsSourceServices";
 
 // --- Types ---
@@ -85,7 +85,7 @@ export const defaultNewsPageState: NewsPageState = {
   pageSize: 20
 };
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-const RUST_NEWS_ARTICLES_URL = "/api/news/articles";
+const BUN_NEWS_ARTICLES_URL = "/api/news/articles";
 
 export interface NewsArticleFetchResult {
   ok: boolean;
@@ -154,7 +154,7 @@ function errorMessage(error: unknown) {
 function requireString(row: Record<string, unknown>, key: keyof NewsArticle, index: number, allowEmpty = true) {
   const value = row[key];
   if (typeof value !== "string" || (!allowEmpty && !value.trim())) {
-    throw new Error(`Rust news API returned invalid article row ${index}: ${String(key)} must be a string`);
+    throw new Error(`Bun news API returned invalid article row ${index}: ${String(key)} must be a string`);
   }
   return value;
 }
@@ -162,7 +162,7 @@ function requireString(row: Record<string, unknown>, key: keyof NewsArticle, ind
 function requireNumber(row: Record<string, unknown>, key: keyof NewsArticle, index: number) {
   const value = row[key];
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`Rust news API returned invalid article row ${index}: ${String(key)} must be a finite number`);
+    throw new Error(`Bun news API returned invalid article row ${index}: ${String(key)} must be a finite number`);
   }
   return value;
 }
@@ -170,7 +170,7 @@ function requireNumber(row: Record<string, unknown>, key: keyof NewsArticle, ind
 function requireStringArray(row: Record<string, unknown>, key: keyof NewsArticle, index: number) {
   const value = row[key];
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new Error(`Rust news API returned invalid article row ${index}: ${String(key)} must be a string array`);
+    throw new Error(`Bun news API returned invalid article row ${index}: ${String(key)} must be a string array`);
   }
   return value;
 }
@@ -181,7 +181,7 @@ function requireLinkedStocks(row: Record<string, unknown>, index: number) {
     !Array.isArray(value) ||
     value.some((item) => !isRecord(item) || typeof item.code !== "string" || typeof item.name !== "string")
   ) {
-    throw new Error(`Rust news API returned invalid article row ${index}: linkedStocks must be stock references`);
+    throw new Error(`Bun news API returned invalid article row ${index}: linkedStocks must be stock references`);
   }
   return value as Array<{ code: string; name: string }>;
 }
@@ -190,14 +190,14 @@ function optionalString(row: Record<string, unknown>, key: string, context: stri
   const value = row[key];
   if (value == null) return undefined;
   if (typeof value !== "string") {
-    throw new Error(`Rust news API returned invalid ${context}: ${key} must be a string when provided`);
+    throw new Error(`Bun news API returned invalid ${context}: ${key} must be a string when provided`);
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
 }
 
 function newsArticleFromPayloadRow(row: unknown, index: number): NewsArticle {
-  if (!isRecord(row)) throw new Error(`Rust news API returned invalid article row ${index}: row must be an object`);
+  if (!isRecord(row)) throw new Error(`Bun news API returned invalid article row ${index}: row must be an object`);
   return {
     id: requireString(row, "id", index, false),
     title: requireString(row, "title", index, false),
@@ -224,16 +224,16 @@ function newsArticleFromPayloadRow(row: unknown, index: number): NewsArticle {
   };
 }
 
-function rustNewsStatsFromPayload(payload: unknown, mode: NewsFetchMode): NewsFetchStats {
+function bunNewsStatsFromPayload(payload: unknown, mode: NewsFetchMode): NewsFetchStats {
   if (!isRecord(payload) || !isRecord(payload.stats)) {
-    throw new Error("Rust news API returned invalid stats payload");
+    throw new Error("Bun news API returned invalid stats payload");
   }
   const stats = payload.stats;
   const statNumber = (key: keyof Omit<NewsFetchStats, "mode">) => {
     const value = stats[key];
     const parsed = Number(value);
     if (!Number.isFinite(parsed) || parsed < 0) {
-      throw new Error(`Rust news API returned invalid stats payload: ${key} must be a non-negative number`);
+      throw new Error(`Bun news API returned invalid stats payload: ${key} must be a non-negative number`);
     }
     return parsed;
   };
@@ -247,26 +247,26 @@ function rustNewsStatsFromPayload(payload: unknown, mode: NewsFetchMode): NewsFe
 }
 
 function newsArticlesFromPayload(payload: unknown): NewsArticle[] {
-  if (!isRecord(payload)) throw new Error("Rust news API returned invalid payload: root must be an object");
-  if (!Array.isArray(payload.articles)) throw new Error("Rust news API returned invalid payload: articles must be an array");
+  if (!isRecord(payload)) throw new Error("Bun news API returned invalid payload: root must be an object");
+  if (!Array.isArray(payload.articles)) throw new Error("Bun news API returned invalid payload: articles must be an array");
   return payload.articles.map(newsArticleFromPayloadRow);
 }
 
 function newsSourceDiagnosticsFromPayload(payload: unknown): NewsSourceDiagnostic[] {
-  if (!isRecord(payload)) throw new Error("Rust news API returned invalid payload: root must be an object");
+  if (!isRecord(payload)) throw new Error("Bun news API returned invalid payload: root must be an object");
   const diagnostics = payload.sourceDiagnostics;
   if (diagnostics == null) return [];
   if (!Array.isArray(diagnostics)) {
-    throw new Error("Rust news API returned invalid payload: sourceDiagnostics must be an array");
+    throw new Error("Bun news API returned invalid payload: sourceDiagnostics must be an array");
   }
   return diagnostics.map((item, index) => {
-    if (!isRecord(item)) throw new Error(`Rust news API returned invalid source diagnostic ${index}: row must be an object`);
+    if (!isRecord(item)) throw new Error(`Bun news API returned invalid source diagnostic ${index}: row must be an object`);
     const context = `source diagnostic ${index}`;
     const sourceId = optionalString(item, "sourceId", context);
     const sourceName = optionalString(item, "sourceName", context);
     const provider = optionalString(item, "provider", context);
     if (!sourceId || !sourceName || !provider) {
-      throw new Error(`Rust news API returned invalid source diagnostic ${index}: sourceId, sourceName and provider are required`);
+      throw new Error(`Bun news API returned invalid source diagnostic ${index}: sourceId, sourceName and provider are required`);
     }
     return {
       sourceId,
@@ -288,22 +288,22 @@ async function responseJson(response: Response) {
   try {
     return await response.json();
   } catch (error) {
-    throw new Error(`Rust news API returned invalid JSON: ${errorMessage(error)}`);
+    throw new Error(`Bun news API returned invalid JSON: ${errorMessage(error)}`);
   }
 }
 
-async function fetchRustNewsArticles(
+async function fetchBunNewsArticles(
   sources: NewsSourceEndpoint[],
   stocks: Stock[],
   fetchImpl: FetchLike,
   mode: NewsFetchMode
 ): Promise<NewsSourceFetchResult> {
-  const response = await fetchImpl(RUST_NEWS_ARTICLES_URL, {
+  const response = await fetchImpl(BUN_NEWS_ARTICLES_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ sources, stocks, mode })
   });
-  if (!response.ok) throw new Error(`Rust news API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+  if (!response.ok) throw new Error(`Bun news API HTTP ${response.status}${await responseErrorSuffix(response)}`);
   const payload = await responseJson(response);
   const articles = newsArticlesFromPayload(payload);
   const sourceDiagnostics = newsSourceDiagnosticsFromPayload(payload);
@@ -311,7 +311,7 @@ async function fetchRustNewsArticles(
     articles,
     sourceDiagnostics,
     stats: {
-      ...rustNewsStatsFromPayload(payload, mode),
+      ...bunNewsStatsFromPayload(payload, mode),
       validArticles: articles.length
     }
   };
@@ -330,7 +330,7 @@ function newsSourceDiagnosticsSummary(diagnostics: NewsSourceDiagnostic[]) {
     .map((diagnostic) => {
       const target = newsFallbackSourceLabel(diagnostic.fallbackSource ?? "");
       const reason = diagnostic.fallbackReason ? `，原因：${diagnostic.fallbackReason}` : "";
-      return `${diagnostic.sourceName || diagnostic.provider} 失败，Rust 已切换 ${target} 真实新闻源${reason}`;
+      return `${diagnostic.sourceName || diagnostic.provider} 失败，Bun 已切换 ${target} 真实新闻源${reason}`;
     })
     .join("；");
 }
@@ -358,43 +358,43 @@ export async function fetchNewsArticlesFromSources(
   }
 
   try {
-    const rustResult = await fetchRustNewsArticles(realSources, stocks, fetchImpl, mode);
-    if (rustResult.articles.length) {
-      const deduped = Array.from(new Map(rustResult.articles.map((article) => [article.id || article.url, article])).values()).sort(
+    const bunResult = await fetchBunNewsArticles(realSources, stocks, fetchImpl, mode);
+    if (bunResult.articles.length) {
+      const deduped = Array.from(new Map(bunResult.articles.map((article) => [article.id || article.url, article])).values()).sort(
         (a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
       );
       const modeLabel = newsFetchModeOptions.find((option) => option.value === mode)?.label ?? "快速";
-      const diagnosticsSummary = newsSourceDiagnosticsSummary(rustResult.sourceDiagnostics);
+      const diagnosticsSummary = newsSourceDiagnosticsSummary(bunResult.sourceDiagnostics);
       return {
         ok: true,
         checkedAt,
         message: "新闻刷新完成",
-        details: `已按${modeLabel}模式从 Rust 新闻接口拉取 ${deduped.length} 条真实新闻${diagnosticsSummary ? `；${diagnosticsSummary}` : ""}`,
+        details: `已按${modeLabel}模式从 Bun 新闻接口拉取 ${deduped.length} 条真实新闻${diagnosticsSummary ? `；${diagnosticsSummary}` : ""}`,
         articles: deduped,
         sourceRows: deduped.length,
         stats: {
-          ...rustResult.stats,
+          ...bunResult.stats,
           validArticles: deduped.length
         },
-        sourceDiagnostics: rustResult.sourceDiagnostics
+        sourceDiagnostics: bunResult.sourceDiagnostics
       };
     }
     return {
       ok: false,
       checkedAt,
       message: "新闻刷新失败",
-      details: "Rust 新闻接口未返回有效新闻；当前不再使用浏览器端采集解析",
+      details: "Bun 新闻接口未返回有效新闻；当前不再使用浏览器端采集解析",
       articles: [],
       sourceRows: 0,
-      stats: rustResult.stats,
-      sourceDiagnostics: rustResult.sourceDiagnostics
+      stats: bunResult.stats,
+      sourceDiagnostics: bunResult.sourceDiagnostics
     };
   } catch (error) {
     return {
       ok: false,
       checkedAt,
       message: "新闻刷新失败",
-      details: `Rust 新闻接口请求失败：${error instanceof Error ? error.message : "未知错误"}`,
+      details: `Bun 新闻接口请求失败：${error instanceof Error ? error.message : "未知错误"}`,
       articles: [],
       sourceRows: 0,
       stats: emptyNewsFetchStats(mode),

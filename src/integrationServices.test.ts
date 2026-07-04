@@ -44,7 +44,7 @@ describe("integrationServices", () => {
     expect(defaultInfoSourceSettings.baseUrl).toBe(AKTOOLS_DEFAULT_BASE_URL);
   });
 
-  it("requires an AShareHub API key and sends it through the Rust source test contract", async () => {
+  it("requires an AShareHub API key and sends it through the Bun source test contract", async () => {
     const missingKey = ensureInfoSourceSettings({
       provider: ASHAREHUB_PROVIDER,
       baseUrl: ASHAREHUB_DEFAULT_BASE_URL,
@@ -53,7 +53,7 @@ describe("integrationServices", () => {
     expect(validateInfoSourceSettings(missingKey)).toEqual(expect.arrayContaining(["AShareHub 需要填写 API Key"]));
 
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", provider: ASHAREHUB_PROVIDER, ok: true, rowCount: 8, message: "连接检测通过", details: "market: AShareHub returned 3 rows; finance: AShareHub returned 5 rows" }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", provider: ASHAREHUB_PROVIDER, ok: true, rowCount: 8, message: "连接检测通过", details: "market: AShareHub returned 3 rows; finance: AShareHub returned 5 rows" }), { status: 200 })
     );
     const settings = ensureInfoSourceSettings({
       provider: ASHAREHUB_PROVIDER,
@@ -99,7 +99,7 @@ describe("integrationServices", () => {
 
   it("checks the default real provider through a network contract", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", provider: AKSHARE_AKTOOLS_PROVIDER, ok: true, rowCount: 5, message: "连接检测通过", details: "Rust 原生数据接口已返回 5 条 A 股历史行情" }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", provider: AKSHARE_AKTOOLS_PROVIDER, ok: true, rowCount: 5, message: "连接检测通过", details: "Bun 原生数据接口已返回 5 条 A 股历史行情" }), { status: 200 })
     );
     const failureMock = vi.fn<typeof fetch>(async () => new Response("not found", { status: 404 }));
     const result = await testInfoSourceConnection(defaultInfoSourceSettings, failureMock);
@@ -109,7 +109,7 @@ describe("integrationServices", () => {
 
     const mocked = await testInfoSourceConnection(defaultInfoSourceSettings, fetchMock);
     expect(mocked.ok).toBe(true);
-    expect(mocked.details).toContain("Rust 原生数据接口");
+    expect(mocked.details).toContain("Bun 原生数据接口");
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/integration/source-test");
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
       provider: AKSHARE_AKTOOLS_PROVIDER,
@@ -117,9 +117,9 @@ describe("integrationServices", () => {
     });
   });
 
-  it("checks an external AKShare AKTools provider through the Rust proxy contract", async () => {
+  it("checks an external AKShare AKTools provider through the Bun proxy contract", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", provider: AKSHARE_AKTOOLS_PROVIDER, ok: true, rowCount: 1, message: "连接检测通过", details: "AKShare/AKTools 已由 Rust 代理返回 1 条 A 股历史行情" }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", provider: AKSHARE_AKTOOLS_PROVIDER, ok: true, rowCount: 1, message: "连接检测通过", details: "AKShare/AKTools 已由 Bun 代理返回 1 条 A 股历史行情" }), { status: 200 })
     );
     const settings = ensureInfoSourceSettings({
       provider: AKSHARE_AKTOOLS_PROVIDER,
@@ -137,9 +137,9 @@ describe("integrationServices", () => {
     });
   });
 
-  it("checks custom REST providers through the Rust source test endpoint", async () => {
+  it("checks custom REST providers through the Bun source test endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", provider: "自定义 REST 接口", ok: true, message: "连接检测通过", details: "远程 /health 接口已由 Rust 代理响应正常" }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", provider: "自定义 REST 接口", ok: true, message: "连接检测通过", details: "远程 /health 接口已由 Bun 代理响应正常" }), { status: 200 })
     );
     const settings = ensureInfoSourceSettings({
       provider: "自定义 REST 接口",
@@ -150,7 +150,7 @@ describe("integrationServices", () => {
     const result = await testInfoSourceConnection(settings, fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("Rust 代理");
+    expect(result.details).toContain("Bun 代理");
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/integration/source-test");
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
       provider: "自定义 REST 接口",
@@ -159,7 +159,7 @@ describe("integrationServices", () => {
     });
   });
 
-  it("reports invalid Rust info source JSON explicitly", async () => {
+  it("reports invalid Bun info source JSON explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
 
     const result = await testInfoSourceConnection(defaultInfoSourceSettings, fetchMock);
@@ -168,8 +168,8 @@ describe("integrationServices", () => {
     expect(result.details).toContain("invalid JSON");
   });
 
-  it("reports invalid Rust info source payloads explicitly", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "rust" }), { status: 200 }));
+  it("reports invalid Bun info source payloads explicitly", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "bun" }), { status: 200 }));
 
     const result = await testInfoSourceConnection(defaultInfoSourceSettings, fetchMock);
 

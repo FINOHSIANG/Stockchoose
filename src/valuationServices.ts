@@ -2,7 +2,7 @@ import type { Stock } from "./types";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-const RUST_VALUATION_ROWS_URL = "/api/valuation/rows";
+const BUN_VALUATION_ROWS_URL = "/api/valuation/rows";
 
 export type ValuationModel = "DCF现金流" | "PE盈利" | "PB-ROE" | "PS成长" | "股息资产";
 export type ValuationStyle = "严苛核算" | "均衡核算" | "保守核算" | "成长核算" | "资产核算";
@@ -672,32 +672,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function finiteNumberField(row: Record<string, unknown>, key: keyof ValuationRow, index: number) {
   const value = row[key];
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`Rust valuation API returned invalid valuation row ${index}: ${String(key)} must be a finite number`);
+    throw new Error(`Bun valuation API returned invalid valuation row ${index}: ${String(key)} must be a finite number`);
   }
 }
 
 function valuationRowFromPayloadRow(row: unknown, index: number): ValuationRow {
-  if (!isRecord(row)) throw new Error(`Rust valuation API returned invalid valuation row ${index}: row must be an object`);
+  if (!isRecord(row)) throw new Error(`Bun valuation API returned invalid valuation row ${index}: row must be an object`);
   if (!isRecord(row.stock) || typeof row.stock.code !== "string" || typeof row.stock.name !== "string") {
-    throw new Error(`Rust valuation API returned invalid valuation row ${index}: stock must be a stock object`);
+    throw new Error(`Bun valuation API returned invalid valuation row ${index}: stock must be a stock object`);
   }
   ["fairValue", "safetyMargin", "governanceScore", "qualityScore"].forEach((key) => finiteNumberField(row, key as keyof ValuationRow, index));
-  if (!isRecord(row.profile)) throw new Error(`Rust valuation API returned invalid valuation row ${index}: profile must be an object`);
+  if (!isRecord(row.profile)) throw new Error(`Bun valuation API returned invalid valuation row ${index}: profile must be an object`);
   if (!isRecord(row.components) || !Array.isArray(row.components.formulaRows)) {
-    throw new Error(`Rust valuation API returned invalid valuation row ${index}: components.formulaRows must be an array`);
+    throw new Error(`Bun valuation API returned invalid valuation row ${index}: components.formulaRows must be an array`);
   }
   return row as unknown as ValuationRow;
 }
 
-export async function buildValuationRowsRustFirst(
+export async function buildValuationRowsBunFirst(
   stocks: Stock[],
   filters: ValuationFilters,
   fetchImpl?: FetchLike
 ): Promise<ValuationRow[]> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust valuation API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun valuation API unavailable: fetch is not available");
 
-  const response = await request(RUST_VALUATION_ROWS_URL, {
+  const response = await request(BUN_VALUATION_ROWS_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ stocks, filters })
@@ -705,16 +705,16 @@ export async function buildValuationRowsRustFirst(
   if (!response.ok) {
     const details = await response.text().catch(() => "");
     const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
-    throw new Error(`Rust valuation API HTTP ${response.status}${suffix}`);
+    throw new Error(`Bun valuation API HTTP ${response.status}${suffix}`);
   }
   let rows: unknown;
   try {
     rows = await response.json();
   } catch (error) {
     const detail = error instanceof Error ? error.message : "invalid JSON";
-    throw new Error(`Rust valuation API returned invalid JSON: ${detail}`);
+    throw new Error(`Bun valuation API returned invalid JSON: ${detail}`);
   }
-  if (!Array.isArray(rows)) throw new Error("Rust valuation API returned invalid valuation rows");
+  if (!Array.isArray(rows)) throw new Error("Bun valuation API returned invalid valuation rows");
   return rows.map(valuationRowFromPayloadRow);
 }
 

@@ -2,7 +2,7 @@ import type { Stock } from "./types";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-const RUST_ANNUAL_REPORTS_URL = "/api/finance/annual-reports";
+const BUN_ANNUAL_REPORTS_URL = "/api/finance/annual-reports";
 
 export type AnnualFinancialReportYear = string;
 
@@ -103,31 +103,31 @@ const annualReportMetricFields: Array<keyof AnnualFinancialReportMetrics> = [
 ];
 
 function annualReportFromPayloadRow(row: unknown, index: number): AnnualFinancialReport {
-  if (!isRecord(row)) throw new Error(`Rust annual report API returned invalid annual report row ${index}: row must be an object`);
+  if (!isRecord(row)) throw new Error(`Bun annual report API returned invalid annual report row ${index}: row must be an object`);
   for (const field of annualReportStringFields) {
     if (typeof row[field] !== "string" || !String(row[field]).trim()) {
-      throw new Error(`Rust annual report API returned invalid annual report row ${index}: ${field} must be a non-empty string`);
+      throw new Error(`Bun annual report API returned invalid annual report row ${index}: ${field} must be a non-empty string`);
     }
   }
   if (row.sourceCsv !== undefined && typeof row.sourceCsv !== "string") {
-    throw new Error(`Rust annual report API returned invalid annual report row ${index}: sourceCsv must be a string`);
+    throw new Error(`Bun annual report API returned invalid annual report row ${index}: sourceCsv must be a string`);
   }
   if (!isRecord(row.metrics)) {
-    throw new Error(`Rust annual report API returned invalid annual report row ${index}: metrics must be an object`);
+    throw new Error(`Bun annual report API returned invalid annual report row ${index}: metrics must be an object`);
   }
   for (const field of annualReportMetricFields) {
     if (!isFiniteNumber(row.metrics[field])) {
-      throw new Error(`Rust annual report API returned invalid annual report row ${index}: metrics.${field} must be a finite number`);
+      throw new Error(`Bun annual report API returned invalid annual report row ${index}: metrics.${field} must be a finite number`);
     }
   }
   return row as unknown as AnnualFinancialReport;
 }
 
-export async function buildAnnualFinancialReportsRustFirst(stock: Stock, fetchImpl?: FetchLike): Promise<AnnualFinancialReport[]> {
+export async function buildAnnualFinancialReportsBunFirst(stock: Stock, fetchImpl?: FetchLike): Promise<AnnualFinancialReport[]> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust annual report API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun annual report API unavailable: fetch is not available");
 
-  const response = await request(RUST_ANNUAL_REPORTS_URL, {
+  const response = await request(BUN_ANNUAL_REPORTS_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ stock })
@@ -135,16 +135,16 @@ export async function buildAnnualFinancialReportsRustFirst(stock: Stock, fetchIm
   if (!response.ok) {
     const details = await response.text().catch(() => "");
     const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
-    throw new Error(`Rust annual report API HTTP ${response.status}${suffix}`);
+    throw new Error(`Bun annual report API HTTP ${response.status}${suffix}`);
   }
   let reports: unknown;
   try {
     reports = await response.json();
   } catch (error) {
     const detail = error instanceof Error ? error.message : "invalid JSON";
-    throw new Error(`Rust annual report API returned invalid JSON: ${detail}`);
+    throw new Error(`Bun annual report API returned invalid JSON: ${detail}`);
   }
-  if (!Array.isArray(reports)) throw new Error("Rust annual report API returned invalid annual reports");
+  if (!Array.isArray(reports)) throw new Error("Bun annual report API returned invalid annual reports");
   return reports.map(annualReportFromPayloadRow);
 }
 

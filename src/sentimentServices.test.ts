@@ -3,9 +3,9 @@ import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { defaultNewsAnalysisModelSettings } from "./newsAnalysisModelServices";
 import type { NewsArticle } from "./newsPageServices";
 import {
-  buildSentimentAnalysisRustFirst,
+  buildSentimentAnalysisBunFirst,
   buildSentimentEventsFromNewsArticles,
-  buildSentimentEventsRustFirst,
+  buildSentimentEventsBunFirst,
   buildSentimentInsightReport,
   buildSentimentLinkedStocks,
   filterSentimentEvents,
@@ -64,7 +64,7 @@ const testSentimentEvents: SentimentEvent[] = [
 
 function makeNewsArticle(overrides: Partial<NewsArticle> = {}): NewsArticle {
   return {
-    id: "rust-contract-news-001",
+    id: "bun-contract-news-001",
     title: "贵州茅台完成回购，食品饮料板块走强",
     summary: "贵州茅台公告完成回购，市场情绪改善。",
     content: "公司公告显示回购实施完毕。",
@@ -90,7 +90,7 @@ function makeNewsArticle(overrides: Partial<NewsArticle> = {}): NewsArticle {
   };
 }
 
-function makeRustSentimentEvent(article = makeNewsArticle()): SentimentEvent {
+function makeBunSentimentEvent(article = makeNewsArticle()): SentimentEvent {
   return {
     id: `real-news-${article.id}`,
     title: article.title,
@@ -121,10 +121,10 @@ describe("sentimentServices", () => {
     expect(buildSentimentEventsFromNewsArticles([article], STOCKS)).toEqual([]);
   });
 
-  it("uses Rust sentiment event generation on the local app proxy", async () => {
+  it("uses Bun sentiment event generation on the local app proxy", async () => {
     vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
     const article: NewsArticle = {
-      id: "rust-news-001",
+      id: "bun-news-001",
       title: "贵州茅台完成回购，食品饮料板块走强",
       summary: "贵州茅台公告完成回购，市场情绪改善。",
       content: "公司公告显示回购实施完毕。",
@@ -147,8 +147,8 @@ describe("sentimentServices", () => {
       viewCount: 0,
       commentCount: 0
     };
-    const rustEvent: SentimentEvent = {
-      id: "real-news-rust-news-001",
+    const bunEvent: SentimentEvent = {
+      id: "real-news-bun-news-001",
       title: article.title,
       summary: article.summary,
       category: "资金市场",
@@ -170,83 +170,83 @@ describe("sentimentServices", () => {
     };
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/sentiment/events") {
-        return new Response(JSON.stringify({ engine: "rust", events: [rustEvent] }), { status: 200 });
+        return new Response(JSON.stringify({ engine: "bun", events: [bunEvent] }), { status: 200 });
       }
       return new Response(JSON.stringify({ events: [] }), { status: 404 });
     });
 
-    const events = await buildSentimentEventsRustFirst([article], STOCKS, fetchMock);
+    const events = await buildSentimentEventsBunFirst([article], STOCKS, fetchMock);
 
-    expect(events).toEqual([rustEvent]);
+    expect(events).toEqual([bunEvent]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/sentiment/events");
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
-      articles: [{ id: "rust-news-001" }]
+      articles: [{ id: "bun-news-001" }]
     });
   });
 
-  it("uses Rust sentiment event generation without localhost gating", async () => {
+  it("uses Bun sentiment event generation without localhost gating", async () => {
     vi.stubGlobal("window", { location: { hostname: "stockchoose.example" } });
-    const article = makeNewsArticle({ id: "rust-contract-news-002" });
-    const rustEvent = makeRustSentimentEvent(article);
+    const article = makeNewsArticle({ id: "bun-contract-news-002" });
+    const bunEvent = makeBunSentimentEvent(article);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/sentiment/events") {
-        return new Response(JSON.stringify({ engine: "rust", events: [rustEvent] }), { status: 200 });
+        return new Response(JSON.stringify({ engine: "bun", events: [bunEvent] }), { status: 200 });
       }
       return new Response(JSON.stringify({ events: [] }), { status: 404 });
     });
 
-    const events = await buildSentimentEventsRustFirst([article], STOCKS, fetchMock);
+    const events = await buildSentimentEventsBunFirst([article], STOCKS, fetchMock);
 
-    expect(events).toEqual([rustEvent]);
+    expect(events).toEqual([bunEvent]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/sentiment/events");
   });
 
-  it("rejects when Rust sentiment event generation fails instead of using browser fallback", async () => {
+  it("rejects when Bun sentiment event generation fails instead of using browser fallback", async () => {
     const article = makeNewsArticle();
     expect(buildSentimentEventsFromNewsArticles([article], STOCKS)).toEqual([]);
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "rust unavailable" }), { status: 503 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "bun unavailable" }), { status: 503 }));
 
-    await expect(buildSentimentEventsRustFirst([article], STOCKS, fetchMock)).rejects.toThrow("Rust sentiment API HTTP 503");
+    await expect(buildSentimentEventsBunFirst([article], STOCKS, fetchMock)).rejects.toThrow("Bun sentiment API HTTP 503");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("uses Rust sentiment analysis for linked stocks and insight reports on the local app proxy", async () => {
+  it("uses Bun sentiment analysis for linked stocks and insight reports on the local app proxy", async () => {
     vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
     const event = testSentimentEvents[0];
     const stock = STOCKS.find((item) => item.code === "002594") ?? STOCKS[0];
-    const rustLinkedStock = {
+    const bunLinkedStock = {
       stock,
       events: [event],
       direction: event.direction,
       relationScore: 72.4,
       relationLevel: "直接命中" as const,
-      reason: "Rust 关联股票分析",
-      evidence: ["Rust 真实新闻源代码直接关联"],
+      reason: "Bun 关联股票分析",
+      evidence: ["Bun 真实新闻源代码直接关联"],
       tags: [event.category]
     };
-    const rustReport = {
-      title: "Rust 舆情洞察",
-      conclusion: "Rust 已完成关联股票分析。",
+    const bunReport = {
+      title: "Bun 舆情洞察",
+      conclusion: "Bun 已完成关联股票分析。",
       eventCount: 1,
       topCategories: [{ category: event.category, count: 1 }],
       topIndustries: [{ industry: event.industries[0], count: 1 }],
-      linkedStocks: [rustLinkedStock],
+      linkedStocks: [bunLinkedStock],
       riskEvents: [],
-      validationPoints: ["Rust validation"]
+      validationPoints: ["Bun validation"]
     };
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/sentiment/analysis") {
-        return new Response(JSON.stringify({ engine: "rust", linkedStocks: [rustLinkedStock], report: rustReport }), { status: 200 });
+        return new Response(JSON.stringify({ engine: "bun", linkedStocks: [bunLinkedStock], report: bunReport }), { status: 200 });
       }
-      return new Response(JSON.stringify({ linkedStocks: [], report: rustReport }), { status: 404 });
+      return new Response(JSON.stringify({ linkedStocks: [], report: bunReport }), { status: 404 });
     });
 
-    const analysis = await buildSentimentAnalysisRustFirst([event], STOCKS, fetchMock);
+    const analysis = await buildSentimentAnalysisBunFirst([event], STOCKS, fetchMock);
 
-    expect(analysis.linkedStocks).toEqual([rustLinkedStock]);
-    expect(analysis.report).toEqual(rustReport);
+    expect(analysis.linkedStocks).toEqual([bunLinkedStock]);
+    expect(analysis.report).toEqual(bunReport);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/sentiment/analysis");
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
@@ -257,23 +257,23 @@ describe("sentimentServices", () => {
     expect(requestBody.stocks.some((item) => item.code === "600519")).toBe(true);
   });
 
-  it("passes enabled news analysis model settings to the Rust sentiment analysis endpoint", async () => {
+  it("passes enabled news analysis model settings to the Bun sentiment analysis endpoint", async () => {
     const event = testSentimentEvents[0];
-    const rustReport = {
-      title: "Rust 舆情洞察",
-      conclusion: "Rust 模型已参与分析。",
+    const bunReport = {
+      title: "Bun 舆情洞察",
+      conclusion: "Bun 模型已参与分析。",
       eventCount: 1,
       topCategories: [{ category: event.category, count: 1 }],
       topIndustries: [{ industry: event.industries[0], count: 1 }],
       linkedStocks: [],
       riskEvents: [],
-      validationPoints: ["Rust model validation"]
+      validationPoints: ["Bun model validation"]
     };
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", linkedStocks: [], report: rustReport }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", linkedStocks: [], report: bunReport }), { status: 200 })
     );
 
-    await buildSentimentAnalysisRustFirst([event], STOCKS, {
+    await buildSentimentAnalysisBunFirst([event], STOCKS, {
       ...defaultNewsAnalysisModelSettings,
       provider: "OpenAI Compatible",
       baseUrl: "https://api.example.com/v1",
@@ -294,12 +294,12 @@ describe("sentimentServices", () => {
     });
   });
 
-  it("rejects when Rust sentiment analysis fails instead of using browser fallback", async () => {
-    const event = makeRustSentimentEvent();
+  it("rejects when Bun sentiment analysis fails instead of using browser fallback", async () => {
+    const event = makeBunSentimentEvent();
     expect(buildSentimentLinkedStocks([event], STOCKS)).toEqual([]);
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "rust unavailable" }), { status: 503 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: "bun unavailable" }), { status: 503 }));
 
-    await expect(buildSentimentAnalysisRustFirst([event], STOCKS, fetchMock)).rejects.toThrow("Rust sentiment analysis API HTTP 503");
+    await expect(buildSentimentAnalysisBunFirst([event], STOCKS, fetchMock)).rejects.toThrow("Bun sentiment analysis API HTTP 503");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -355,6 +355,6 @@ describe("sentimentServices", () => {
     expect(report.title).toBe("舆情关联股票洞察");
     expect(report.eventCount).toBe(events.length);
     expect(report.linkedStocks).toEqual([]);
-    expect(report.validationPoints).toEqual(expect.arrayContaining(["舆情事件、股票关联和洞察报告由 Rust 数据接口生成。"]));
+    expect(report.validationPoints).toEqual(expect.arrayContaining(["舆情事件、股票关联和洞察报告由 Bun 数据接口生成。"]));
   });
 });

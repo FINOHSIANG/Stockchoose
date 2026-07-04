@@ -2,7 +2,7 @@ const { app, BrowserWindow, Menu, shell } = require("electron");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const { handleRustAktoolsRequest, handleRustProxyRequest, stopRustApiSidecar } = require("./rust-api.cjs");
+const { handleBunAktoolsRequest, handleBunProxyRequest, stopBunApiSidecar } = require("./bun-api.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const distDir = path.join(__dirname, "..", "dist");
@@ -38,7 +38,7 @@ function rewriteGdeltNewsUrl(requestUrl) {
   return `/api/news/gdelt${parsed.search}`;
 }
 
-const rustProxyRules = [
+const bunProxyRules = [
   { prefix: "/api", requireSuccess: false },
   { prefix: "/tencent-quote", rewrite: rewriteTencentQuoteUrl },
   { prefix: "/tencent-kline", rewrite: rewriteTencentKlineUrl },
@@ -95,11 +95,11 @@ async function handleLocalRequestAsync(request, response) {
     await handleAktoolsRequest(request, response);
     return;
   }
-  const rustRule = rustProxyRules.find((item) => requestUrl.startsWith(item.prefix));
-  if (rustRule) {
-    if (await handleRustProxyRequest(request, response, rustRule)) return;
+  const bunRule = bunProxyRules.find((item) => requestUrl.startsWith(item.prefix));
+  if (bunRule) {
+    if (await handleBunProxyRequest(request, response, bunRule)) return;
     if (requestUrl.startsWith("/api")) {
-      sendText(response, 502, "Rust API is unavailable");
+      sendText(response, 502, "Bun API is unavailable");
       return;
     }
   }
@@ -107,10 +107,10 @@ async function handleLocalRequestAsync(request, response) {
 }
 
 async function handleAktoolsRequest(request, response) {
-  if (await handleRustAktoolsRequest(request, response, { prefix: "/aktools" })) return;
+  if (await handleBunAktoolsRequest(request, response, { prefix: "/aktools" })) return;
 
   if (!response.headersSent) {
-    sendText(response, 502, "Rust AKTools data API is unavailable");
+    sendText(response, 502, "Bun AKTools data API is unavailable");
   }
 }
 
@@ -133,7 +133,7 @@ function createWindow(entryUrl) {
     minWidth: 1100,
     minHeight: 720,
     title: "股票策略 Beta",
-    backgroundColor: "#f0f0f0",
+    backgroundColor: "#ffffff",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       nodeIntegration: false,
@@ -164,7 +164,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
-  stopRustApiSidecar();
+  stopBunApiSidecar();
   if (localServer) {
     localServer.close();
     localServer = null;

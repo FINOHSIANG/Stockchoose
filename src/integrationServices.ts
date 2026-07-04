@@ -26,7 +26,7 @@ export const AKTOOLS_DEFAULT_BASE_URL = "/aktools/api/public";
 export const ASHAREHUB_DEFAULT_BASE_URL = "https://asharehub.com";
 const DIRECT_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:18080/api/public";
 const LEGACY_AKTOOLS_DEFAULT_BASE_URL = "http://127.0.0.1:8080/api/public";
-const RUST_INFO_SOURCE_TEST_URL = "/api/integration/source-test";
+const BUN_INFO_SOURCE_TEST_URL = "/api/integration/source-test";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -40,7 +40,7 @@ async function responseJson(response: Response) {
   try {
     return await response.json();
   } catch (error) {
-    throw new Error(`Rust info source test API returned invalid JSON: ${errorMessage(error)}`);
+    throw new Error(`Bun info source test API returned invalid JSON: ${errorMessage(error)}`);
   }
 }
 
@@ -49,7 +49,7 @@ function invalidInfoSourcePayloadResult(checkedAt: string): ConnectionTestResult
     ok: false,
     checkedAt,
     message: "连接检测失败",
-    details: "Rust info source test API returned invalid payload: ok must be a boolean"
+    details: "Bun info source test API returned invalid payload: ok must be a boolean"
   };
 }
 
@@ -162,14 +162,14 @@ export async function testInfoSourceConnection(
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(settings.timeoutSeconds, 3) * 1000);
   try {
-    const response = await fetchImpl(RUST_INFO_SOURCE_TEST_URL, {
+    const response = await fetchImpl(BUN_INFO_SOURCE_TEST_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(settings),
       signal: controller.signal
     });
     if (!response.ok) {
-      return { ok: false, checkedAt, message: "连接检测失败", details: `Rust 信息源代理返回 HTTP ${response.status}` };
+      return { ok: false, checkedAt, message: "连接检测失败", details: `Bun 信息源代理返回 HTTP ${response.status}` };
     }
     const payload = await responseJson(response) as Partial<ConnectionTestResult> & { engine?: string; provider?: string; rowCount?: number };
     if (!isRecord(payload) || typeof payload.ok !== "boolean") {
@@ -179,7 +179,7 @@ export async function testInfoSourceConnection(
       ok: payload.ok,
       checkedAt,
       message: payload.message ?? (payload.ok ? "连接检测通过" : "连接检测失败"),
-      details: payload.details ?? "Rust 信息源代理未返回检测详情"
+      details: payload.details ?? "Bun 信息源代理未返回检测详情"
     };
   } catch (error) {
     const detail = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";

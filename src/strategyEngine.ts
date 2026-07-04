@@ -11,6 +11,7 @@ import type {
   StrategyConfig,
   StrategyOptimizationResult
 } from "./types";
+import { isAllIndustry, stockIndustryScopeKey, stockMatchesIndustry } from "./industryClassification";
 import { normalizeStockCodeKey, stockCodeCandidates } from "./stockIdentity";
 
 function clamp(value: number, min: number, max: number) {
@@ -210,19 +211,17 @@ function poolHasStock(codeSet: Set<string>, stock: Stock) {
 }
 
 function rangeScopeKey(stock: Stock, range: FilterCondition["range"] | RankCondition["range"]) {
-  if (textIncludes(range, ["一级", "涓€绾", "industry1"])) return `industry1:${stock.industry1 || "-"}`;
-  if (textIncludes(range, ["二级", "浜岀骇", "industry2"])) return `industry2:${stock.industry1 || "-"}:${stock.industry2 || "-"}`;
-  if (isAll(range)) return "all";
-  if (range === "一级行业") return `industry1:${stock.industry1 || "-"}`;
-  if (range === "二级行业") return `industry2:${stock.industry1 || "-"}:${stock.industry2 || "-"}`;
+  const text = String(range ?? "");
+  if (text.includes("industry1") || text.includes("\u4e00\u7ea7")) return stockIndustryScopeKey(stock, "industry1");
+  if (text.includes("industry2") || text.includes("\u4e8c\u7ea7")) return stockIndustryScopeKey(stock, "industry2");
   return "all";
 }
 
 function applySelector(strategy: StrategyConfig, stock: Stock) {
   if (!isAll(strategy.indexMember) && !stock.indexes.includes(strategy.indexMember)) return false;
   if (!isAll(strategy.board) && stock.board !== strategy.board) return false;
-  if (!isAll(strategy.industry1) && stock.industry1 !== strategy.industry1) return false;
-  if (!isAll(strategy.industry2) && stock.industry2 !== strategy.industry2) return false;
+  if (!isAllIndustry(strategy.industry1) && !stockMatchesIndustry(stock, "industry1", strategy.industry1)) return false;
+  if (!isAllIndustry(strategy.industry2) && !stockMatchesIndustry(stock, "industry2", strategy.industry2)) return false;
   if (!isAll(strategy.exchange) && stock.exchange !== strategy.exchange) return false;
   if (!isAll(strategy.region) && stock.region !== strategy.region) return false;
   if (!isAll(strategy.property) && stock.property !== strategy.property) return false;
@@ -427,7 +426,7 @@ export function screenStocks(
   return applyWeights(scored.slice(0, resultLimit), strategy, positiveInt(options.weightLimit, positiveInt(strategy.trading.maxHoldings, 1)));
 }
 
-async function readRustJson(response: Response, label: string): Promise<unknown> {
+async function readBunJson(response: Response, label: string): Promise<unknown> {
   if (!response.ok) {
     const details = await response.text().catch(() => "");
     const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
@@ -441,7 +440,7 @@ async function readRustJson(response: Response, label: string): Promise<unknown>
   }
 }
 
-function requireRustFetch(request: FetchLike | undefined, label: string): FetchLike {
+function requireBunFetch(request: FetchLike | undefined, label: string): FetchLike {
   if (!request) throw new Error(`${label} unavailable: fetch is not available`);
   return request;
 }
@@ -484,7 +483,7 @@ function rankingRowFromPayload(row: unknown, index: number, label: string): Rank
   return row as unknown as RankingRow;
 }
 
-export async function screenStocksRustFirst(
+export async function screenStocksBunFirst(
   strategy: StrategyConfig,
   stocks: Stock[],
   pools: StockPool[],
@@ -492,8 +491,8 @@ export async function screenStocksRustFirst(
   options: ScreenStocksOptions = {},
   fetchImpl?: FetchLike
 ): Promise<SelectionRow[]> {
-  const label = "Rust strategy screen API";
-  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const label = "Bun strategy screen API";
+  const request = requireBunFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
   const response = await request("/api/strategy/screen", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -506,7 +505,7 @@ export async function screenStocksRustFirst(
       weightLimit: options.weightLimit
     })
   });
-  const rows = await readRustJson(response, label);
+  const rows = await readBunJson(response, label);
   if (!Array.isArray(rows)) throw new Error(`${label} returned invalid selection rows`);
   return rows.map((row, index) => selectionRowFromPayload(row, index, label));
 }
@@ -685,7 +684,7 @@ export function runBacktest(
   };
 }
 
-export async function runBacktestRustFirst(
+export async function runBacktestBunFirst(
   strategy: StrategyConfig,
   stocks: Stock[],
   pools: StockPool[],
@@ -693,14 +692,14 @@ export async function runBacktestRustFirst(
   config: BacktestConfig,
   fetchImpl?: FetchLike
 ): Promise<BacktestResult> {
-  const label = "Rust strategy backtest API";
-  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const label = "Bun strategy backtest API";
+  const request = requireBunFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
   const response = await request("/api/strategy/backtest", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ strategy, stocks, pools, factors, config })
   });
-  const result = await readRustJson(response, label);
+  const result = await readBunJson(response, label);
   if (!result || !Array.isArray((result as BacktestResult).rows) || !Array.isArray((result as BacktestResult).curve)) {
     throw new Error(`${label} returned invalid backtest result`);
   }
@@ -723,21 +722,21 @@ export function rankingAnalysis(strategy: StrategyConfig, stocks: Stock[], pools
   }));
 }
 
-export async function rankingAnalysisRustFirst(
+export async function rankingAnalysisBunFirst(
   strategy: StrategyConfig,
   stocks: Stock[],
   pools: StockPool[],
   factors: Factor[],
   fetchImpl?: FetchLike
 ): Promise<RankingRow[]> {
-  const label = "Rust strategy rank API";
-  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const label = "Bun strategy rank API";
+  const request = requireBunFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
   const response = await request("/api/strategy/rank", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ strategy, stocks, pools, factors })
   });
-  const rows = await readRustJson(response, label);
+  const rows = await readBunJson(response, label);
   if (!Array.isArray(rows)) throw new Error(`${label} returned invalid ranking rows`);
   return rows.map((row, index) => rankingRowFromPayload(row, index, label));
 }
@@ -773,7 +772,7 @@ export function optimizeStrategy(
   };
 }
 
-export async function optimizeStrategyRustFirst(
+export async function optimizeStrategyBunFirst(
   strategy: StrategyConfig,
   stocks: Stock[],
   pools: StockPool[],
@@ -781,14 +780,14 @@ export async function optimizeStrategyRustFirst(
   config: BacktestConfig,
   fetchImpl?: FetchLike
 ): Promise<StrategyOptimizationResult> {
-  const label = "Rust strategy optimize API";
-  const request = requireRustFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
+  const label = "Bun strategy optimize API";
+  const request = requireBunFetch(fetchImpl ?? (typeof fetch === "function" ? fetch : undefined), label);
   const response = await request("/api/strategy/optimize", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ strategy, stocks, pools, factors, config })
   });
-  const result = await readRustJson(response, label);
+  const result = await readBunJson(response, label);
   if (!(result as StrategyOptimizationResult)?.candidate || !(result as StrategyOptimizationResult)?.result?.metrics) {
     throw new Error(`${label} returned invalid optimization result`);
   }

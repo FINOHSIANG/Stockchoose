@@ -48,7 +48,7 @@ describe("newsPageServices", () => {
     expect(result.stats.requestCount).toBe(0);
   });
 
-  it("passes Tencent announcement sources to the Rust news collector", async () => {
+  it("passes Tencent announcement sources to the Bun news collector", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/news/articles") {
         return new Response(JSON.stringify({
@@ -110,7 +110,7 @@ describe("newsPageServices", () => {
     });
   });
 
-  it("passes GDELT sources to the Rust news collector", async () => {
+  it("passes GDELT sources to the Bun news collector", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/news/articles") {
         return new Response(JSON.stringify({
@@ -172,7 +172,7 @@ describe("newsPageServices", () => {
     });
   });
 
-  it("surfaces real-source fallback diagnostics from the Rust news collector", async () => {
+  it("surfaces real-source fallback diagnostics from the Bun news collector", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/news/articles") {
         return new Response(JSON.stringify({
@@ -227,11 +227,11 @@ describe("newsPageServices", () => {
         fallbackReason: "GDELT request timed out"
       })
     ]);
-    expect(result.details).toContain("Rust 已切换 东方财富 真实新闻源");
+    expect(result.details).toContain("Bun 已切换 东方财富 真实新闻源");
     expect(result.details).toContain("GDELT request timed out");
   });
 
-  it("uses Rust structured news articles without browser-side parsing", async () => {
+  it("uses Bun structured news articles without browser-side parsing", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url === "/api/news/articles") {
@@ -277,7 +277,7 @@ describe("newsPageServices", () => {
     const result = await fetchNewsArticlesFromSources([gdeltSource], STOCKS.filter((stock) => stock.code === "600519"), fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("Rust 新闻接口");
+    expect(result.details).toContain("Bun 新闻接口");
     expect(result.articles[0]).toMatchObject({
       source: "example.com",
       sentiment: "利好",
@@ -287,7 +287,7 @@ describe("newsPageServices", () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news/articles");
   });
 
-  it("passes NewsAPI and custom remote source settings to the Rust news collector", async () => {
+  it("passes NewsAPI and custom remote source settings to the Bun news collector", async () => {
     const source: NewsSourceEndpoint = {
       id: "news-newsapi",
       name: "NewsAPI",
@@ -349,7 +349,7 @@ describe("newsPageServices", () => {
     });
   });
 
-  it("does not fall back to browser-side GDELT parsing when the Rust news API fails", async () => {
+  it("does not fall back to browser-side GDELT parsing when the Bun news API fails", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/news/articles") {
         return new Response(JSON.stringify({ message: "unavailable" }), { status: 502 });
@@ -361,7 +361,7 @@ describe("newsPageServices", () => {
 
     expect(result.ok).toBe(false);
     expect(result.articles).toEqual([]);
-    expect(result.details).toContain("Rust 新闻接口请求失败");
+    expect(result.details).toContain("Bun 新闻接口请求失败");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news/articles");
   });
@@ -433,7 +433,7 @@ describe("newsPageServices", () => {
     });
   });
 
-  it("reports invalid Rust news article payloads explicitly", async () => {
+  it("reports invalid Bun news article payloads explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({
         articles: { unexpected: true },
@@ -448,7 +448,7 @@ describe("newsPageServices", () => {
     expect(result.details).toContain("invalid payload");
   });
 
-  it("reports invalid Rust news source diagnostics explicitly", async () => {
+  it("reports invalid Bun news source diagnostics explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({
         articles: [],
@@ -464,7 +464,7 @@ describe("newsPageServices", () => {
     expect(result.details).toContain("sourceDiagnostics must be an array");
   });
 
-  it("reports invalid Rust news JSON explicitly", async () => {
+  it("reports invalid Bun news JSON explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
 
     const result = await fetchNewsArticlesFromSources([gdeltSource], STOCKS.filter((stock) => stock.code === "600519"), fetchMock);

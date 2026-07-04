@@ -3,7 +3,7 @@ import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import type { Stock } from "./types";
 import {
   buildValuationRows,
-  buildValuationRowsRustFirst,
+  buildValuationRowsBunFirst,
   defaultValuationFilters,
   hasRequiredRealValuationData,
   missingRealValuationFields,
@@ -68,9 +68,9 @@ describe("valuationServices", () => {
     expect(buildValuationRows(realReadyStocks, { ...defaultValuationFilters, minSafetyMargin: -999 })).toEqual([]);
   });
 
-  it("uses the Rust valuation endpoint as the only valuation result source", async () => {
+  it("uses the Bun valuation endpoint as the only valuation result source", async () => {
     const realReadyStocks = STOCKS.map(withRequiredRealValuationData);
-    const rustRows = [
+    const bunRows = [
       {
         stock: realReadyStocks[0],
         fairValue: 10,
@@ -81,9 +81,9 @@ describe("valuationServices", () => {
         components: { formulaRows: [] }
       }
     ] as unknown as ValuationRow[];
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(rustRows), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(bunRows), { status: 200 }));
 
-    const rows = await buildValuationRowsRustFirst(realReadyStocks, defaultValuationFilters, fetchMock as typeof fetch);
+    const rows = await buildValuationRowsBunFirst(realReadyStocks, defaultValuationFilters, fetchMock as typeof fetch);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/valuation/rows",
@@ -95,15 +95,15 @@ describe("valuationServices", () => {
       filters: expect.objectContaining(defaultValuationFilters)
     });
     expect(body.filters).not.toHaveProperty("displayLimit");
-    expect(rows).toEqual(rustRows);
+    expect(rows).toEqual(bunRows);
   });
 
-  it("throws a visible error when the Rust valuation API fails", async () => {
+  it("throws a visible error when the Bun valuation API fails", async () => {
     const realReadyStocks = STOCKS.map(withRequiredRealValuationData);
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 }));
 
-    await expect(buildValuationRowsRustFirst(realReadyStocks, defaultValuationFilters, fetchMock as typeof fetch)).rejects.toThrow(
-      "Rust valuation API HTTP 503"
+    await expect(buildValuationRowsBunFirst(realReadyStocks, defaultValuationFilters, fetchMock as typeof fetch)).rejects.toThrow(
+      "Bun valuation API HTTP 503"
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/valuation/rows",
@@ -111,11 +111,11 @@ describe("valuationServices", () => {
     );
   });
 
-  it("throws a visible error when the Rust valuation payload has invalid rows", async () => {
+  it("throws a visible error when the Bun valuation payload has invalid rows", async () => {
     const realReadyStocks = STOCKS.map(withRequiredRealValuationData);
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([{ stock: realReadyStocks[0], fairValue: "bad" }]), { status: 200 }));
 
-    await expect(buildValuationRowsRustFirst(realReadyStocks, defaultValuationFilters, fetchMock as typeof fetch)).rejects.toThrow(
+    await expect(buildValuationRowsBunFirst(realReadyStocks, defaultValuationFilters, fetchMock as typeof fetch)).rejects.toThrow(
       "invalid valuation row"
     );
   });

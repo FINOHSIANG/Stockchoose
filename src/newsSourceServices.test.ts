@@ -96,15 +96,15 @@ describe("newsSourceServices", () => {
     expect(result.details).toContain("本地舆情样本已清空");
   });
 
-  it("tests and enables Tencent announcement sources through the Rust source test API", async () => {
+  it("tests and enables Tencent announcement sources through the Bun source test API", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         provider: "腾讯证券公告",
         ok: true,
         rowCount: 2,
         message: "新闻源检测通过",
-        details: "腾讯证券公告 已由 Rust 公告采集器响应，返回 2 条测试新闻"
+        details: "腾讯证券公告 已由 Bun 公告采集器响应，返回 2 条测试新闻"
       }), { status: 200 })
     );
     const source = {
@@ -127,7 +127,7 @@ describe("newsSourceServices", () => {
     expect(settings.sources[0].provider).toBe("腾讯证券公告");
     expect(enabledNewsSources({ sources: [source] }).map((item) => item.provider)).toEqual(["腾讯证券公告"]);
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("Rust 公告采集器");
+    expect(result.details).toContain("Bun 公告采集器");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news/source-test");
     expect(requestBody.source).toMatchObject({
@@ -137,15 +137,15 @@ describe("newsSourceServices", () => {
     });
   });
 
-  it("checks the default GDELT source through the Rust source test API", async () => {
+  it("checks the default GDELT source through the Bun source test API", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         provider: "GDELT 2.1",
         ok: true,
         rowCount: 1,
         message: "新闻源检测通过",
-        details: "GDELT 全球新闻 已由 Rust 新闻采集器响应，返回 1 条测试新闻"
+        details: "GDELT 全球新闻 已由 Bun 新闻采集器响应，返回 1 条测试新闻"
       }), { status: 200 })
     );
     const gdeltSource = defaultNewsSourceSettings.sources.find((item) => item.provider === "GDELT 2.1");
@@ -162,7 +162,7 @@ describe("newsSourceServices", () => {
     const result = await testNewsSourceConnection(source, fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("Rust 新闻采集器");
+    expect(result.details).toContain("Bun 新闻采集器");
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news/source-test");
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
       source: {
@@ -173,16 +173,16 @@ describe("newsSourceServices", () => {
     });
   });
 
-  it("checks remote news sources through the Rust source test API", async () => {
+  it("checks remote news sources through the Bun source test API", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input) === "/api/news/source-test") {
         return new Response(JSON.stringify({
-          engine: "rust",
+          engine: "bun",
           provider: "NewsAPI",
           ok: true,
           rowCount: 1,
           message: "新闻源检测通过",
-          details: "NewsAPI 已由 Rust 新闻采集器响应，返回 1 条测试新闻"
+          details: "NewsAPI 已由 Bun 新闻采集器响应，返回 1 条测试新闻"
         }), { status: 200 });
       }
       return new Response(JSON.stringify({ ok: false }), { status: 500 });
@@ -200,7 +200,7 @@ describe("newsSourceServices", () => {
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as { source: typeof source };
 
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("Rust 新闻采集器");
+    expect(result.details).toContain("Bun 新闻采集器");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news/source-test");
     expect(requestBody.source).toMatchObject({
@@ -211,15 +211,15 @@ describe("newsSourceServices", () => {
     });
   });
 
-  it("routes custom remote GDELT URLs through the Rust source test API", async () => {
+  it("routes custom remote GDELT URLs through the Bun source test API", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
       new Response(JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         provider: "GDELT 2.1",
         ok: true,
         rowCount: 1,
         message: "新闻源检测通过",
-        details: "GDELT 已由 Rust 新闻采集器响应"
+        details: "GDELT 已由 Bun 新闻采集器响应"
       }), { status: 200 })
     );
     const source = {
@@ -239,7 +239,7 @@ describe("newsSourceServices", () => {
     });
   });
 
-  it("reports invalid Rust news source JSON explicitly", async () => {
+  it("reports invalid Bun news source JSON explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
     const source = defaultNewsSourceSettings.sources[0];
 
@@ -249,8 +249,8 @@ describe("newsSourceServices", () => {
     expect(result.details).toContain("invalid JSON");
   });
 
-  it("reports invalid Rust news source payloads explicitly", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "rust" }), { status: 200 }));
+  it("reports invalid Bun news source payloads explicitly", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "bun" }), { status: 200 }));
     const source = defaultNewsSourceSettings.sources[0];
 
     const result = await testNewsSourceConnection(source, fetchMock);

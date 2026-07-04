@@ -51,7 +51,7 @@ export const newsAnalysisTaskLabels: Array<{ key: NewsAnalysisTaskKey; label: st
 export const defaultNewsAnalysisSystemPrompt =
   "你是A股新闻信息分析模型。请严格区分事实、推断和投资观点，输出情绪方向、事件类型、关联行业、关联股票、影响期限和风险提示。";
 
-const RUST_NEWS_ANALYSIS_MODEL_TEST_URL = "/api/news-analysis/model-test";
+const BUN_NEWS_ANALYSIS_MODEL_TEST_URL = "/api/news-analysis/model-test";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -65,7 +65,7 @@ async function responseJson(response: Response) {
   try {
     return await response.json();
   } catch (error) {
-    throw new Error(`Rust news analysis model test API returned invalid JSON: ${errorMessage(error)}`);
+    throw new Error(`Bun news analysis model test API returned invalid JSON: ${errorMessage(error)}`);
   }
 }
 
@@ -79,7 +79,7 @@ function newsAnalysisModelTestResultFromPayload(
       ok: false,
       checkedAt,
       message: "分析模型检测失败",
-      details: "Rust news analysis model test API returned invalid payload: ok must be a boolean"
+      details: "Bun news analysis model test API returned invalid payload: ok must be a boolean"
     };
   }
   return {
@@ -92,7 +92,7 @@ function newsAnalysisModelTestResultFromPayload(
         : "分析模型检测失败",
     details: typeof payload.details === "string" && payload.details.trim()
       ? payload.details
-      : `${settings.provider} / ${settings.model} 已由 Rust 分析模型代理完成检测`
+      : `${settings.provider} / ${settings.model} 已由 Bun 分析模型代理完成检测`
   };
 }
 
@@ -184,7 +184,7 @@ export async function testNewsAnalysisModelConnection(
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(safeSettings.timeoutSeconds, 3) * 1000);
   try {
-    const response = await fetchImpl(RUST_NEWS_ANALYSIS_MODEL_TEST_URL, {
+    const response = await fetchImpl(BUN_NEWS_ANALYSIS_MODEL_TEST_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -201,7 +201,7 @@ export async function testNewsAnalysisModelConnection(
       signal: controller.signal
     });
     if (!response.ok) {
-      return { ok: false, checkedAt, message: "分析模型检测失败", details: `Rust 分析模型代理返回 HTTP ${response.status}` };
+      return { ok: false, checkedAt, message: "分析模型检测失败", details: `Bun 分析模型代理返回 HTTP ${response.status}` };
     }
     const payload = await responseJson(response) as Partial<NewsAnalysisModelTestResult> & { engine?: string; provider?: string; model?: string };
     if (!isRecord(payload) || typeof payload.ok !== "boolean") {
@@ -211,7 +211,7 @@ export async function testNewsAnalysisModelConnection(
       ok: payload.ok,
       checkedAt,
       message: payload.message ?? (payload.ok ? "分析模型检测通过" : "分析模型检测失败"),
-      details: payload.details ?? `${safeSettings.provider} / ${safeSettings.model} 已由 Rust 分析模型代理完成检测`
+      details: payload.details ?? `${safeSettings.provider} / ${safeSettings.model} 已由 Bun 分析模型代理完成检测`
     };
   } catch (error) {
     const details = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";

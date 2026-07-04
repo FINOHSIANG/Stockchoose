@@ -1,0 +1,316 @@
+{
+  "ok": true,
+  "dark": [],
+  "consoleMessages": [
+    "debug: [vite] connecting...",
+    "debug: [vite] connected.",
+    "info: %cDownload the React DevTools for a better development experience: https://reactjs.org/link/react-devtools font-weight:bold"
+  ],
+  "samples": [
+    {
+      "label": "??",
+      "samples": [
+        {
+          "selector": "body",
+          "text": "策略交易舆情价值核算设置策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 1171
+        },
+        {
+          "selector": ".primary-nav",
+          "text": "策略交易舆情价值核算设置",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 54
+        },
+        {
+          "selector": "main",
+          "text": "股票策略新增策略智能调优删除另存保存导出择股设置交易模型大盘择时股指对冲策略定义",
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 1101
+        },
+        {
+          "selector": ".strategy-manager",
+          "text": "策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保存导出调优筛选0排名3持",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 240,
+          "height": 870
+        },
+        {
+          "selector": ".strategy-title",
+          "text": "股票策略新增策略智能调优删除另存保存导出",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 66
+        },
+        {
+          "selector": ".workbench",
+          "text": "择股设置交易模型大盘择时股指对冲策略定义总结新手帮助我的股票池：全部股票主板创业",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 685
+        },
+        {
+          "selector": ".selection-table",
+          "text": "候选股票已选 0 只暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1124,
+          "height": 121
+        }
+      ]
+    },
+    {
+      "label": "??",
+      "samples": [
+        {
+          "selector": "body",
+          "text": "策略交易舆情价值核算设置策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 1171
+        },
+        {
+          "selector": ".primary-nav",
+          "text": "策略交易舆情价值核算设置",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 54
+        },
+        {
+          "selector": "main",
+          "text": "股票策略新增策略智能调优删除另存保存导出择股设置交易模型大盘择时股指对冲策略定义",
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 1101
+        },
+        {
+          "selector": ".strategy-manager",
+          "text": "策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保存导出调优筛选0排名3持",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 240,
+          "height": 870
+        },
+        {
+          "selector": ".strategy-title",
+          "text": "股票策略新增策略智能调优删除另存保存导出",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 66
+        },
+        {
+          "selector": ".workbench",
+          "text": "择股设置交易模型大盘择时股指对冲策略定义总结新手帮助我的股票池：全部股票主板创业",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 685
+        },
+        {
+          "selector": ".selection-table",
+          "text": "候选股票已选 0 只暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1124,
+          "height": 121
+        }
+      ]
+    },
+    {
+      "label": "??",
+      "samples": [
+        {
+          "selector": "body",
+          "text": "策略交易舆情价值核算设置策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 1171
+        },
+        {
+          "selector": ".primary-nav",
+          "text": "策略交易舆情价值核算设置",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 54
+        },
+        {
+          "selector": "main",
+          "text": "股票策略新增策略智能调优删除另存保存导出择股设置交易模型大盘择时股指对冲策略定义",
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 1101
+        },
+        {
+          "selector": ".strategy-manager",
+          "text": "策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保存导出调优筛选0排名3持",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 240,
+          "height": 870
+        },
+        {
+          "selector": ".strategy-title",
+          "text": "股票策略新增策略智能调优删除另存保存导出",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 66
+        },
+        {
+          "selector": ".workbench",
+          "text": "择股设置交易模型大盘择时股指对冲策略定义总结新手帮助我的股票池：全部股票主板创业",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 685
+        },
+        {
+          "selector": ".selection-table",
+          "text": "候选股票已选 0 只暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1124,
+          "height": 121
+        }
+      ]
+    },
+    {
+      "label": "????",
+      "samples": [
+        {
+          "selector": "body",
+          "text": "策略交易舆情价值核算设置策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 1171
+        },
+        {
+          "selector": ".primary-nav",
+          "text": "策略交易舆情价值核算设置",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 54
+        },
+        {
+          "selector": "main",
+          "text": "股票策略新增策略智能调优删除另存保存导出择股设置交易模型大盘择时股指对冲策略定义",
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 1101
+        },
+        {
+          "selector": ".strategy-manager",
+          "text": "策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保存导出调优筛选0排名3持",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 240,
+          "height": 870
+        },
+        {
+          "selector": ".strategy-title",
+          "text": "股票策略新增策略智能调优删除另存保存导出",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 66
+        },
+        {
+          "selector": ".workbench",
+          "text": "择股设置交易模型大盘择时股指对冲策略定义总结新手帮助我的股票池：全部股票主板创业",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 685
+        },
+        {
+          "selector": ".selection-table",
+          "text": "候选股票已选 0 只暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1124,
+          "height": 121
+        }
+      ]
+    },
+    {
+      "label": "??",
+      "samples": [
+        {
+          "selector": "body",
+          "text": "策略交易舆情价值核算设置策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 1171
+        },
+        {
+          "selector": ".primary-nav",
+          "text": "策略交易舆情价值核算设置",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1440,
+          "height": 54
+        },
+        {
+          "selector": "main",
+          "text": "股票策略新增策略智能调优删除另存保存导出择股设置交易模型大盘择时股指对冲策略定义",
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 1101
+        },
+        {
+          "selector": ".strategy-manager",
+          "text": "策略管理‹当前策略股票策略草稿策略编辑实盘交易新增策略保存导出调优筛选0排名3持",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 240,
+          "height": 870
+        },
+        {
+          "selector": ".strategy-title",
+          "text": "股票策略新增策略智能调优删除另存保存导出",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 66
+        },
+        {
+          "selector": ".workbench",
+          "text": "择股设置交易模型大盘择时股指对冲策略定义总结新手帮助我的股票池：全部股票主板创业",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1156,
+          "height": 685
+        },
+        {
+          "selector": ".selection-table",
+          "text": "候选股票已选 0 只暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。",
+          "backgroundColor": "rgb(255, 255, 255)",
+          "color": "rgb(23, 32, 51)",
+          "width": 1124,
+          "height": 121
+        }
+      ]
+    }
+  ]
+}

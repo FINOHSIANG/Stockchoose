@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import {
   buildAnnualFinancialReports,
-  buildAnnualFinancialReportsRustFirst,
+  buildAnnualFinancialReportsBunFirst,
   buildFinancialReportSourceCsv,
   buildFinancialReportSourceDataUrl
 } from "./financialReportServices";
 import type { AnnualFinancialReport } from "./financialReportServices";
 
-function rustAnnualReport(sourceCsv?: string): AnnualFinancialReport {
+function bunAnnualReport(sourceCsv?: string): AnnualFinancialReport {
   return {
     code: "600519",
     name: "贵州茅台",
@@ -21,7 +21,7 @@ function rustAnnualReport(sourceCsv?: string): AnnualFinancialReport {
     sourceProvider: "真实财报接口",
     sourceFileName: "600519-贵州茅台-2025-real-annual-report-source.csv",
     sourceFileType: "CSV",
-    sourceNote: "由 Rust 财报接口生成，不倒推历史年度。",
+    sourceNote: "由 Bun 财报接口生成，不倒推历史年度。",
     sourceCsv,
     metrics: {
       revenue: 1275,
@@ -70,34 +70,34 @@ describe("financialReportServices", () => {
     expect(reports).toEqual([]);
   });
 
-  it("uses the Rust annual report endpoint and Rust-built CSV", async () => {
+  it("uses the Bun annual report endpoint and Bun-built CSV", async () => {
     const stock = STOCKS.find((item) => item.code === "600519");
     expect(stock).toBeDefined();
-    const rustReports = [rustAnnualReport("股票代码,股票名称\r\n600519,贵州茅台")];
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(rustReports), { status: 200 }));
+    const bunReports = [bunAnnualReport("股票代码,股票名称\r\n600519,贵州茅台")];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(bunReports), { status: 200 }));
 
-    const reports = await buildAnnualFinancialReportsRustFirst(stock!, fetchMock as typeof fetch);
+    const reports = await buildAnnualFinancialReportsBunFirst(stock!, fetchMock as typeof fetch);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/finance/annual-reports",
       expect.objectContaining({ method: "POST" })
     );
-    expect(reports).toEqual(rustReports);
-    expect(buildFinancialReportSourceCsv(reports[0])).toBe(rustReports[0].sourceCsv);
+    expect(reports).toEqual(bunReports);
+    expect(buildFinancialReportSourceCsv(reports[0])).toBe(bunReports[0].sourceCsv);
     expect(decodeURIComponent(buildFinancialReportSourceDataUrl(reports[0]))).toContain("股票代码,股票名称");
   });
 
-  it("does not build a source CSV when Rust did not return one", () => {
-    expect(buildFinancialReportSourceCsv(rustAnnualReport())).toBe("");
+  it("does not build a source CSV when Bun did not return one", () => {
+    expect(buildFinancialReportSourceCsv(bunAnnualReport())).toBe("");
   });
 
-  it("throws a visible error when the Rust annual report API fails", async () => {
+  it("throws a visible error when the Bun annual report API fails", async () => {
     const stock = STOCKS.find((item) => item.code === "600519");
     expect(stock).toBeDefined();
     const fetchMock = vi.fn(async () => new Response("{}", { status: 503 }));
 
-    await expect(buildAnnualFinancialReportsRustFirst(stock!, fetchMock as typeof fetch)).rejects.toThrow(
-      "Rust annual report API HTTP 503"
+    await expect(buildAnnualFinancialReportsBunFirst(stock!, fetchMock as typeof fetch)).rejects.toThrow(
+      "Bun annual report API HTTP 503"
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/finance/annual-reports",
@@ -105,12 +105,12 @@ describe("financialReportServices", () => {
     );
   });
 
-  it("throws a visible error when the Rust annual report payload has invalid rows", async () => {
+  it("throws a visible error when the Bun annual report payload has invalid rows", async () => {
     const stock = STOCKS.find((item) => item.code === "600519");
     expect(stock).toBeDefined();
     const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ code: "600519", metrics: {} }]), { status: 200 }));
 
-    await expect(buildAnnualFinancialReportsRustFirst(stock!, fetchMock as typeof fetch)).rejects.toThrow(
+    await expect(buildAnnualFinancialReportsBunFirst(stock!, fetchMock as typeof fetch)).rejects.toThrow(
       "invalid annual report row"
     );
   });

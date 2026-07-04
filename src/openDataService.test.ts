@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { STOCKS } from "../tests/fixtures/testStockFixtures";
 import { AKSHARE_AKTOOLS_PROVIDER, AKTOOLS_DEFAULT_BASE_URL, ASHAREHUB_DEFAULT_BASE_URL, ASHAREHUB_PROVIDER, ensureInfoSourceSettings } from "./integrationServices";
-import { mergeAkShareFinancialRows, mergeAkShareSpotRows, mergeRustAnalystForecastRows, mergeRustFinancialMetricRows, mergeRustMarginBalanceRows, mergeRustNorthHoldingRows, mergeRustTechnicalIndicatorRows, normalizeAkShareSpotRow, syncOpenSourceFinancialReports, syncOpenSourceMarketData } from "./openDataService";
+import { mergeAkShareFinancialRows, mergeAkShareSpotRows, mergeBunAnalystForecastRows, mergeBunFinancialMetricRows, mergeBunMarginBalanceRows, mergeBunNorthHoldingRows, mergeBunTechnicalIndicatorRows, normalizeAkShareSpotRow, syncOpenSourceFinancialReports, syncOpenSourceMarketData } from "./openDataService";
 
 const akshareRows = [
   {
@@ -89,7 +89,7 @@ const akshareFinancialRows = {
   reportDate: "20251231"
 };
 
-const rustFinancialMetricRows = [
+const bunFinancialMetricRows = [
   {
     code: "600519",
     name: "贵州茅台",
@@ -125,7 +125,7 @@ const rustFinancialMetricRows = [
   }
 ];
 
-const rustAnalystForecastRows = [
+const bunAnalystForecastRows = [
   {
     code: "600519",
     name: "Kweichow Moutai",
@@ -145,7 +145,7 @@ const rustAnalystForecastRows = [
   }
 ];
 
-const rustMarginBalanceRows = [
+const bunMarginBalanceRows = [
   {
     code: "600519",
     name: "Kweichow Moutai",
@@ -165,7 +165,7 @@ const rustMarginBalanceRows = [
   }
 ];
 
-const rustNorthHoldingRows = [
+const bunNorthHoldingRows = [
   {
     code: "600519",
     name: "Kweichow Moutai",
@@ -184,7 +184,7 @@ const rustNorthHoldingRows = [
   }
 ];
 
-const rustTechnicalIndicatorRows = [
+const bunTechnicalIndicatorRows = [
   {
     code: "600519",
     name: "Kweichow Moutai",
@@ -329,9 +329,9 @@ describe("openDataService", () => {
     expect(maotai?.metrics.nonInterestBearingDebt).toBe(320);
   });
 
-  it("merges Rust normalized financial metric rows into valuation-required metrics", () => {
+  it("merges Bun normalized financial metric rows into valuation-required metrics", () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
-    const result = mergeRustFinancialMetricRows(quoteMerged.stocks, rustFinancialMetricRows);
+    const result = mergeBunFinancialMetricRows(quoteMerged.stocks, bunFinancialMetricRows);
     const maotai = result.stocks.find((stock) => stock.code === "600519");
 
     expect(result.matchedRows).toBe(1);
@@ -344,9 +344,9 @@ describe("openDataService", () => {
     expect(maotai?.metrics.investmentAssets).toBe(1260);
   });
 
-  it("merges Rust analyst forecast rows into stock selection factors", () => {
+  it("merges Bun analyst forecast rows into stock selection factors", () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
-    const result = mergeRustAnalystForecastRows(quoteMerged.stocks, rustAnalystForecastRows);
+    const result = mergeBunAnalystForecastRows(quoteMerged.stocks, bunAnalystForecastRows);
     const maotai = result.stocks.find((stock) => stock.code === "600519");
 
     expect(result.matchedRows).toBe(1);
@@ -359,9 +359,9 @@ describe("openDataService", () => {
     expect(maotai?.metrics.targetUpside).toBeCloseTo(5.25, 2);
   });
 
-  it("merges Rust margin balance rows into stock selection factors", () => {
+  it("merges Bun margin balance rows into stock selection factors", () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
-    const result = mergeRustMarginBalanceRows(quoteMerged.stocks, rustMarginBalanceRows);
+    const result = mergeBunMarginBalanceRows(quoteMerged.stocks, bunMarginBalanceRows);
     const maotai = result.stocks.find((stock) => stock.code === "600519");
 
     expect(result.matchedRows).toBe(1);
@@ -375,9 +375,9 @@ describe("openDataService", () => {
     expect(maotai?.metrics.marginTradeDate).toBe(20260608);
   });
 
-  it("merges Rust north holding rows into stock selection factors", () => {
+  it("merges Bun north holding rows into stock selection factors", () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
-    const result = mergeRustNorthHoldingRows(quoteMerged.stocks, rustNorthHoldingRows);
+    const result = mergeBunNorthHoldingRows(quoteMerged.stocks, bunNorthHoldingRows);
     const maotai = result.stocks.find((stock) => stock.code === "600519");
 
     expect(result.matchedRows).toBe(1);
@@ -390,9 +390,9 @@ describe("openDataService", () => {
     expect(maotai?.metrics.northHoldDate).toBe(20240816);
   });
 
-  it("merges Rust technical indicator rows into daily selection factors", () => {
+  it("merges Bun technical indicator rows into daily selection factors", () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
-    const result = mergeRustTechnicalIndicatorRows(quoteMerged.stocks, rustTechnicalIndicatorRows);
+    const result = mergeBunTechnicalIndicatorRows(quoteMerged.stocks, bunTechnicalIndicatorRows);
     const maotai = result.stocks.find((stock) => stock.code === "600519");
 
     expect(result.matchedRows).toBe(1);
@@ -432,11 +432,11 @@ describe("openDataService", () => {
     expect(result.stocks.filter((stock) => stock.metrics.price && stock.metrics.realAnnualReportSource === 1).length).toBeGreaterThanOrEqual(1);
   });
 
-  it("syncs default local market data through the Rust native market endpoint", async () => {
+  it("syncs default local market data through the Bun native market endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
-      if (url.includes("/api/market/north-holdings")) return new Response(JSON.stringify(rustNorthHoldingRows), { status: 200 });
-      if (url.includes("/api/market/technical-indicators")) return new Response(JSON.stringify(rustTechnicalIndicatorRows), { status: 200 });
+      if (url.includes("/api/market/north-holdings")) return new Response(JSON.stringify(bunNorthHoldingRows), { status: 200 });
+      if (url.includes("/api/market/technical-indicators")) return new Response(JSON.stringify(bunTechnicalIndicatorRows), { status: 200 });
       return new Response(JSON.stringify(akshareRows), { status: 200 });
     });
     const settings = ensureInfoSourceSettings({
@@ -460,7 +460,7 @@ describe("openDataService", () => {
     expect(fetchMock.mock.calls.map((call) => String(call[0])).some((url) => url.includes("/api/market/technical-indicators"))).toBe(true);
   });
 
-  it("does not fall back to AKTools spot endpoints when the local Rust native market endpoint has no rows", async () => {
+  it("does not fall back to AKTools spot endpoints when the local Bun native market endpoint has no rows", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.includes("/api/market/ashare/spot")) return new Response(JSON.stringify([]), { status: 200 });
@@ -479,12 +479,12 @@ describe("openDataService", () => {
 
     expect(result.ok).toBe(false);
     expect(result.summary.matchedRows).toBe(0);
-    expect(result.details).toContain("Rust 原生行情接口未返回可用 A 股行情");
+    expect(result.details).toContain("Bun 原生行情接口未返回可用 A 股行情");
     expect(requestedUrls[0]).toBe("/api/market/ashare/spot");
     expect(requestedUrls.some((url) => url.includes("stock_zh_a_spot"))).toBe(false);
   });
 
-  it("surfaces invalid Rust native market payloads instead of reporting empty market rows", async () => {
+  it("surfaces invalid Bun native market payloads instead of reporting empty market rows", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.includes("/api/market/ashare/spot")) return new Response(JSON.stringify({ unexpected: true }), { status: 200 });
@@ -575,7 +575,7 @@ describe("openDataService", () => {
     const requestedBodies = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1]?.body ?? "{}")) as { endpoint?: string });
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust AKTools rows API HTTP 503");
+    expect(result.details).toContain("Bun AKTools rows API HTTP 503");
     expect(result.details).toContain("upstream down");
     expect(requestedBodies).toEqual(expect.arrayContaining([
       expect.objectContaining({ endpoint: "stock_zh_a_spot_em" }),
@@ -594,18 +594,18 @@ describe("openDataService", () => {
     const result = await syncOpenSourceMarketData(settings, STOCKS, fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust AKTools rows API returned invalid payload");
+    expect(result.details).toContain("Bun AKTools rows API returned invalid payload");
   });
 
-  it("syncs default local market and financial data through Rust native metric endpoints", async () => {
+  it("syncs default local market and financial data through Bun native metric endpoints", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.includes("/api/market/ashare/spot")) return new Response(JSON.stringify(akshareRows), { status: 200 });
-      if (url.includes("/api/market/north-holdings")) return new Response(JSON.stringify(rustNorthHoldingRows), { status: 200 });
-      if (url.includes("/api/market/technical-indicators")) return new Response(JSON.stringify(rustTechnicalIndicatorRows), { status: 200 });
-      if (url.includes("/api/finance/metrics/")) return new Response(JSON.stringify(rustFinancialMetricRows), { status: 200 });
-      if (url.includes("/api/finance/analyst-forecasts")) return new Response(JSON.stringify(rustAnalystForecastRows), { status: 200 });
-      if (url.includes("/api/finance/margin-balances")) return new Response(JSON.stringify(rustMarginBalanceRows), { status: 200 });
+      if (url.includes("/api/market/north-holdings")) return new Response(JSON.stringify(bunNorthHoldingRows), { status: 200 });
+      if (url.includes("/api/market/technical-indicators")) return new Response(JSON.stringify(bunTechnicalIndicatorRows), { status: 200 });
+      if (url.includes("/api/finance/metrics/")) return new Response(JSON.stringify(bunFinancialMetricRows), { status: 200 });
+      if (url.includes("/api/finance/analyst-forecasts")) return new Response(JSON.stringify(bunAnalystForecastRows), { status: 200 });
+      if (url.includes("/api/finance/margin-balances")) return new Response(JSON.stringify(bunMarginBalanceRows), { status: 200 });
       if (url.includes("/api/finance/statements/")) {
         return new Response(JSON.stringify({
           performanceRows: akshareFinancialRows.performanceRows,
@@ -657,7 +657,7 @@ describe("openDataService", () => {
     expect(requestedUrls.some((url) => url.includes("/api/finance/statements/"))).toBe(false);
   });
 
-  it("syncs AShareHub market and financial rows through the Rust proxy", async () => {
+  it("syncs AShareHub market and financial rows through the Bun proxy", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
       const body = JSON.parse(String(init?.body ?? "{}")) as { endpoint?: string };
       return new Response(JSON.stringify(ashareHubRowsByEndpoint[body.endpoint ?? ""] ?? []), { status: 200 });
@@ -717,13 +717,13 @@ describe("openDataService", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("syncs financial reports through the Rust native financial metric endpoint without requesting market endpoints", async () => {
+  it("syncs financial reports through the Bun native financial metric endpoint without requesting market endpoints", async () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
-      if (url.includes("/api/finance/metrics/")) return new Response(JSON.stringify(rustFinancialMetricRows), { status: 200 });
-      if (url.includes("/api/finance/analyst-forecasts")) return new Response(JSON.stringify(rustAnalystForecastRows), { status: 200 });
-      if (url.includes("/api/finance/margin-balances")) return new Response(JSON.stringify(rustMarginBalanceRows), { status: 200 });
+      if (url.includes("/api/finance/metrics/")) return new Response(JSON.stringify(bunFinancialMetricRows), { status: 200 });
+      if (url.includes("/api/finance/analyst-forecasts")) return new Response(JSON.stringify(bunAnalystForecastRows), { status: 200 });
+      if (url.includes("/api/finance/margin-balances")) return new Response(JSON.stringify(bunMarginBalanceRows), { status: 200 });
       if (url.includes("/api/finance/statements/")) {
         return new Response(JSON.stringify({
           performanceRows: akshareFinancialRows.performanceRows,
@@ -799,7 +799,7 @@ describe("openDataService", () => {
     expect(requestedBodies.some((body) => body.endpoint === "market/daily")).toBe(false);
   });
 
-  it("does not fall back to AKTools financial endpoints when local Rust native financial endpoints return no rows", async () => {
+  it("does not fall back to AKTools financial endpoints when local Bun native financial endpoints return no rows", async () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
@@ -828,7 +828,7 @@ describe("openDataService", () => {
     const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust 原生财报接口未返回可用数据");
+    expect(result.details).toContain("Bun 原生财报接口未返回可用数据");
     expect(requestedUrls.some((url) => url.includes("/api/finance/metrics/"))).toBe(true);
     expect(requestedUrls.some((url) => url.includes("/api/finance/statements/"))).toBe(true);
     expect(requestedUrls.some((url) => url.includes("stock_yjbb_em"))).toBe(false);
@@ -837,7 +837,7 @@ describe("openDataService", () => {
     expect(requestedUrls.some((url) => url.includes("stock_xjll_em"))).toBe(false);
   });
 
-  it("surfaces invalid Rust native financial metric payloads", async () => {
+  it("surfaces invalid Bun native financial metric payloads", async () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
@@ -863,11 +863,11 @@ describe("openDataService", () => {
     const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust native financial metric API returned invalid payload");
+    expect(result.details).toContain("Bun native financial metric API returned invalid payload");
     expect(requestedUrls.some((url) => url.includes("stock_yjbb_em"))).toBe(false);
   });
 
-  it("falls back to Rust native financial statements when metric rows are unavailable", async () => {
+  it("falls back to Bun native financial statements when metric rows are unavailable", async () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
@@ -898,7 +898,7 @@ describe("openDataService", () => {
     expect(requestedUrls.some((url) => url.includes("/api/finance/statements/"))).toBe(true);
   });
 
-  it("surfaces invalid Rust native financial statement payloads", async () => {
+  it("surfaces invalid Bun native financial statement payloads", async () => {
     const quoteMerged = mergeAkShareSpotRows(STOCKS, akshareRows);
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
@@ -914,7 +914,7 @@ describe("openDataService", () => {
     const result = await syncOpenSourceFinancialReports(settings, quoteMerged.stocks, fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust native financial statement API");
+    expect(result.details).toContain("Bun native financial statement API");
     expect(result.details).toContain("invalid payload");
   });
 
@@ -930,7 +930,7 @@ describe("openDataService", () => {
     const requestedBodies = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1]?.body ?? "{}")) as { endpoint?: string });
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust AKTools rows API HTTP 503");
+    expect(result.details).toContain("Bun AKTools rows API HTTP 503");
     expect(result.details).toContain("finance upstream down");
     expect(requestedBodies).toEqual(expect.arrayContaining([
       expect.objectContaining({ endpoint: "stock_yjbb_em" }),

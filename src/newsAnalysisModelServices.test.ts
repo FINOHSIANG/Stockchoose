@@ -50,15 +50,15 @@ describe("newsAnalysisModelServices", () => {
     );
   });
 
-  it("checks the local analysis model through the Rust model test endpoint", async () => {
+  it("checks the local analysis model through the Bun model test endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", ok: true, provider: "本地规则模型", model: "local-news-rule-v1", message: "分析模型检测通过", details: "Rust 本地新闻规则模型已启用 4 个分析任务" }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", ok: true, provider: "本地规则模型", model: "local-news-rule-v1", message: "分析模型检测通过", details: "Bun 本地新闻规则模型已启用 4 个分析任务" }), { status: 200 })
     );
 
     const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings, fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.details).toContain("Rust 本地新闻规则模型");
+    expect(result.details).toContain("Bun 本地新闻规则模型");
     expect(String(fetchMock.mock.calls[0][0])).toBe("/api/news-analysis/model-test");
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toMatchObject({
       provider: "本地规则模型",
@@ -67,9 +67,9 @@ describe("newsAnalysisModelServices", () => {
     });
   });
 
-  it("checks OpenAI-compatible models through the Rust model test endpoint", async () => {
+  it("checks OpenAI-compatible models through the Bun model test endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(JSON.stringify({ engine: "rust", ok: true, message: "分析模型检测通过", details: "OpenAI Compatible / news-model 已由 Rust 代理完成响应" }), { status: 200 })
+      new Response(JSON.stringify({ engine: "bun", ok: true, message: "分析模型检测通过", details: "OpenAI Compatible / news-model 已由 Bun 代理完成响应" }), { status: 200 })
     );
     const settings = ensureNewsAnalysisModelSettings({
       provider: "OpenAI Compatible",
@@ -91,7 +91,7 @@ describe("newsAnalysisModelServices", () => {
     });
   });
 
-  it("reports invalid Rust analysis model JSON explicitly", async () => {
+  it("reports invalid Bun analysis model JSON explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
 
     const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings, fetchMock);
@@ -100,8 +100,8 @@ describe("newsAnalysisModelServices", () => {
     expect(result.details).toContain("invalid JSON");
   });
 
-  it("reports invalid Rust analysis model payloads explicitly", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "rust" }), { status: 200 }));
+  it("reports invalid Bun analysis model payloads explicitly", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ engine: "bun" }), { status: 200 }));
 
     const result = await testNewsAnalysisModelConnection(defaultNewsAnalysisModelSettings, fetchMock);
 

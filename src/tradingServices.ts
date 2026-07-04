@@ -214,9 +214,9 @@ function isTradeAssetPayload(value: unknown): value is TradeAssetState {
   );
 }
 
-export async function createTradePlanExportRustFirst(input: CreateTradePlanInput, fetchImpl?: FetchLike): Promise<TradePlanExport> {
+export async function createTradePlanExportBunFirst(input: CreateTradePlanInput, fetchImpl?: FetchLike): Promise<TradePlanExport> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust trade API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun trade API unavailable: fetch is not available");
 
   const response = await request("/api/trade/plan", {
     method: "POST",
@@ -231,11 +231,11 @@ export async function createTradePlanExportRustFirst(input: CreateTradePlanInput
     })
   });
   if (!response.ok) {
-    throw new Error(`Rust trade API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    throw new Error(`Bun trade API HTTP ${response.status}${await responseErrorSuffix(response)}`);
   }
-  const payload = await jsonFromResponse(response, "Rust trade API");
+  const payload = await jsonFromResponse(response, "Bun trade API");
   if (!Array.isArray(payload?.plan?.orders) || typeof payload.clientText !== "string" || typeof payload.csv !== "string") {
-    throw new Error("Rust trade API returned invalid trade export payload");
+    throw new Error("Bun trade API returned invalid trade export payload");
   }
   return {
     plan: payload.plan as TradePlan,
@@ -244,13 +244,13 @@ export async function createTradePlanExportRustFirst(input: CreateTradePlanInput
   };
 }
 
-export async function createTradePlanRustFirst(input: CreateTradePlanInput, fetchImpl?: FetchLike): Promise<TradePlan> {
-  return (await createTradePlanExportRustFirst(input, fetchImpl)).plan;
+export async function createTradePlanBunFirst(input: CreateTradePlanInput, fetchImpl?: FetchLike): Promise<TradePlan> {
+  return (await createTradePlanExportBunFirst(input, fetchImpl)).plan;
 }
 
-export async function exportTradePlanRustFirst(plan: TradePlan, fetchImpl?: FetchLike): Promise<Pick<TradePlanExport, "clientText" | "csv">> {
+export async function exportTradePlanBunFirst(plan: TradePlan, fetchImpl?: FetchLike): Promise<Pick<TradePlanExport, "clientText" | "csv">> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust trade export API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun trade export API unavailable: fetch is not available");
 
   const response = await request("/api/trade/export", {
     method: "POST",
@@ -258,11 +258,11 @@ export async function exportTradePlanRustFirst(plan: TradePlan, fetchImpl?: Fetc
     body: JSON.stringify({ plan })
   });
   if (!response.ok) {
-    throw new Error(`Rust trade export API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    throw new Error(`Bun trade export API HTTP ${response.status}${await responseErrorSuffix(response)}`);
   }
-  const payload = await jsonFromResponse(response, "Rust trade export API");
+  const payload = await jsonFromResponse(response, "Bun trade export API");
   if (typeof payload.clientText !== "string" || typeof payload.csv !== "string") {
-    throw new Error("Rust trade export API returned invalid export payload");
+    throw new Error("Bun trade export API returned invalid export payload");
   }
   return {
     clientText: payload.clientText,
@@ -276,9 +276,9 @@ function isPaperTradeStatePayload(value: unknown): value is Partial<PaperTradeSt
   return Array.isArray(candidate.plans) && Array.isArray(candidate.fills);
 }
 
-export async function submitPaperTradePlanRustFirst(state: PaperTradeState, plan: TradePlan, fetchImpl?: FetchLike): Promise<PaperTradeState> {
+export async function submitPaperTradePlanBunFirst(state: PaperTradeState, plan: TradePlan, fetchImpl?: FetchLike): Promise<PaperTradeState> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust paper trade API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun paper trade API unavailable: fetch is not available");
 
   const response = await request("/api/trade/paper/submit", {
     method: "POST",
@@ -289,18 +289,18 @@ export async function submitPaperTradePlanRustFirst(state: PaperTradeState, plan
     })
   });
   if (!response.ok) {
-    throw new Error(`Rust paper trade API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    throw new Error(`Bun paper trade API HTTP ${response.status}${await responseErrorSuffix(response)}`);
   }
-  const payload = await jsonFromResponse(response, "Rust paper trade API");
+  const payload = await jsonFromResponse(response, "Bun paper trade API");
   if (!isPaperTradeStatePayload(payload)) {
-    throw new Error("Rust paper trade API returned invalid paper trade state");
+    throw new Error("Bun paper trade API returned invalid paper trade state");
   }
   return ensurePaperTradeState(payload);
 }
 
-export async function syncTradeAssetsRustFirst(asset: TradeAssetState, fetchImpl?: FetchLike): Promise<TradeAssetSyncResult> {
+export async function syncTradeAssetsBunFirst(asset: TradeAssetState, fetchImpl?: FetchLike): Promise<TradeAssetSyncResult> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust asset sync API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun asset sync API unavailable: fetch is not available");
 
   const response = await request("/api/trade/assets/sync", {
     method: "POST",
@@ -308,18 +308,18 @@ export async function syncTradeAssetsRustFirst(asset: TradeAssetState, fetchImpl
     body: JSON.stringify({ asset })
   });
   if (!response.ok) {
-    throw new Error(`Rust asset sync API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    throw new Error(`Bun asset sync API HTTP ${response.status}${await responseErrorSuffix(response)}`);
   }
-  const payload = await jsonFromResponse(response, "Rust asset sync API");
+  const payload = await jsonFromResponse(response, "Bun asset sync API");
   if (!isTradeAssetPayload(payload?.asset) || typeof payload?.accountAsset !== "number" || typeof payload?.strategyAsset !== "number") {
-    throw new Error("Rust asset sync API returned invalid asset sync payload");
+    throw new Error("Bun asset sync API returned invalid asset sync payload");
   }
   return {
     ok: payload?.ok === true,
     asset: ensureTradeAssetState(payload.asset),
     accountAsset: payload.accountAsset,
     strategyAsset: payload.strategyAsset,
-    message: typeof payload?.message === "string" ? payload.message : "Rust 资产同步接口已返回"
+    message: typeof payload?.message === "string" ? payload.message : "Bun 资产同步接口已返回"
   };
 }
 

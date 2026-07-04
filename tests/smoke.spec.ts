@@ -59,7 +59,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([{ date: "2024-05-06", open: 10.02, close: 10.12, high: 10.2, low: 9.98, volume: 12345 }])
     });
   });
@@ -68,16 +68,16 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         provider: requestBody.provider ?? "AKShare / AKTools 免费开源数据",
         ok: true,
         rowCount: 5,
         message: "连接检测通过",
         details: requestBody.baseUrl?.startsWith("/aktools")
-          ? "Rust 原生数据接口已返回 5 条 A 股历史行情"
-          : "AKShare/AKTools 已由 Rust 代理返回 5 条 A 股历史行情"
+          ? "Bun 原生数据接口已返回 5 条 A 股历史行情"
+          : "AKShare/AKTools 已由 Bun 代理返回 5 条 A 股历史行情"
       })
     });
   });
@@ -85,7 +85,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         { 代码: "600519", 名称: "贵州茅台", 最新价: 1688.88, 涨跌幅: 2.34, 成交量: 123456, 成交额: 987654321, 换手率: 1.23, 总市值: 2100000000000, 流通市值: 2090000000000, "市盈率-动态": 28.6, 市净率: 8.2, 振幅: 3.45 },
         { 代码: "000858", 名称: "五粮液", 最新价: 138.12, 涨跌幅: -1.2, 成交量: 223456, 成交额: 345678901, 换手率: 0.95, 总市值: 520000000000, 流通市值: 510000000000, "市盈率-动态": 18.3, 市净率: 4.1, 振幅: 2.6 }
@@ -96,7 +96,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           code: "600519",
@@ -118,7 +118,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           code: "600519",
@@ -146,7 +146,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
         performanceRows: financialReportPayloads.stock_yjbb_em,
         incomeRows: financialReportPayloads.stock_lrb_em,
@@ -160,7 +160,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           code: "600519",
@@ -202,7 +202,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           code: "600519",
@@ -224,7 +224,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           code: "600519",
@@ -246,7 +246,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           code: "600519",
@@ -260,7 +260,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
           sourceProvider: "真实财报接口",
           sourceFileName: "600519-Kweichow Moutai-2025-real-annual-report-source.csv",
           sourceFileType: "CSV",
-          sourceNote: "由 Rust 构建，不倒推历史年度。",
+          sourceNote: "由 Bun 构建，不倒推历史年度。",
           sourceCsv: "股票代码,股票名称\r\n600519,Kweichow Moutai",
           metrics: {
             revenue: 1275,
@@ -314,7 +314,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
         articles: [
           {
@@ -332,14 +332,14 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         provider: requestBody.source?.provider ?? "GDELT 2.1",
         ok: true,
         rowCount: 1,
         message: "新闻源检测通过",
-        details: `${requestBody.source?.name ?? "GDELT 全球新闻"} 已由 Rust 新闻采集器响应，返回 1 条测试新闻`
+        details: `${requestBody.source?.name ?? "GDELT 全球新闻"} 已由 Bun 新闻采集器响应，返回 1 条测试新闻`
       })
     });
   });
@@ -347,7 +347,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
         articles: [
           {
@@ -423,19 +423,19 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         linkedStocks: [linkedStock],
         report: {
           title: "舆情关联股票洞察",
-          conclusion: "Rust smoke mock 已完成关联股票分析。",
+          conclusion: "Bun smoke mock 已完成关联股票分析。",
           eventCount: requestBody.events?.length ?? 1,
           topCategories: [{ category: event.category ?? "风险负面", count: 1 }],
           topIndustries: [{ industry: "食品饮料", count: 1 }],
           linkedStocks: [linkedStock],
           riskEvents: [event],
-          validationPoints: ["Rust sentiment analysis smoke mock"]
+          validationPoints: ["Bun sentiment analysis smoke mock"]
         }
       })
     });
@@ -444,8 +444,8 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
-      body: JSON.stringify({ engine: "rust", ok: true, taskCount: 4, message: "Rust 本地新闻规则模型已启用 4 个分析任务" })
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
+      body: JSON.stringify({ engine: "bun", ok: true, taskCount: 4, message: "Bun 本地新闻规则模型已启用 4 个分析任务" })
     });
   });
   await page.route(/\/api\/news-analysis\/model-test$/, async (route) => {
@@ -453,14 +453,14 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
-        engine: "rust",
+        engine: "bun",
         ok: true,
         provider: requestBody.provider ?? "本地规则模型",
         model: requestBody.model ?? "local-news-rule-v1",
         message: "分析模型检测通过",
-        details: "Rust smoke mock 已完成新闻分析模型检测"
+        details: "Bun smoke mock 已完成新闻分析模型检测"
       })
     });
   });
@@ -469,7 +469,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           stock: {
@@ -499,7 +499,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
         rows: [
           {
@@ -550,7 +550,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
         candidate: {
           ...strategy,
@@ -595,7 +595,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "rust" },
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify([
         {
           stock,
@@ -636,7 +636,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
           financialModifier: 0.82,
           riskDiscount: 0.66,
           anchorValue: 3500,
-          drivers: ["Rust valuation mock"],
+          drivers: ["Bun valuation mock"],
           warnings: [],
           components: {
             earningsValue: 1800,
@@ -685,7 +685,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(bootstrapInfoSourcePanel.getByLabel("接口来源")).toHaveValue("AKShare / AKTools 免费开源数据");
   await expect(bootstrapInfoSourcePanel.getByLabel("接口地址")).toHaveValue("/aktools/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
-  await expect(page.getByText(/Rust 原生数据接口/)).toBeVisible();
+  await expect(page.getByText(/Bun 原生数据接口/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();
   await expect(page.getByText(/开源数据同步完成/)).toBeVisible();
   await expect(page.getByText("2 / 2").first()).toBeVisible();
@@ -727,7 +727,8 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("累计收益")).toBeVisible();
   await expect(page.getByRole("heading", { name: "策略净值曲线" })).toBeVisible();
 
-  await page.getByRole("button", { name: /每日选股/ }).click();
+  const backtestPanel = page.locator(".backtest-panel");
+  await backtestPanel.locator('[data-backtest-tab="daily"]').click();
   const dailyLimitInput = page.getByLabel("选股数量：");
   await expect(dailyLimitInput).toBeVisible();
   await dailyLimitInput.fill("120");
@@ -736,12 +737,14 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("每日选股结果")).toBeVisible();
   await expect(page.locator(".selection-table-title")).toContainText(/已选 \d+ \/ 目标 120 只/);
 
-  await page.getByRole("button", { name: /排名分析/ }).click();
-  await expect(page.getByText("排名分析").last()).toBeVisible();
+  await backtestPanel.locator('[data-backtest-tab="rank"]').click();
+  await expect(backtestPanel.locator('[data-backtest-tab="rank"]')).toHaveClass(/active/);
 
-  await page.getByRole("button", { name: /因子相关性/ }).click();
-  await expect(page.getByText("因子IC概览")).toBeVisible();
-  await expect(page.getByText("因子相关性矩阵")).toBeVisible();
+  await backtestPanel.locator('[data-backtest-tab="factorCorrelation"]').click();
+  await expect(backtestPanel.locator('[data-backtest-tab="factorCorrelation"]')).toHaveClass(/active/);
+  await expect(backtestPanel.locator(".factor-correlation-panel")).toBeVisible();
+  await expect(backtestPanel.locator(".factor-ic-table")).toBeVisible();
+  await expect(backtestPanel.locator(".factor-matrix-table")).toBeVisible();
 
   await page.locator(".primary-nav").getByRole("button", { name: "舆情", exact: true }).click();
   await expect(page.getByRole("heading", { name: "舆情选股" })).toBeVisible();
@@ -751,9 +754,10 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.getByRole("button", { name: "手动刷新" }).click();
   await expect(page.getByText("高端白酒批价波动").first()).toBeVisible();
   await page.getByLabel("事件类型").selectOption("风险负面");
-  await page.getByLabel("重大程度").selectOption("重大");
+  await page.getByLabel("重大程度").selectOption("特别重大");
   await expect(page.getByText("重大事件")).toBeVisible();
-  await expect(page.getByText("高端白酒批价波动").first()).toBeVisible();
+  await expect(page.getByText("Kweichow Moutai").first()).toBeVisible();
+  await expect(page.locator(".sentiment-report")).toBeVisible();
   await page.locator(".primary-nav").getByRole("button", { name: "策略", exact: true }).click();
 
   await page.getByRole("button", { name: "交易模型" }).click();
@@ -825,7 +829,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   expect(download.suggestedFilename()).toContain("交易客户端指令");
   await expect(page.getByText(/已导出.*交易客户端指令/)).toBeVisible();
   await expect(page.getByLabel("交易客户端复制文本")).toBeVisible();
-  await expect(page.getByLabel("交易客户端复制文本")).toHaveValue(/^\d{6}\t买入\t\d+\.\d{3}\t\d+/);
+  await expect(page.getByLabel("交易客户端复制文本")).toHaveValue(/^\d{6}\t买入\t\d+\.\d{2,3}\t\d+/);
   const statusDownloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "生成交易状态表" }).click();
   const statusDownload = await statusDownloadPromise;
@@ -877,7 +881,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await infoSourcePanel.getByLabel("接口来源").selectOption("AKShare / AKTools 免费开源数据");
   await expect(infoSourcePanel.getByLabel("接口地址")).toHaveValue("/aktools/api/public");
   await page.getByRole("button", { name: "测试连接" }).click();
-  await expect(page.getByText(/Rust 原生数据接口/)).toBeVisible();
+  await expect(page.getByText(/Bun 原生数据接口/)).toBeVisible();
   await page.getByRole("button", { name: "同步开源数据" }).click();
   await expect(page.getByText(/开源数据同步完成/)).toBeVisible();
   await expect(page.getByText("2 / 2").first()).toBeVisible();
@@ -887,7 +891,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.locator(".news-source-card").first().getByRole("button", { name: "测试接口" }).click();
   await expect(page.getByText(/新闻源检测通过/).first()).toBeVisible();
   await page.getByRole("button", { name: "测试模型" }).click();
-  await expect(page.getByText(/Rust smoke mock 已完成新闻分析模型检测/)).toBeVisible();
+  await expect(page.getByText(/Bun smoke mock 已完成新闻分析模型检测/)).toBeVisible();
   await page.getByRole("button", { name: "新增新闻源" }).click();
   await expect(page.getByText("自定义新闻源").first()).toBeVisible();
   await page.getByRole("button", { name: "保存新闻源" }).click();

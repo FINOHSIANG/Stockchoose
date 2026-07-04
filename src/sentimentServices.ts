@@ -1,4 +1,4 @@
-﻿import type { NewsArticle, NewsCategory, NewsImportance, NewsSentiment } from "./newsPageServices";
+import type { NewsArticle, NewsCategory, NewsImportance, NewsSentiment } from "./newsPageServices";
 import type { NewsAnalysisModelSettings } from "./newsAnalysisModelServices";
 import type { Stock } from "./types";
 
@@ -128,8 +128,8 @@ const newsImportanceToSeverity: Record<NewsImportance, SentimentSeverity> = {
 const severePositiveWords = ["重大", "中标", "回购", "增持", "获批", "签约", "高增长", "分红", "突破", "创新高"];
 const severeNegativeWords = ["退市", "处罚", "调查", "减持", "亏损", "违约", "终止", "立案", "风险警示", "下修"];
 const genericIndustryLabels = new Set(["未分类", "腾讯行情", "其他", "--", ""]);
-const RUST_SENTIMENT_EVENTS_URL = "/api/sentiment/events";
-const RUST_SENTIMENT_ANALYSIS_URL = "/api/sentiment/analysis";
+const BUN_SENTIMENT_EVENTS_URL = "/api/sentiment/events";
+const BUN_SENTIMENT_ANALYSIS_URL = "/api/sentiment/analysis";
 
 function clampScore(value: number, min = 0, max = 100) {
   return Math.max(min, Math.min(max, value));
@@ -215,14 +215,14 @@ export function createEmptySentimentAnalysis(events: SentimentEvent[] = []): Sen
     linkedStocks: [],
     report: {
       title: "舆情关联股票洞察",
-      conclusion: events.length ? "Rust 舆情分析接口未返回有效关联股票。" : "当前没有可分析的真实新闻事件。",
+      conclusion: events.length ? "Bun 舆情分析接口未返回有效关联股票。" : "当前没有可分析的真实新闻事件。",
       eventCount: events.length,
       topCategories: [],
       topIndustries: [],
       linkedStocks: [],
       riskEvents: [],
       validationPoints: [
-        "舆情事件、股票关联和洞察报告由 Rust 数据接口生成。",
+        "舆情事件、股票关联和洞察报告由 Bun 数据接口生成。",
         "接口不可用或返回结构无效时不使用前端本地算法补齐结果。"
       ]
     }
@@ -271,11 +271,11 @@ function validSentimentAnalysisFromPayload(payload: unknown): SentimentAnalysisR
   };
 }
 
-export async function buildSentimentEventsRustFirst(articles: NewsArticle[], stocks: Stock[], fetchImpl?: FetchLike): Promise<SentimentEvent[]> {
+export async function buildSentimentEventsBunFirst(articles: NewsArticle[], stocks: Stock[], fetchImpl?: FetchLike): Promise<SentimentEvent[]> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust sentiment API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun sentiment API unavailable: fetch is not available");
 
-  const response = await request(RUST_SENTIMENT_EVENTS_URL, {
+  const response = await request(BUN_SENTIMENT_EVENTS_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ articles, stocks })
@@ -283,21 +283,21 @@ export async function buildSentimentEventsRustFirst(articles: NewsArticle[], sto
   if (!response.ok) {
     const details = await response.text().catch(() => "");
     const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
-    throw new Error(`Rust sentiment API HTTP ${response.status}${suffix}`);
+    throw new Error(`Bun sentiment API HTTP ${response.status}${suffix}`);
   }
   let payload: unknown;
   try {
     payload = await response.json();
   } catch (error) {
     const detail = error instanceof Error ? error.message : "invalid JSON";
-    throw new Error(`Rust sentiment API returned invalid JSON: ${detail}`);
+    throw new Error(`Bun sentiment API returned invalid JSON: ${detail}`);
   }
   const events = validSentimentEventsFromPayload(payload);
-  if (!events) throw new Error("Rust sentiment API returned invalid sentiment events");
+  if (!events) throw new Error("Bun sentiment API returned invalid sentiment events");
   return events;
 }
 
-export async function buildSentimentAnalysisRustFirst(
+export async function buildSentimentAnalysisBunFirst(
   events: SentimentEvent[],
   stocks: Stock[],
   analysisModelOrFetch?: NewsAnalysisModelSettings | FetchLike,
@@ -305,10 +305,10 @@ export async function buildSentimentAnalysisRustFirst(
 ): Promise<SentimentAnalysisResult> {
   const analysisModel = typeof analysisModelOrFetch === "function" ? undefined : analysisModelOrFetch;
   const request = (typeof analysisModelOrFetch === "function" ? analysisModelOrFetch : fetchImpl) ?? (typeof fetch === "function" ? fetch : undefined);
-  if (!request) throw new Error("Rust sentiment analysis API unavailable: fetch is not available");
+  if (!request) throw new Error("Bun sentiment analysis API unavailable: fetch is not available");
   const analysisModelPayload = sentimentAnalysisModelPayload(analysisModel);
 
-  const response = await request(RUST_SENTIMENT_ANALYSIS_URL, {
+  const response = await request(BUN_SENTIMENT_ANALYSIS_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ events, stocks, ...(analysisModelPayload ? { analysisModel: analysisModelPayload } : {}) })
@@ -316,17 +316,17 @@ export async function buildSentimentAnalysisRustFirst(
   if (!response.ok) {
     const details = await response.text().catch(() => "");
     const suffix = details.trim() ? `: ${details.trim().slice(0, 300)}` : "";
-    throw new Error(`Rust sentiment analysis API HTTP ${response.status}${suffix}`);
+    throw new Error(`Bun sentiment analysis API HTTP ${response.status}${suffix}`);
   }
   let payload: unknown;
   try {
     payload = await response.json();
   } catch (error) {
     const detail = error instanceof Error ? error.message : "invalid JSON";
-    throw new Error(`Rust sentiment analysis API returned invalid JSON: ${detail}`);
+    throw new Error(`Bun sentiment analysis API returned invalid JSON: ${detail}`);
   }
   const analysis = validSentimentAnalysisFromPayload(payload);
-  if (!analysis) throw new Error("Rust sentiment analysis API returned invalid analysis payload");
+  if (!analysis) throw new Error("Bun sentiment analysis API returned invalid analysis payload");
   return analysis;
 }
 

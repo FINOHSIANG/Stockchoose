@@ -113,7 +113,7 @@ export function createDefaultNewsSourceEndpoint(id: string): NewsSourceEndpoint 
   };
 }
 
-const RUST_NEWS_SOURCE_TEST_URL = "/api/news/source-test";
+const BUN_NEWS_SOURCE_TEST_URL = "/api/news/source-test";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -127,7 +127,7 @@ async function responseJson(response: Response) {
   try {
     return await response.json();
   } catch (error) {
-    throw new Error(`Rust news source test API returned invalid JSON: ${errorMessage(error)}`);
+    throw new Error(`Bun news source test API returned invalid JSON: ${errorMessage(error)}`);
   }
 }
 
@@ -141,7 +141,7 @@ function newsSourceTestResultFromPayload(
       ok: false,
       checkedAt,
       message: "新闻源检测失败",
-      details: "Rust news source test API returned invalid payload: ok must be a boolean"
+      details: "Bun news source test API returned invalid payload: ok must be a boolean"
     };
   }
   return {
@@ -154,7 +154,7 @@ function newsSourceTestResultFromPayload(
         : "新闻源检测失败",
     details: typeof payload.details === "string" && payload.details.trim()
       ? payload.details
-      : `${source.name} 已由 Rust 新闻采集器完成检测`
+      : `${source.name} 已由 Bun 新闻采集器完成检测`
   };
 }
 
@@ -240,14 +240,14 @@ export async function testNewsSourceConnection(
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(source.refreshInterval, 1) * 1000);
   try {
-    const response = await fetchImpl(RUST_NEWS_SOURCE_TEST_URL, {
+    const response = await fetchImpl(BUN_NEWS_SOURCE_TEST_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ source }),
       signal: controller.signal
     });
     if (!response.ok) {
-      return { ok: false, checkedAt, message: "新闻源检测失败", details: `Rust 新闻采集器返回 HTTP ${response.status}` };
+      return { ok: false, checkedAt, message: "新闻源检测失败", details: `Bun 新闻采集器返回 HTTP ${response.status}` };
     }
     const payload = await responseJson(response) as Partial<NewsSourceTestResult> & { rowCount?: number; engine?: string; provider?: string };
     if (!isRecord(payload) || typeof payload.ok !== "boolean") {
@@ -257,7 +257,7 @@ export async function testNewsSourceConnection(
       ok: payload.ok,
       checkedAt,
       message: payload.message ?? (payload.ok ? "新闻源检测通过" : "新闻源检测失败"),
-      details: payload.details ?? `${source.name} 已由 Rust 新闻采集器响应`
+      details: payload.details ?? `${source.name} 已由 Bun 新闻采集器响应`
     };
   } catch (error) {
     const details = error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";

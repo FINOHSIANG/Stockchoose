@@ -8,7 +8,7 @@ import {
   syncTencentRealMarketData
 } from "./realMarketDataService";
 
-const rustMaotaiQuoteRow = {
+const bunMaotaiQuoteRow = {
   symbol: "sh600519",
   prefix: "sh",
   code: "600519",
@@ -28,7 +28,7 @@ const rustMaotaiQuoteRow = {
   marketType: "GP-A"
 };
 
-const rustNoslandQuoteRow = {
+const bunNoslandQuoteRow = {
   symbol: "bj920047",
   prefix: "bj",
   code: "920047",
@@ -48,7 +48,7 @@ const rustNoslandQuoteRow = {
   marketType: "GP"
 };
 
-const rustPinganQuoteRow = {
+const bunPinganQuoteRow = {
   symbol: "sz000001",
   prefix: "sz",
   code: "000001",
@@ -68,7 +68,7 @@ const rustPinganQuoteRow = {
   marketType: "GP-A"
 };
 
-const rustDelistedQuoteRow = {
+const bunDelistedQuoteRow = {
   symbol: "sh600001",
   prefix: "sh",
   code: "600001",
@@ -81,7 +81,7 @@ const rustDelistedQuoteRow = {
   marketType: "GP-A"
 };
 
-const rustTechnicalIndicatorRows = [
+const bunTechnicalIndicatorRows = [
   {
     code: "600519",
     name: "Kweichow Moutai",
@@ -107,7 +107,7 @@ afterEach(() => {
 });
 
 describe("realMarketDataService", () => {
-  it("auto matches official website and industry tags through the Rust profile API", async () => {
+  it("auto matches official website and industry tags through the Bun profile API", async () => {
     const baseStock = {
       ...(STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0]),
       website: undefined,
@@ -142,20 +142,20 @@ describe("realMarketDataService", () => {
     expect(result.stock.industryTags).toEqual(expect.arrayContaining(["白酒", "食品饮料", "高端白酒", "贵州国企"]));
   });
 
-  it("keeps the original stock when the Rust profile API fails", async () => {
+  it("keeps the original stock when the Bun profile API fails", async () => {
     const baseStock = STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0];
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("upstream blocked", { status: 502 }));
 
     const result = await fetchStockProfileAutoMatch(baseStock, fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust Eastmoney F10 profile API HTTP 502");
+    expect(result.details).toContain("Bun Eastmoney F10 profile API HTTP 502");
     expect(result.stock).toBe(baseStock);
   });
 
   it("merges Tencent quote data into valuation metrics", async () => {
     const base = STOCKS.filter((stock) => stock.code === "600519");
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([bunMaotaiQuoteRow]), { status: 200 }));
 
     const result = await syncTencentRealMarketData(base, fetchMock);
     const maotai = result.stocks[0];
@@ -172,13 +172,13 @@ describe("realMarketDataService", () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/quote-rows");
   });
 
-  it("uses Rust structured Tencent quote rows without localhost gating", async () => {
+  it("uses Bun structured Tencent quote rows without localhost gating", async () => {
     vi.stubGlobal("window", { location: { hostname: "stockchoose.example" } });
     const base = STOCKS.filter((stock) => stock.code === "600519");
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url.startsWith("/api/market/tencent/quote-rows")) {
-        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+        return new Response(JSON.stringify([bunMaotaiQuoteRow]), { status: 200 });
       }
       return new Response("", { status: 500 });
     });
@@ -194,36 +194,36 @@ describe("realMarketDataService", () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/quote-rows");
   });
 
-  it("does not fall back to browser-side Tencent quote parsing when the Rust quote API fails", async () => {
+  it("does not fall back to browser-side Tencent quote parsing when the Bun quote API fails", async () => {
     const base = STOCKS.filter((stock) => stock.code === "600519");
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input).startsWith("/api/market/tencent/quote-rows")) {
         return new Response("{}", { status: 502 });
       }
-      return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+      return new Response(JSON.stringify([bunMaotaiQuoteRow]), { status: 200 });
     });
 
     const result = await syncTencentRealMarketData(base, fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust Tencent quote API HTTP 502");
+    expect(result.details).toContain("Bun Tencent quote API HTTP 502");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/quote-rows");
   });
 
-  it("reports invalid Rust Tencent quote payloads instead of treating them as unmatched stocks", async () => {
+  it("reports invalid Bun Tencent quote payloads instead of treating them as unmatched stocks", async () => {
     const base = STOCKS.filter((stock) => stock.code === "600519");
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ data: [rustMaotaiQuoteRow] }), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ data: [bunMaotaiQuoteRow] }), { status: 200 }));
 
     const result = await syncTencentRealMarketData(base, fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust Tencent quote API returned invalid quote rows payload");
+    expect(result.details).toContain("Bun Tencent quote API returned invalid quote rows payload");
     expect(result.sourceRows).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reports invalid Rust Tencent quote JSON explicitly", async () => {
+  it("reports invalid Bun Tencent quote JSON explicitly", async () => {
     const base = STOCKS.filter((stock) => stock.code === "600519");
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
 
@@ -257,7 +257,7 @@ describe("realMarketDataService", () => {
     expect(requestedUrl).toContain("period=week");
   });
 
-  it("uses Rust structured Tencent kline points on the local app proxy", async () => {
+  it("uses Bun structured Tencent kline points on the local app proxy", async () => {
     vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
     const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
@@ -281,7 +281,7 @@ describe("realMarketDataService", () => {
     expect(requestedUrl).toContain("period=week");
   });
 
-  it("does not fall back to browser-side Tencent kline parsing when the Rust kline API fails", async () => {
+  it("does not fall back to browser-side Tencent kline parsing when the Bun kline API fails", async () => {
     const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       if (String(input).startsWith("/api/market/tencent/kline-points")) {
@@ -293,24 +293,24 @@ describe("realMarketDataService", () => {
     const result = await fetchStockKlineHistory(stock, "week", fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("Rust Tencent K线接口 HTTP 503");
+    expect(result.message).toContain("Bun Tencent K线接口 HTTP 503");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/market/tencent/kline-points");
   });
 
-  it("reports invalid Rust Tencent kline payloads instead of treating them as empty history", async () => {
+  it("reports invalid Bun Tencent kline payloads instead of treating them as empty history", async () => {
     const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
 
     const result = await fetchStockKlineHistory(stock, "day", fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("Rust Tencent K线接口返回结构无效");
+    expect(result.message).toContain("Bun Tencent K线接口返回结构无效");
     expect(result.sourceRows).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reports invalid Rust Tencent kline JSON explicitly", async () => {
+  it("reports invalid Bun Tencent kline JSON explicitly", async () => {
     const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
 
@@ -322,7 +322,7 @@ describe("realMarketDataService", () => {
 
   it("uses switched Beijing Stock Exchange market codes for Tencent quotes", async () => {
     const base = STOCKS.filter((stock) => stock.code === "430047");
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([rustNoslandQuoteRow]), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([bunNoslandQuoteRow]), { status: 200 }));
 
     const result = await syncTencentRealMarketData(base, fetchMock);
     const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
@@ -340,10 +340,10 @@ describe("realMarketDataService", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url === "/api/market/tencent/ashare/quotes") {
-        return new Response(JSON.stringify([rustMaotaiQuoteRow, rustDelistedQuoteRow, rustPinganQuoteRow, rustNoslandQuoteRow]), { status: 200 });
+        return new Response(JSON.stringify([bunMaotaiQuoteRow, bunDelistedQuoteRow, bunPinganQuoteRow, bunNoslandQuoteRow]), { status: 200 });
       }
       if (url.startsWith("/api/market/technical-indicators")) {
-        return new Response(JSON.stringify(rustTechnicalIndicatorRows), { status: 200 });
+        return new Response(JSON.stringify(bunTechnicalIndicatorRows), { status: 200 });
       }
       return new Response("", { status: 500 });
     });
@@ -365,7 +365,7 @@ describe("realMarketDataService", () => {
     expect(result.technicalMatchedRows).toBe(1);
     expect(result.technicalSourceRows).toBe(120);
     expect(result.details).toContain("识别 3 只有效 A 股股票");
-    expect(result.details).toContain("Rust 技术指标匹配 1/1 只");
+    expect(result.details).toContain("Bun 技术指标匹配 1/1 只");
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(requestedUrls[0]).toBe("/api/market/tencent/ashare/quotes");
     expect(requestedUrls[1]).toContain("/api/market/technical-indicators");
@@ -399,7 +399,7 @@ describe("realMarketDataService", () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url === "/api/market/tencent/ashare/quotes") {
-        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+        return new Response(JSON.stringify([bunMaotaiQuoteRow]), { status: 200 });
       }
       if (url.startsWith("/api/market/technical-indicators")) {
         return new Response(JSON.stringify([]), { status: 200 });
@@ -424,15 +424,15 @@ describe("realMarketDataService", () => {
     expect(maotai?.industry1).toBe("食品饮料");
   });
 
-  it("uses Rust structured all-A-share quote rows on the local app proxy", async () => {
+  it("uses Bun structured all-A-share quote rows on the local app proxy", async () => {
     vi.stubGlobal("window", { location: { hostname: "127.0.0.1" } });
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url === "/api/market/tencent/ashare/quotes") {
-        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+        return new Response(JSON.stringify([bunMaotaiQuoteRow]), { status: 200 });
       }
       if (url.startsWith("/api/market/technical-indicators")) {
-        return new Response(JSON.stringify(rustTechnicalIndicatorRows), { status: 200 });
+        return new Response(JSON.stringify(bunTechnicalIndicatorRows), { status: 200 });
       }
       return new Response("", { status: 500 });
     });
@@ -449,11 +449,11 @@ describe("realMarketDataService", () => {
     expect(requestedUrls[1]).toContain("/api/market/technical-indicators");
   });
 
-  it("keeps all-market quotes visible when Rust technical indicators fail", async () => {
+  it("keeps all-market quotes visible when Bun technical indicators fail", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
       if (url === "/api/market/tencent/ashare/quotes") {
-        return new Response(JSON.stringify([rustMaotaiQuoteRow]), { status: 200 });
+        return new Response(JSON.stringify([bunMaotaiQuoteRow]), { status: 200 });
       }
       if (url.startsWith("/api/market/technical-indicators")) {
         return new Response("upstream unavailable", { status: 503 });
@@ -468,22 +468,22 @@ describe("realMarketDataService", () => {
     expect(result.stocks[0].metrics.realQuoteSource).toBe(1);
     expect(result.stocks[0].metrics.realTechnicalSource).toBeUndefined();
     expect(result.technicalMatchedRows).toBe(0);
-    expect(result.details).toContain("Rust technical indicator API HTTP 503");
+    expect(result.details).toContain("Bun technical indicator API HTTP 503");
     expect(result.details).toContain("upstream unavailable");
   });
 
-  it("reports invalid Rust all-A-share quote payloads instead of treating them as no active stocks", async () => {
+  it("reports invalid Bun all-A-share quote payloads instead of treating them as no active stocks", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([{ foo: "bar" }]), { status: 200 }));
 
     const result = await syncTencentAllAshareMarketData([], fetchMock);
 
     expect(result.ok).toBe(false);
-    expect(result.details).toContain("Rust Tencent quote API returned invalid quote rows payload");
+    expect(result.details).toContain("Bun Tencent quote API returned invalid quote rows payload");
     expect(result.sourceRows).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reports invalid Rust all-A-share quote JSON explicitly", async () => {
+  it("reports invalid Bun all-A-share quote JSON explicitly", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response("not-json", { status: 200 }));
 
     const result = await syncTencentAllAshareMarketData([], fetchMock);
