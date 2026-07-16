@@ -127,6 +127,7 @@ export interface StrategyConfig {
   marginFlag: string;
   starMode: "包含科创板" | "排除科创板" | "仅有科创板";
   filterSuspended: boolean;
+  excludeDelisted?: boolean;
   filters: FilterCondition[];
   ranks: RankCondition[];
   trading: {
@@ -197,6 +198,11 @@ export interface CurvePoint {
 }
 
 export interface BacktestResult {
+  methodology: {
+    mode: "rule-simulation";
+    usesHistoricalPrices: false;
+    disclaimer: "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。";
+  };
   rows: SelectionRow[];
   curve: CurvePoint[];
   metrics: {

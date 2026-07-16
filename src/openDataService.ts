@@ -31,6 +31,8 @@ export interface OpenSourceSyncResult {
   summary: OpenSourceDataSummary;
 }
 
+export type OpenSourceProgressHandler = (result: OpenSourceSyncResult) => void;
+
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type AkShareRow = Record<string, unknown>;
 
@@ -1440,6 +1442,25 @@ async function withAkShareTimeout<T>(timeoutSeconds: number, task: (signal: Abor
 const syncErrorDetail = (error: unknown) =>
   error instanceof Error && error.name === "AbortError" ? "请求超时" : error instanceof Error ? error.message : "未知网络错误";
 
+function emitOpenSourceProgress(handler: OpenSourceProgressHandler | undefined, result: OpenSourceSyncResult) {
+  if (!handler) return;
+  try {
+    handler(result);
+  } catch {
+    // Progress rendering must never interrupt the final data synchronization result.
+  }
+}
+
+type SyncTaskOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
+async function captureSyncTask<T>(task: Promise<T>): Promise<SyncTaskOutcome<T>> {
+  try {
+    return { ok: true, value: await task };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 const emptyFinancialMerge = (stocks: Stock[]) => ({
   stocks,
   matchedRows: 0,
@@ -1594,11 +1615,22 @@ export async function syncOpenSourceFinancialReports(
   const baseUrl = (ashareHub ? settings.baseUrl.trim() || ASHAREHUB_DEFAULT_BASE_URL : settings.baseUrl).replace(/\/$/, "");
   const bunNative = !ashareHub && shouldUseBunNativeDataApi(baseUrl);
   try {
-    const financialRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) =>
+    const financialRowsPromise = withAkShareTimeout(settings.timeoutSeconds, (signal) =>
       ashareHub
         ? fetchAshareHubFinancialRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
         : fetchAkShareFinancialRows(baseUrl, signal, fetchImpl)
     );
+    const analystRowsTask = bunNative
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchBunAnalystForecastRows(signal, fetchImpl)))
+      : undefined;
+    const marginRowsTask = bunNative || ashareHub
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) =>
+          ashareHub
+            ? fetchAshareHubMarginBalanceRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
+            : fetchBunMarginBalanceRows(signal, fetchImpl)
+        ))
+      : undefined;
+    const financialRows = await financialRowsPromise;
     const financial = mergeAkShareFinancialRows(baseStocks, financialRows, false);
     const financialErrorDetail = financialRows.errorDetail ?? "";
     const valuationReadyRows = financial.stocks.filter(valuationReady).length;
@@ -1629,37 +1661,35 @@ export async function syncOpenSourceFinancialReports(
 
     let analystErrorDetail = "";
     let analyst = emptyAnalystMerge(financial.stocks);
-    if (bunNative) {
-      try {
-        const analystRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchBunAnalystForecastRows(signal, fetchImpl));
+    if (analystRowsTask) {
+      const outcome = await analystRowsTask;
+      if (outcome.ok) {
+        const analystRows = outcome.value;
         analyst = mergeBunAnalystForecastRows(financial.stocks, analystRows, false);
         if (!analyst.matchedRows) {
           analystErrorDetail = analystRows.length
             ? `Bun native analyst forecast API returned ${analystRows.length} rows but none matched the current stock pool`
             : "Bun native analyst forecast API returned no rows";
         }
-      } catch (error) {
-        analystErrorDetail = syncErrorDetail(error);
+      } else {
+        analystErrorDetail = syncErrorDetail(outcome.error);
       }
     }
 
     let marginErrorDetail = "";
     let margin = emptyMarginMerge(analyst.stocks);
-    if (bunNative || ashareHub) {
-      try {
-        const marginRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) =>
-          ashareHub
-            ? fetchAshareHubMarginBalanceRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
-            : fetchBunMarginBalanceRows(signal, fetchImpl)
-        );
+    if (marginRowsTask) {
+      const outcome = await marginRowsTask;
+      if (outcome.ok) {
+        const marginRows = outcome.value;
         margin = mergeBunMarginBalanceRows(analyst.stocks, marginRows, false);
         if (!margin.matchedRows) {
           marginErrorDetail = marginRows.length
             ? `${ashareHub ? "AShareHub margin API" : "Bun native margin balance API"} returned ${marginRows.length} rows but none matched the current stock pool`
             : `${ashareHub ? "AShareHub margin API" : "Bun native margin balance API"} returned no rows`;
         }
-      } catch (error) {
-        marginErrorDetail = syncErrorDetail(error);
+      } else {
+        marginErrorDetail = syncErrorDetail(outcome.error);
       }
     }
 
@@ -1720,7 +1750,8 @@ export async function syncOpenSourceFinancialReports(
 export async function syncOpenSourceMarketData(
   rawSettings: InfoSourceSettings,
   baseStocks: Stock[],
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  onProgress?: OpenSourceProgressHandler
 ): Promise<OpenSourceSyncResult> {
   const settings = ensureInfoSourceSettings(rawSettings);
   const checkedAt = new Date().toISOString();
@@ -1781,40 +1812,86 @@ export async function syncOpenSourceMarketData(
     );
     const merged = ashareHub ? mergeAshareHubSpotRows(baseStocks, marketRows.rows) : mergeAkShareSpotRows(baseStocks, marketRows.rows);
     const quoteStocks = merged.matchedRows ? merged.stocks : baseStocks;
-    let northHoldErrorDetail = "";
-    let northHold = emptyNorthHoldMerge(quoteStocks);
-    if ((bunNative || ashareHub) && settings.modules.market) {
-      try {
-        const northHoldRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) =>
+    if (merged.matchedRows) {
+      const marketProviderName = ashareHub ? "AShareHub" : bunNative ? "Bun 原生" : "AKShare";
+      const progressDetails = `已先返回 ${merged.matchedRows}/${merged.sourceRows} 条 ${marketProviderName} A 股行情，正在并行补齐资金、技术和财务数据`;
+      emitOpenSourceProgress(onProgress, {
+        ok: true,
+        checkedAt,
+        message: "实时行情已到达",
+        details: progressDetails,
+        stocks: quoteStocks,
+        summary: {
+          ...defaultOpenSourceDataSummary,
+          provider: settings.provider,
+          lastSyncAt: checkedAt,
+          matchedRows: merged.matchedRows,
+          sourceRows: merged.sourceRows,
+          stockCount: quoteStocks.length,
+          valuationReadyRows: quoteStocks.filter(valuationReady).length,
+          details: progressDetails
+        }
+      });
+    }
+    const technicalCodes = bunNative && settings.modules.market ? technicalIndicatorCodesForSync(quoteStocks, baseStocks) : [];
+    const northHoldRowsTask = (bunNative || ashareHub) && settings.modules.market
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) =>
           ashareHub
             ? fetchAshareHubNorthHoldingRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
             : fetchBunNorthHoldingRows(signal, fetchImpl)
-        );
+        ))
+      : undefined;
+    const technicalRowsTask = bunNative && settings.modules.market && technicalCodes.length
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchBunTechnicalIndicatorRows(technicalCodes, signal, fetchImpl)))
+      : undefined;
+    const financialRowsTask = settings.modules.finance
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) =>
+          ashareHub
+            ? fetchAshareHubFinancialRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
+            : fetchAkShareFinancialRows(baseUrl, signal, fetchImpl)
+        ))
+      : undefined;
+    const analystRowsTask = settings.modules.finance && bunNative
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchBunAnalystForecastRows(signal, fetchImpl)))
+      : undefined;
+    const marginRowsTask = settings.modules.finance && (bunNative || ashareHub)
+      ? captureSyncTask(withAkShareTimeout(settings.timeoutSeconds, (signal) =>
+          ashareHub
+            ? fetchAshareHubMarginBalanceRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
+            : fetchBunMarginBalanceRows(signal, fetchImpl)
+        ))
+      : undefined;
+    let northHoldErrorDetail = "";
+    let northHold = emptyNorthHoldMerge(quoteStocks);
+    if (northHoldRowsTask) {
+      const outcome = await northHoldRowsTask;
+      if (outcome.ok) {
+        const northHoldRows = outcome.value;
         northHold = mergeBunNorthHoldingRows(quoteStocks, northHoldRows, false);
         if (!northHold.matchedRows) {
           northHoldErrorDetail = northHoldRows.length
             ? `${ashareHub ? "AShareHub north holdings API" : "Bun native north holdings API"} returned ${northHoldRows.length} rows but none matched the current stock pool`
             : `${ashareHub ? "AShareHub north holdings API" : "Bun native north holdings API"} returned no rows`;
         }
-      } catch (error) {
-        northHoldErrorDetail = syncErrorDetail(error);
+      } else {
+        northHoldErrorDetail = syncErrorDetail(outcome.error);
       }
     }
     let technicalErrorDetail = "";
     let technical = emptyTechnicalMerge(northHold.stocks);
     if (bunNative && settings.modules.market) {
-      const technicalCodes = technicalIndicatorCodesForSync(northHold.stocks, baseStocks);
       if (technicalCodes.length) {
-        try {
-          const technicalRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchBunTechnicalIndicatorRows(technicalCodes, signal, fetchImpl));
+        const outcome = await technicalRowsTask!;
+        if (outcome.ok) {
+          const technicalRows = outcome.value;
           technical = mergeBunTechnicalIndicatorRows(northHold.stocks, technicalRows, false);
           if (!technical.matchedRows) {
             technicalErrorDetail = technicalRows.length
               ? `Bun native technical indicator API returned ${technicalRows.length} rows but none matched the current stock pool`
               : "Bun native technical indicator API returned no rows";
           }
-        } catch (error) {
-          technicalErrorDetail = syncErrorDetail(error);
+        } else {
+          technicalErrorDetail = syncErrorDetail(outcome.error);
         }
       } else {
         technicalErrorDetail = "No listed A-share codes are available for technical indicators";
@@ -1825,17 +1902,14 @@ export async function syncOpenSourceMarketData(
     let financeErrorDetail = "";
     let financial = emptyFinancialMerge(marketStocks);
 
-    if (settings.modules.finance) {
-      try {
-        const financialRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) =>
-          ashareHub
-            ? fetchAshareHubFinancialRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
-            : fetchAkShareFinancialRows(baseUrl, signal, fetchImpl)
-        );
+    if (financialRowsTask) {
+      const outcome = await financialRowsTask;
+      if (outcome.ok) {
+        const financialRows = outcome.value;
         financial = mergeAkShareFinancialRows(marketStocks, financialRows, shouldExpandFinancialUniverse);
         if (!financial.matchedRows && financialRows.errorDetail) financeErrorDetail = financialRows.errorDetail;
-      } catch (error) {
-        financeErrorDetail = syncErrorDetail(error);
+      } else {
+        financeErrorDetail = syncErrorDetail(outcome.error);
       }
     }
 
@@ -1862,37 +1936,35 @@ export async function syncOpenSourceMarketData(
 
     let analystErrorDetail = "";
     let analyst = emptyAnalystMerge(financial.stocks);
-    if (settings.modules.finance && bunNative) {
-      try {
-        const analystRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) => fetchBunAnalystForecastRows(signal, fetchImpl));
+    if (analystRowsTask) {
+      const outcome = await analystRowsTask;
+      if (outcome.ok) {
+        const analystRows = outcome.value;
         analyst = mergeBunAnalystForecastRows(financial.stocks, analystRows, false);
         if (!analyst.matchedRows) {
           analystErrorDetail = analystRows.length
             ? `Bun native analyst forecast API returned ${analystRows.length} rows but none matched the current stock pool`
             : "Bun native analyst forecast API returned no rows";
         }
-      } catch (error) {
-        analystErrorDetail = syncErrorDetail(error);
+      } else {
+        analystErrorDetail = syncErrorDetail(outcome.error);
       }
     }
 
     let marginErrorDetail = "";
     let margin = emptyMarginMerge(analyst.stocks);
-    if (settings.modules.finance && (bunNative || ashareHub)) {
-      try {
-        const marginRows = await withAkShareTimeout(settings.timeoutSeconds, (signal) =>
-          ashareHub
-            ? fetchAshareHubMarginBalanceRows(baseUrl, settings.apiToken, settings.timeoutSeconds, signal, fetchImpl)
-            : fetchBunMarginBalanceRows(signal, fetchImpl)
-        );
+    if (marginRowsTask) {
+      const outcome = await marginRowsTask;
+      if (outcome.ok) {
+        const marginRows = outcome.value;
         margin = mergeBunMarginBalanceRows(analyst.stocks, marginRows, false);
         if (!margin.matchedRows) {
           marginErrorDetail = marginRows.length
             ? `${ashareHub ? "AShareHub margin API" : "Bun native margin balance API"} returned ${marginRows.length} rows but none matched the current stock pool`
             : `${ashareHub ? "AShareHub margin API" : "Bun native margin balance API"} returned no rows`;
         }
-      } catch (error) {
-        marginErrorDetail = syncErrorDetail(error);
+      } else {
+        marginErrorDetail = syncErrorDetail(outcome.error);
       }
     }
 

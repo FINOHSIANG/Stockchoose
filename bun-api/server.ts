@@ -1,5 +1,6 @@
 import { ApiError, errorResponse, jsonResponse, notFound, requestJson, textResponse } from "./lib/http";
-import { fetchEastmoneyHistRows, fetchEastmoneySpotRows, fetchTencentAshareQuoteRows, fetchTencentKlinePoints, fetchTencentQuoteRows, fetchTencentQuoteText, stockFromMarketRow, tencentSymbolsFromQuery } from "./services/market";
+import { fetchEastmoneyHistRows, fetchEastmoneySpotRows, fetchKlinePointsWithFallback, fetchTencentAshareQuoteRows, fetchTencentQuoteRows, fetchTencentQuoteText, stockFromMarketRow, tencentSymbolsFromQuery } from "./services/market";
+import { buildMarketOverview } from "./services/marketOverview";
 import { fetchEastmoneyNewsRows, fetchNewsArticles, fetchSourceRows, normalizeNewsArticles } from "./services/news";
 import { buildBunValuationRows, fetchAnnualReports, fetchAnalystForecastRows, fetchAsharehubRows, fetchFilingAnnouncements, fetchFinanceStatements, fetchFinancialMetricRows, fetchMarginBalanceRows, fetchNorthHoldingRows, fetchStockProfile, fetchTechnicalIndicators } from "./services/finance";
 import { runStrategyBacktest, runStrategyOptimize, runStrategyRank, runStrategyScreen } from "./services/strategy";
@@ -120,16 +121,23 @@ async function route(request: Request) {
   if (path === "/api/market/tencent/ashare/quotes") return jsonResponse(await fetchTencentAshareQuoteRows());
   if (path === "/api/market/tencent/kline-points" || path.match(/^\/api\/market\/stock\/[^/]+\/kline-points$/)) {
     const symbol = url.searchParams.get("symbol") ?? path.split("/").at(4) ?? "sh600519";
-    return jsonResponse(await fetchTencentKlinePoints(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90)));
+    const result = await fetchKlinePointsWithFallback(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90));
+    return jsonResponse(result.points, 200, { "x-stockchoose-market-source": result.source });
   }
   if (path === "/api/market/tencent/kline" || path.match(/^\/api\/market\/stock\/[^/]+\/kline$/)) {
     const symbol = url.searchParams.get("symbol") ?? path.split("/").at(4) ?? "sh600519";
-    return jsonResponse(await fetchTencentKlinePoints(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90)));
+    const result = await fetchKlinePointsWithFallback(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90));
+    return jsonResponse(result.points, 200, { "x-stockchoose-market-source": result.source });
   }
   if (path === "/api/market/technical-indicators") return jsonResponse(await fetchTechnicalIndicators(String(url.searchParams.get("codes") ?? "").split(/[,;\s]+/), Number(url.searchParams.get("limit") ?? 120)));
   if (path.startsWith("/api/market/stock/") && path.endsWith("/profile")) {
     const parts = path.split("/");
-    return jsonResponse(await fetchStockProfile(parts[4] ?? "", { name: url.searchParams.get("name") ?? undefined, industry1: url.searchParams.get("industry1") ?? undefined, industry2: url.searchParams.get("industry2") ?? undefined }));
+    return jsonResponse(await fetchStockProfile(parts[4] ?? "", {
+      name: url.searchParams.get("name") ?? undefined,
+      industry1: url.searchParams.get("industry1") ?? undefined,
+      industry2: url.searchParams.get("industry2") ?? undefined,
+      forceRefresh: url.searchParams.get("force") === "1"
+    }));
   }
   if (path === "/api/market/north-holdings") return jsonResponse(await fetchNorthHoldingRows());
 
@@ -257,44 +265,7 @@ async function route(request: Request) {
   // === Dashboard routes ===
   if (path === "/api/dashboard/market-overview" && request.method === "GET") {
     const rows = await fetchEastmoneySpotRows();
-    let advancers = 0, decliners = 0, flatCount = 0, limitUp = 0, limitDown = 0, changeSum = 0, amountSum = 0, valid = 0;
-    for (const row of rows) {
-      const pct = (row.pctChange ?? row["涨跌幅"]) as number | undefined;
-      const amount = (row.amount ?? row["成交额"]) as number | undefined;
-      if (pct === undefined || pct === null || Number.isNaN(pct)) continue;
-      valid += 1;
-      changeSum += pct;
-      amountSum += amount ?? 0;
-      if (pct > 0.01) advancers += 1;
-      else if (pct < -0.01) decliners += 1;
-      else flatCount += 1;
-      if (pct >= 9.8) limitUp += 1;
-      if (pct <= -9.8) limitDown += 1;
-    }
-    const count = valid || 1;
-    const avgChange = changeSum / count;
-    const breadthScore = Math.min(100, Math.max(0, (advancers / count) * 100));
-    const momentumScore = Math.min(100, Math.max(0, 50 + avgChange * 10));
-    const strengthScore = Math.min(100, Math.max(0, 50 + ((limitUp - limitDown) / count) * 500));
-    const score = Math.round(breadthScore * 0.4 + momentumScore * 0.35 + strengthScore * 0.25);
-    let label = "低迷";
-    if (score >= 80) label = "过热";
-    else if (score >= 65) label = "强势";
-    else if (score >= 45) label = "中性";
-    else if (score >= 30) label = "偏弱";
-    return jsonResponse({
-      temperature: Math.min(100, Math.max(0, score)),
-      label,
-      advancers,
-      decliners,
-      flatCount,
-      limitUp,
-      limitDown,
-      avgChange,
-      totalAmount: amountSum,
-      totalStocks: valid,
-      checkedAt: new Date().toISOString()
-    });
+    return jsonResponse(buildMarketOverview(rows));
   }
 
   return notFound(path);

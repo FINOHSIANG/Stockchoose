@@ -18,12 +18,20 @@ function bunApiPort() {
 
 function dataCacheDir() {
   const { app } = process.versions.electron ? require("electron") : {};
-  const base = app ? app.getPath("userData") : path.join(repoRoot(), "data-cache");
-  return process.env.STOCKCHOOSE_DATA_CACHE_DIR || path.join(base, "data-cache");
+  const base = app ? app.getPath("userData") : repoRoot();
+  return path.resolve(process.env.STOCKCHOOSE_DATA_CACHE_DIR || path.join(base, "data-cache"));
 }
 
 function bunApiBaseUrl() {
   return (process.env.STOCKCHOOSE_BUN_API_URL || `http://127.0.0.1:${bunApiPort()}`).replace(/\/$/, "");
+}
+
+function bunApiProcessEnv() {
+  return {
+    ...process.env,
+    STOCKCHOOSE_BUN_PORT: String(bunApiPort()),
+    STOCKCHOOSE_DATA_CACHE_DIR: dataCacheDir()
+  };
 }
 
 function isBunApiDisabled() {
@@ -143,7 +151,7 @@ async function ensureBunApiRunning() {
     try {
       bunApiProcess = spawn(executable, isCompiledSidecar ? [] : ["run", path.join(repoRoot(), "bun-api", "server.ts")], {
         cwd,
-        env: { ...process.env, STOCKCHOOSE_BUN_PORT: String(bunApiPort()) },
+        env: bunApiProcessEnv(),
         detached: false,
         stdio: "ignore",
         windowsHide: true
@@ -170,6 +178,19 @@ function normalizeBunPath(pathValue) {
   return pathValue.startsWith("/") ? pathValue : `/${pathValue}`;
 }
 
+function bunProxyResponseHeaders(upstreamHeaders = {}, options = {}) {
+  const headers = {
+    "content-type": upstreamHeaders["content-type"] || options.contentType || "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+    "x-stockchoose-data-engine": "bun"
+  };
+  if (upstreamHeaders["x-stockchoose-market-source"]) {
+    headers["x-stockchoose-market-source"] = upstreamHeaders["x-stockchoose-market-source"];
+  }
+  return headers;
+}
+
 async function handleBunProxyRequest(request, response, options = {}) {
   const prefix = options.prefix || "/api";
   const requestUrl = request.url || "/";
@@ -185,12 +206,7 @@ async function handleBunProxyRequest(request, response, options = {}) {
       timeoutMs: options.timeoutMs || 180000
     });
     if (options.requireSuccess !== false && (result.statusCode < 200 || result.statusCode >= 300)) return false;
-    response.writeHead(result.statusCode, {
-      "content-type": result.headers["content-type"] || options.contentType || "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-      "x-stockchoose-data-engine": "bun"
-    });
+    response.writeHead(result.statusCode, bunProxyResponseHeaders(result.headers, options));
     response.end(result.body);
     return true;
   } catch {
@@ -212,7 +228,10 @@ module.exports = {
   ensureBunApiRunning,
   handleBunAktoolsRequest,
   handleBunProxyRequest,
+  bunProxyResponseHeaders,
   stopBunApiSidecar,
   bunApiBaseUrl,
+  bunApiProcessEnv,
+  dataCacheDir,
   findBunExecutable
 };

@@ -217,6 +217,10 @@ function rangeScopeKey(stock: Stock, range: FilterCondition["range"] | RankCondi
   return "all";
 }
 
+function isDelistedStock(stock: Stock) {
+  return stock.name.includes("退市") || stock.name.endsWith("退");
+}
+
 function applySelector(strategy: StrategyConfig, stock: Stock) {
   if (!isAll(strategy.indexMember) && !stock.indexes.includes(strategy.indexMember)) return false;
   if (!isAll(strategy.board) && stock.board !== strategy.board) return false;
@@ -232,6 +236,7 @@ function applySelector(strategy: StrategyConfig, stock: Stock) {
   if (textIncludes(strategy.starMode, ["排除科创板", "鎺掗櫎绉戝垱"]) && stock.isSTAR) return false;
   if (textIncludes(strategy.starMode, ["仅有科创板", "浠呮湁绉戝垱"]) && !stock.isSTAR) return false;
   if (strategy.filterSuspended && stock.isSuspended) return false;
+  if (strategy.excludeDelisted && isDelistedStock(stock)) return false;
   return true;
 }
 
@@ -510,8 +515,35 @@ export async function screenStocksBunFirst(
   return rows.map((row, index) => selectionRowFromPayload(row, index, label));
 }
 
+const RULE_SIMULATION_DISCLAIMER = "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。";
+
+function ruleSimulationMethodology(): BacktestResult["methodology"] {
+  return {
+    mode: "rule-simulation",
+    usesHistoricalPrices: false,
+    disclaimer: RULE_SIMULATION_DISCLAIMER
+  };
+}
+
+function normalizeRuleSimulationResult(result: unknown, label: string): BacktestResult {
+  if (!result || !Array.isArray((result as BacktestResult).rows) || !Array.isArray((result as BacktestResult).curve)) {
+    throw new Error(`${label} returned invalid backtest result`);
+  }
+  const methodology = (result as Partial<BacktestResult>).methodology;
+  if (
+    !methodology ||
+    methodology.mode !== "rule-simulation" ||
+    methodology.usesHistoricalPrices !== false ||
+    methodology.disclaimer !== RULE_SIMULATION_DISCLAIMER
+  ) {
+    throw new Error(`${label} returned invalid backtest methodology`);
+  }
+  return result as BacktestResult;
+}
+
 function emptyBacktestResult(): BacktestResult {
   return {
+    methodology: ruleSimulationMethodology(),
     rows: [],
     curve: [],
     metrics: {
@@ -668,6 +700,7 @@ export function runBacktest(
   });
 
   return {
+    methodology: ruleSimulationMethodology(),
     rows,
     curve,
     metrics: {
@@ -700,10 +733,7 @@ export async function runBacktestBunFirst(
     body: JSON.stringify({ strategy, stocks, pools, factors, config })
   });
   const result = await readBunJson(response, label);
-  if (!result || !Array.isArray((result as BacktestResult).rows) || !Array.isArray((result as BacktestResult).curve)) {
-    throw new Error(`${label} returned invalid backtest result`);
-  }
-  return result as BacktestResult;
+  return normalizeRuleSimulationResult(result, label);
 }
 
 export function rankingAnalysis(strategy: StrategyConfig, stocks: Stock[], pools: StockPool[], factors: Factor[]): RankingRow[] {
@@ -791,5 +821,9 @@ export async function optimizeStrategyBunFirst(
   if (!(result as StrategyOptimizationResult)?.candidate || !(result as StrategyOptimizationResult)?.result?.metrics) {
     throw new Error(`${label} returned invalid optimization result`);
   }
-  return result as StrategyOptimizationResult;
+  const optimization = result as StrategyOptimizationResult;
+  return {
+    ...optimization,
+    result: normalizeRuleSimulationResult(optimization.result, label)
+  };
 }

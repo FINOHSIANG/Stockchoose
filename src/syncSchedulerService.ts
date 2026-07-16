@@ -29,6 +29,7 @@ export interface SyncRunRecord {
 export interface SyncStatus {
   config: ScheduleConfig;
   running: boolean;
+  activeSources?: string[];
   lastFullSync: string | null;
   runs: SyncRunRecord[];
   cacheFiles: Array<{ name: string; size: number; modifiedAt: string }>;

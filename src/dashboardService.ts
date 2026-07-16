@@ -45,6 +45,15 @@ export interface HoldingSummary {
   topLoser?: { name: string; code: string; pnl: number; pnlPercent: number };
 }
 
+export interface StrategyDailyChangeSummary {
+  changePercent: number | null;
+  holdingCount: number;
+  validCount: number;
+  targetWeight: number;
+  validWeight: number;
+  coveragePercent: number;
+}
+
 export interface DashboardSentimentAlert {
   title: string;
   direction: string;
@@ -157,6 +166,27 @@ export function computeIndustryMomentum(stocks: Stock[], limit = 10): IndustryMo
   }
 
   return result.sort((a, b) => b.avgChange - a.avgChange).slice(0, limit);
+}
+
+export function computeStrategyDailyChange(rows: SelectionRow[]): StrategyDailyChangeSummary {
+  const holdings = rows.filter((row) => Number.isFinite(row.weight) && row.weight > 0);
+  const targetWeight = holdings.reduce((sum, row) => sum + row.weight, 0);
+  const validHoldings = holdings.filter((row) => Number.isFinite(row.stock.metrics.pctChange));
+  const validWeight = validHoldings.reduce((sum, row) => sum + row.weight, 0);
+  const coveragePercent = targetWeight > 0 ? Math.min(100, Math.max(0, validWeight / targetWeight * 100)) : 0;
+  const complete = holdings.length > 0 && validHoldings.length === holdings.length;
+  const changePercent = complete
+    ? validHoldings.reduce((sum, row) => sum + (row.stock.metrics.pctChange ?? 0) * row.weight / 100, 0)
+    : null;
+
+  return {
+    changePercent,
+    holdingCount: holdings.length,
+    validCount: validHoldings.length,
+    targetWeight,
+    validWeight,
+    coveragePercent,
+  };
 }
 
 export function computeIndexSnapshots(stocks: Stock[]): IndexSnapshot[] {

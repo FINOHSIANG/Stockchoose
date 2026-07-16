@@ -59,6 +59,7 @@ export function createDefaultStrategy(): StrategyConfig {
     marginFlag: "全部",
     starMode: "排除科创板",
     filterSuspended: false,
+    excludeDelisted: false,
     filters: [],
     ranks: [
       { id: uid("rank"), factorKey: "qualityScore", order: "desc", range: "全部", weight: 50, enabled: true },

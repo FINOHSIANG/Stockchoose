@@ -10,7 +10,7 @@ import {
   screenStocks,
   screenStocksBunFirst
 } from "./strategyEngine";
-import type { Factor, Stock, StockPool, StrategyConfig } from "./types";
+import type { Factor, RankCondition, Stock, StockPool, StrategyConfig } from "./types";
 
 const factors: Factor[] = [
   {
@@ -130,6 +130,27 @@ describe("strategyEngine", () => {
     expect(rows.map((row) => row.stock.code)).toEqual(["600519"]);
   });
 
+  it("filters delisted stocks only when the selector is enabled", () => {
+    const delistedStocks: Stock[] = [
+      { ...stock("600005", "行业A", 100), name: "退市股票" },
+      { ...stock("600006", "行业A", 90), name: "股票退" },
+      { ...stock("600007", "行业A", 80), name: "正常股票" }
+    ];
+    const delistedPools: StockPool[] = [{ id: "all", name: "all", type: "static", codes: delistedStocks.map((item) => item.code) }];
+    const rank: RankCondition[] = [{ id: "rank-all", factorKey: "valueScore", order: "desc", range: "全部", weight: 100, enabled: true }];
+
+    const defaults = screenStocks(strategy({ poolLimit: 10, ranks: rank }), delistedStocks, delistedPools, factors);
+    expect(defaults.map((row) => row.stock.code)).toEqual(["600005", "600006", "600007"]);
+
+    const excluded = screenStocks(
+      strategy({ poolLimit: 10, excludeDelisted: true, ranks: rank }),
+      delistedStocks,
+      delistedPools,
+      factors
+    );
+    expect(excluded.map((row) => row.stock.code)).toEqual(["600007"]);
+  });
+
   it("builds local rank, backtest, and optimization results", () => {
     const baseStrategy = strategy({
       poolLimit: 3,
@@ -154,13 +175,24 @@ describe("strategyEngine", () => {
 
     const ranked = rankingAnalysis(baseStrategy, stocks, pools, factors);
     const backtest = runBacktest(baseStrategy, stocks, pools, factors, config);
+    const noSelectionBacktest = runBacktest(baseStrategy, [], [], factors, config);
     const optimized = optimizeStrategy(baseStrategy, stocks, pools, factors, config);
 
     expect(ranked[0]).toMatchObject({ rank: 1, stock: { code: "600001" } });
     expect(backtest.rows.map((row) => row.stock.code)).toEqual(["600001", "600002", "600003"]);
     expect(backtest.curve.length).toBeGreaterThan(0);
-    expect(Number.isFinite(backtest.metrics.sharpe)).toBe(true);
+    expect(backtest.methodology).toEqual({
+      mode: "rule-simulation",
+      usesHistoricalPrices: false,
+      disclaimer: "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。"
+    });
+    expect(Object.values(backtest.metrics).every(Number.isFinite)).toBe(true);
+    expect(noSelectionBacktest).toMatchObject({
+      methodology: backtest.methodology,
+      rows: []
+    });
     expect(optimized.result.curve.length).toBeGreaterThan(0);
+    expect(optimized.result.methodology).toEqual(backtest.methodology);
     expect(optimized.candidate.trading.maxHoldings).toBeGreaterThan(0);
   });
 
@@ -286,6 +318,11 @@ describe("strategyEngine", () => {
 
   it("uses the Bun backtest endpoint for backtests", async () => {
     const bunResult = {
+      methodology: {
+        mode: "rule-simulation" as const,
+        usesHistoricalPrices: false as const,
+        disclaimer: "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。" as const
+      },
       rows: [],
       curve: [{ date: "2024-01-01", strategy: 1.01, benchmark: 1.02, hedge: 1.01 }],
       metrics: {
@@ -323,6 +360,38 @@ describe("strategyEngine", () => {
     expect(result).toEqual(bunResult);
   });
 
+  it("rejects Bun backtest results without rule-simulation methodology", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          rows: [],
+          curve: [],
+          metrics: { cumulativeReturn: 0, annualReturn: 0, maxDrawdown: 0, sharpe: 0, volatility: 0, winRate: 0, turnover: 0 },
+          yearly: [],
+          trades: []
+        }),
+        { status: 200 }
+      )
+    );
+
+    await expect(
+      runBacktestBunFirst(
+        strategy({}),
+        stocks,
+        pools,
+        factors,
+        {
+          startDate: "2024-01-01",
+          endDate: "2024-03-01",
+          benchmark: "沪深300",
+          cost: 0.2,
+          excludeTimeRange: false
+        },
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toThrow("Bun strategy backtest API returned invalid backtest methodology");
+  });
+
   it("throws a visible error when the Bun backtest endpoint fails", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 503 }));
 
@@ -353,6 +422,11 @@ describe("strategyEngine", () => {
         }
       }),
       result: {
+        methodology: {
+          mode: "rule-simulation" as const,
+          usesHistoricalPrices: false as const,
+          disclaimer: "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。" as const
+        },
         rows: [],
         curve: [{ date: "2024-01-01", strategy: 1.01, benchmark: 1.02, hedge: 1.01 }],
         metrics: {

@@ -1,12 +1,12 @@
 ﻿import { promises as fs } from "fs";
 import path from "path";
+import { resolveDataCacheDir } from "./lib/persistentCache";
 import { fetchEastmoneySpotRows, stockFromMarketRow } from "./services/market";
 import { fetchFinancialMetricRows, fetchAnalystForecastRows, fetchMarginBalanceRows, fetchNorthHoldingRows, fetchTechnicalIndicators } from "./services/finance";
 
-// Data directory: project-local "data-cache" folder, overridable via env
+// Electron 使用 userData；命令行开发默认使用项目内 data-cache。
 export function dataCacheDir(): string {
-  if (process.env.STOCKCHOOSE_DATA_CACHE_DIR) return process.env.STOCKCHOOSE_DATA_CACHE_DIR;
-  return path.join(process.cwd(), "data-cache");
+  return resolveDataCacheDir();
 }
 
 async function ensureDir(dir: string) {
@@ -45,6 +45,7 @@ export interface SyncRunRecord {
 export interface SyncStatus {
   config: ScheduleConfig;
   running: boolean;
+  activeSources: string[];
   lastFullSync: string | null;
   runs: SyncRunRecord[];
   cacheFiles: Array<{ name: string; size: number; modifiedAt: string }>;
@@ -72,6 +73,7 @@ let timer: ReturnType<typeof setInterval> | null = null;
 let running = false;
 const runRecords: SyncRunRecord[] = [];
 const activeSources = new Set<string>();
+let statusHydrationPromise: Promise<void> | null = null;
 
 function log(msg: string) {
   console.log(`[scheduler] ${msg}`);
@@ -99,20 +101,28 @@ export async function saveConfig(config: ScheduleConfig): Promise<ScheduleConfig
   return currentConfig;
 }
 
-export async function loadStatus(): Promise<SyncStatus> {
-  let savedRuns: SyncRunRecord[] = [];
-  try {
-    const raw = await fs.readFile(STATUS_FILE(), "utf8");
-    const parsed = JSON.parse(raw) as { runs?: SyncRunRecord[]; lastFullSync?: string };
-    savedRuns = Array.isArray(parsed.runs) ? parsed.runs.slice(-MAX_RUN_RECORDS) : [];
-    runRecords.length = 0;
-    runRecords.push(...savedRuns);
-    if (parsed.lastFullSync) lastFullSync = parsed.lastFullSync;
-  } catch {
-    // no saved status yet
+async function hydratePersistedStatus() {
+  if (!statusHydrationPromise) {
+    statusHydrationPromise = (async () => {
+      try {
+        const raw = await fs.readFile(STATUS_FILE(), "utf8");
+        const parsed = JSON.parse(raw) as { runs?: SyncRunRecord[]; lastFullSync?: string };
+        const savedRuns = Array.isArray(parsed.runs) ? parsed.runs.slice(-MAX_RUN_RECORDS) : [];
+        runRecords.length = 0;
+        runRecords.push(...savedRuns);
+        if (parsed.lastFullSync) lastFullSync = parsed.lastFullSync;
+      } catch {
+        // no saved status yet
+      }
+    })();
   }
+  await statusHydrationPromise;
+}
+
+export async function loadStatus(): Promise<SyncStatus> {
+  await hydratePersistedStatus();
   const cacheFiles = await listCacheFiles();
-  return { config: currentConfig, running, lastFullSync, runs: [...runRecords].reverse().slice(0, 50), cacheFiles };
+  return { config: currentConfig, running, activeSources: [...activeSources], lastFullSync, runs: [...runRecords].reverse().slice(0, 50), cacheFiles };
 }
 
 let lastFullSync: string | null = null;
@@ -234,6 +244,7 @@ function latestReportDate(): string {
 }
 
 export async function runScheduledSync(config: ScheduleConfig): Promise<SyncRunRecord[]> {
+  await hydratePersistedStatus();
   if (running) {
     log("sync already in progress, skipping");
     return [];
@@ -249,21 +260,39 @@ export async function runScheduledSync(config: ScheduleConfig): Promise<SyncRunR
     ["technicalIndicators", config.sources.technicalIndicators, taskTechnicalIndicators],
   ];
 
-  const results: SyncRunRecord[] = [];
-  // Run sequentially to respect upstream rate limits
-  for (const [name, enabled, fn] of tasks) {
-    if (!enabled) continue;
-    log(`fetching ${name}...`);
-    const record = await runSource(name, fn);
-    results.push(record);
-    log(`${name}: ${record.ok ? `${record.rowCount} rows` : `FAILED ${record.error}`}`);
-  }
+  try {
+    const enabledTasks = tasks.filter(([, enabled]) => enabled);
+    const promises = new Map<string, Promise<SyncRunRecord>>();
+    const marketTask = enabledTasks.find(([name]) => name === "marketQuotes");
+    const marketPromise = marketTask
+      ? runSource(marketTask[0], marketTask[2]).then((record) => {
+          log(`${marketTask[0]}: ${record.ok ? `${record.rowCount} rows` : `FAILED ${record.error}`}`);
+          return record;
+        })
+      : undefined;
+    if (marketPromise) promises.set("marketQuotes", marketPromise);
 
-  lastFullSync = new Date().toISOString();
-  await persistStatus();
-  running = false;
-  log("scheduled sync complete");
-  return results;
+    for (const [name, , fn] of enabledTasks) {
+      if (name === "marketQuotes") continue;
+      const dependency = name === "technicalIndicators" && marketPromise ? marketPromise.then(() => undefined) : Promise.resolve();
+      const promise = dependency.then(() => {
+        log(`fetching ${name}...`);
+        return runSource(name, fn);
+      }).then((record) => {
+        log(`${name}: ${record.ok ? `${record.rowCount} rows` : `FAILED ${record.error}`}`);
+        return record;
+      });
+      promises.set(name, promise);
+    }
+
+    const results = await Promise.all(enabledTasks.map(([name]) => promises.get(name)!));
+    lastFullSync = new Date().toISOString();
+    await persistStatus();
+    log("scheduled sync complete");
+    return results;
+  } finally {
+    running = false;
+  }
 }
 
 export async function triggerManualSync(): Promise<SyncRunRecord[]> {
@@ -293,14 +322,7 @@ export function applySchedule() {
 
 export async function initScheduler() {
   await loadConfig();
-  // Load saved status for immediate availability
-  try {
-    const raw = await fs.readFile(STATUS_FILE(), "utf8");
-    const parsed = JSON.parse(raw) as { lastFullSync?: string };
-    if (parsed.lastFullSync) lastFullSync = parsed.lastFullSync;
-  } catch {
-    // no saved status
-  }
+  await hydratePersistedStatus();
   applySchedule();
   log(`initialized, data cache dir: ${dataCacheDir()}`);
 }

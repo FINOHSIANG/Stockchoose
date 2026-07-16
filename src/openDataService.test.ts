@@ -460,6 +460,50 @@ describe("openDataService", () => {
     expect(fetchMock.mock.calls.map((call) => String(call[0])).some((url) => url.includes("/api/market/technical-indicators"))).toBe(true);
   });
 
+  it("reports market rows before slower enrichment requests complete", async () => {
+    let releaseNorth!: (response: Response) => void;
+    let releaseTechnical!: (response: Response) => void;
+    const northResponse = new Promise<Response>((resolve) => {
+      releaseNorth = resolve;
+    });
+    const technicalResponse = new Promise<Response>((resolve) => {
+      releaseTechnical = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/api/market/ashare/spot")) return new Response(JSON.stringify(akshareRows), { status: 200 });
+      if (url.includes("/api/market/north-holdings")) return northResponse;
+      if (url.includes("/api/market/technical-indicators")) return technicalResponse;
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const settings = ensureInfoSourceSettings({
+      provider: AKSHARE_AKTOOLS_PROVIDER,
+      baseUrl: AKTOOLS_DEFAULT_BASE_URL,
+      modules: { market: true, finance: false, filing: false, news: false }
+    });
+    let resolveProgress!: () => void;
+    const progressReached = new Promise<void>((resolve) => {
+      resolveProgress = resolve;
+    });
+    const progressResults: Array<{ message: string; stockCount: number }> = [];
+
+    const syncPromise = syncOpenSourceMarketData(settings, STOCKS, fetchMock, (progress) => {
+      progressResults.push({ message: progress.message, stockCount: progress.stocks.length });
+      resolveProgress();
+    });
+    await progressReached;
+
+    expect(progressResults).toEqual([{ message: "实时行情已到达", stockCount: STOCKS.length }]);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual(expect.arrayContaining([
+      "/api/market/north-holdings",
+      expect.stringContaining("/api/market/technical-indicators")
+    ]));
+
+    releaseNorth(new Response(JSON.stringify(bunNorthHoldingRows), { status: 200 }));
+    releaseTechnical(new Response(JSON.stringify(bunTechnicalIndicatorRows), { status: 200 }));
+    await expect(syncPromise).resolves.toMatchObject({ ok: true });
+  });
+
   it("does not fall back to AKTools spot endpoints when the local Bun native market endpoint has no rows", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);

@@ -501,6 +501,11 @@ test("stock strategy workstation core flows", async ({ page }) => {
       contentType: "application/json",
       headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
       body: JSON.stringify({
+        methodology: {
+          mode: "rule-simulation",
+          usesHistoricalPrices: false,
+          disclaimer: "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。"
+        },
         rows: [
           {
             stock: {
@@ -678,7 +683,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
   });
 
   await page.goto("/");
-  await expect(page.getByText("策略管理")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "市场总览" })).toBeVisible();
   await page.locator(".primary-nav").getByRole("button", { name: "设置", exact: true }).click();
   await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
   const bootstrapInfoSourcePanel = page.locator(".settings-panel").filter({ hasText: "信息来源接口" });
@@ -723,11 +728,11 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await page.getByRole("button", { name: /市盈率PE/ }).click();
   await expect(page.getByText("市盈率PE").last()).toBeVisible();
 
-  await page.getByRole("button", { name: /开始回测/ }).click();
-  await expect(page.getByText("累计收益")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "策略净值曲线" })).toBeVisible();
-
   const backtestPanel = page.locator(".backtest-panel");
+  await backtestPanel.getByRole("button", { name: "开始规则模拟", exact: true }).click();
+  await expect(backtestPanel.getByText("累计模拟收益", { exact: true })).toBeVisible();
+  await expect(backtestPanel.getByRole("heading", { name: "模拟净值曲线", exact: true })).toBeVisible();
+
   await backtestPanel.locator('[data-backtest-tab="daily"]').click();
   const dailyLimitInput = page.getByLabel("选股数量：");
   await expect(dailyLimitInput).toBeVisible();
@@ -745,13 +750,15 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(backtestPanel.locator(".factor-correlation-panel")).toBeVisible();
   await expect(backtestPanel.locator(".factor-ic-table")).toBeVisible();
   await expect(backtestPanel.locator(".factor-matrix-table")).toBeVisible();
+  await expect(backtestPanel.getByRole("heading", { name: "因子IC概览", exact: true })).toBeVisible();
+  await expect(backtestPanel.getByRole("heading", { name: "因子相关性矩阵", exact: true })).toBeVisible();
 
   await page.locator(".primary-nav").getByRole("button", { name: "舆情", exact: true }).click();
   await expect(page.getByRole("heading", { name: "舆情选股" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "事件雷达" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "关联股票" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "深度洞察报告" })).toBeVisible();
-  await page.getByRole("button", { name: "手动刷新" }).click();
+  await page.locator(".refresh-control-bar").filter({ hasText: "舆情选股刷新" }).getByRole("button", { name: "手动刷新", exact: true }).click();
   await expect(page.getByText("高端白酒批价波动").first()).toBeVisible();
   await page.getByLabel("事件类型").selectOption("风险负面");
   await page.getByLabel("重大程度").selectOption("特别重大");

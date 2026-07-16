@@ -207,6 +207,7 @@ import {
 import {
   computeMarketTemperature,
   computeIndustryMomentum,
+  computeStrategyDailyChange,
   summarizeHoldings,
   type MarketTemperature
 } from "./dashboardService";
@@ -1889,7 +1890,7 @@ function StockInfoModal({
     if (!stock) return;
     setStockProfileLoading(true);
     setStockProfileStatus("正在通过 Bun Eastmoney F10 自动匹配官网和行业标签...");
-    const result = await fetchStockProfileAutoMatch(stock);
+    const result = await fetchStockProfileAutoMatch(stock, fetch, true);
     applyStockProfileResult(result);
     setStockProfileLoading(false);
   };
@@ -2215,6 +2216,7 @@ function App() {
   const [syncConfig, setSyncConfig] = useState<ScheduleConfig>(() => ({ ...defaultScheduleConfig }));
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
+  const syncStatusRequestIdRef = useRef(0);
   const [valuationDataSource, setValuationDataSource] = useState<Exclude<ValuationDataSource, "akshare">>(() =>
     ensureValuationDataSource(loadLocal<ValuationDataSource>("valuationDataSource", "none"))
   );
@@ -2237,6 +2239,14 @@ function App() {
   const [poolDraft, setPoolDraft] = useState({ name: "我的股票池", codes: "600519,300750,002594,600036,600900" });
   const [customFactorDraft, setCustomFactorDraft] = useState({ name: "质量成长合成", formula: "qualityScore * 0.6 + revenueGrowth * 0.4 - pe * 0.2" });
 
+  const readLatestSyncStatus = async (isActive: () => boolean = () => true) => {
+    const requestId = ++syncStatusRequestIdRef.current;
+    const next = await fetchSyncStatus();
+    if (!isActive() || requestId !== syncStatusRequestIdRef.current) return null;
+    setSyncStatus(next);
+    return next;
+  };
+
   useEffect(() => {
     const handleClickFeedback = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target.closest("button") : null;
@@ -2251,6 +2261,38 @@ function App() {
     document.addEventListener("click", handleClickFeedback);
     return () => document.removeEventListener("click", handleClickFeedback);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const requestId = ++syncStatusRequestIdRef.current;
+    void fetchSyncStatus().then((next) => {
+      if (cancelled || requestId !== syncStatusRequestIdRef.current) return;
+      setSyncConfig(next.config);
+      setSyncStatus(next);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const intervalMs = syncStatus?.running ? 1500 : 15000;
+    const timer = window.setInterval(() => {
+      void readLatestSyncStatus(() => active).then((next) => {
+        if (!next) return;
+        if (next.running && next.activeSources?.length) {
+          setInfoSourceStatus(`正在采集：${next.activeSources.join("、")}`);
+        } else if (!next.running && syncStatus?.running) {
+          setInfoSourceStatus("后台数据采集已完成");
+        }
+      }).catch(() => undefined);
+    }, intervalMs);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [syncStatus?.running]);
 
   useEffect(() => {
     saveLocal("draftStrategy", strategy);
@@ -2391,7 +2433,7 @@ function App() {
   const runCurrentTask = async (tab = backtestTab) => {
     let strategyStocks: Stock[] = [];
     let strategyPools: StockPool[] = [];
-    const label = tab === "backtest" ? "回测" : tab === "rank" || tab === "factorCorrelation" ? "排名分析" : "选股";
+    const label = tab === "backtest" ? "规则模拟" : tab === "rank" || tab === "factorCorrelation" ? "排名分析" : "选股";
     try {
       saveLocal("backtestConfig", backtestConfig);
       setStrategyRunStatus(`正在通过 Bun ${label}接口运行...`);
@@ -2438,7 +2480,7 @@ function App() {
       setResult(next);
       setSelectionRows(next.rows);
       if (backtestTabRef.current === tab) setActiveBacktestTab("backtest");
-      setStrategyRunStatus(`Bun 回测完成，曲线 ${next.curve.length} 个点，持仓 ${next.rows.length} 只。`);
+      setStrategyRunStatus(`Bun 规则模拟完成，模拟曲线 ${next.curve.length} 个点，持仓 ${next.rows.length} 只。`);
     } catch (error) {
       const detail = readableError(error);
       if (tab === "rank" || tab === "factorCorrelation") {
@@ -2625,7 +2667,7 @@ function App() {
 
   const refreshSyncStatus = async () => {
     try {
-      setSyncStatus(await fetchSyncStatus());
+      await readLatestSyncStatus();
     } catch (error) {
       setInfoSourceStatus("定时同步状态获取失败：" + readableError(error));
     }
@@ -2653,37 +2695,74 @@ function App() {
     }
   };
 
-  const runManualSync = async () => {
-    setSyncBusy(true);
-    setInfoSourceStatus("正在手动触发数据采集...");
-    try {
-      const result = await triggerManualSync();
-      const okCount = result.results.filter((r) => r.ok).length;
-      setInfoSourceStatus("手动同步完成：" + okCount + "/" + result.results.length + " 个数据源成功");
-      await refreshSyncStatus();
-    } catch (error) {
-      setInfoSourceStatus("手动同步失败：" + readableError(error));
-    } finally {
-      setSyncBusy(false);
-    }
-  };
-
-  const syncOpenSourceData = async () => {
+  const performOpenSourceDataSync = async () => {
     setInfoSourceStatus(`正在通过 ${infoSourceDisplayName(infoSourceSettings)} 同步真实数据...`);
-    const result = await syncOpenSourceMarketData(infoSourceSettings, stocks);
+    const result = await syncOpenSourceMarketData(infoSourceSettings, stocks, fetch, (progress) => {
+      setStocks(progress.stocks);
+      setOpenSourceSummary(progress.summary);
+      setValuationDataSource("openSource");
+      setValuationRealDataStatus(progress.details);
+      setInfoSourceStatus(`${progress.message}：${progress.details}`);
+    });
     if (result.ok) {
       setStocks(result.stocks);
       setOpenSourceSummary(result.summary);
-      saveLocal("openSourceStocks", result.stocks);
-      saveLocal("openSourceDataSummary", result.summary);
       setValuationDataSource("openSource");
       saveLocal<ValuationDataSource>("valuationDataSource", "openSource");
       setValuationRealDataStatus(result.details);
       setResult(null);
       setRankRows([]);
       setSelectionRows([]);
+      window.setTimeout(() => {
+        saveLocal("openSourceStocks", result.stocks);
+        saveLocal("openSourceDataSummary", result.summary);
+      }, 0);
     }
     setInfoSourceStatus(`${result.message}：${result.details}`);
+    return result;
+  };
+
+  const runManualSync = async () => {
+    if (syncBusy || syncStatus?.running) return;
+    setSyncBusy(true);
+    setInfoSourceStatus("正在手动触发数据采集...");
+    const manualStartedAt = Date.now();
+    let pollActive = true;
+    const pollTimer = window.setInterval(() => {
+      void readLatestSyncStatus(() => pollActive).then((next) => {
+        if (!next) return;
+        const activeLabels = (next.activeSources ?? []).map((key) => scheduleSourceLabels.find((item) => item.key === key)?.label ?? key);
+        const completed = next.runs.filter((run) => Date.parse(run.startedAt) >= manualStartedAt).length;
+        setInfoSourceStatus(activeLabels.length ? `正在采集：${activeLabels.join("、")}；已完成 ${completed} 项` : "正在整理同步结果...");
+      }).catch(() => undefined);
+    }, 800);
+    try {
+      const result = await triggerManualSync();
+      pollActive = false;
+      window.clearInterval(pollTimer);
+      const okCount = result.results.filter((r) => r.ok).length;
+      await refreshSyncStatus();
+      const dataResult = await performOpenSourceDataSync();
+      setInfoSourceStatus(`手动同步完成：${okCount}/${result.results.length} 个采集任务成功；${dataResult.details}`);
+    } catch (error) {
+      setInfoSourceStatus("手动同步失败：" + readableError(error));
+    } finally {
+      pollActive = false;
+      window.clearInterval(pollTimer);
+      setSyncBusy(false);
+    }
+  };
+
+  const syncOpenSourceData = async () => {
+    if (syncBusy || syncStatus?.running) return;
+    setSyncBusy(true);
+    try {
+      await performOpenSourceDataSync();
+    } catch (error) {
+      setInfoSourceStatus("真实数据同步失败：" + readableError(error));
+    } finally {
+      setSyncBusy(false);
+    }
   };
 
   const syncValuationRealData = async () => {
@@ -2960,29 +3039,41 @@ function App() {
 
   return (
     <>
-      <div className="app-shell">
+      <div className="app-shell" data-section={topSection}>
         <header className="primary-nav">
-          <button className={topSection === "dashboard" ? "active" : ""} onClick={() => setTopSection("dashboard")}>
+          <div className="app-brand" aria-label="StockChoose A股研究工作站">
+            <span className="app-brand-mark" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+            <span className="app-brand-copy">
+              <strong>STOCKCHOOSE</strong>
+              <small>A-SHARE RESEARCH OS</small>
+            </span>
+          </div>
+          <button type="button" aria-pressed={topSection === "dashboard"} className={topSection === "dashboard" ? "active" : ""} onClick={() => setTopSection("dashboard")}>
             <LayoutDashboard size={16} />
             工作台
           </button>
-          <button className={topSection === "strategy" ? "active" : ""} onClick={() => setTopSection("strategy")}>
+          <button type="button" aria-pressed={topSection === "strategy"} className={topSection === "strategy" ? "active" : ""} onClick={() => setTopSection("strategy")}>
             <SlidersHorizontal size={16} />
             策略
           </button>
-          <button className={topSection === "trade" ? "active" : ""} onClick={() => setTopSection("trade")}>
+          <button type="button" aria-pressed={topSection === "trade"} className={topSection === "trade" ? "active" : ""} onClick={() => setTopSection("trade")}>
             <LineChart size={16} />
             交易
           </button>
-          <button className={topSection === "sentiment" ? "active" : ""} onClick={() => setTopSection("sentiment")}>
+          <button type="button" aria-pressed={topSection === "sentiment"} className={topSection === "sentiment" ? "active" : ""} onClick={() => setTopSection("sentiment")}>
             <Activity size={16} />
             舆情
           </button>
-          <button className={topSection === "valuation" ? "active" : ""} onClick={() => setTopSection("valuation")}>
+          <button type="button" aria-pressed={topSection === "valuation"} className={topSection === "valuation" ? "active" : ""} onClick={() => setTopSection("valuation")}>
             <BarChart3 size={16} />
             价值核算
           </button>
-          <button className={`nav-settings-entry ${topSection === "settings" ? "active" : ""}`} onClick={() => setTopSection("settings")}>
+          <button type="button" aria-pressed={topSection === "settings"} className={`nav-settings-entry ${topSection === "settings" ? "active" : ""}`} onClick={() => setTopSection("settings")}>
             <Settings size={16} />
             设置
           </button>
@@ -3012,9 +3103,10 @@ function App() {
                 selectionRows={selectionRows}
                 paperTradeState={paperTradeState}
                 openSourceSummary={openSourceSummary}
+                strategyName={strategy.name}
                 savedStrategies={savedStrategies}
                 syncStatus={syncStatus}
-                syncBusy={syncBusy}
+                syncBusy={syncBusy || Boolean(syncStatus?.running)}
                 onRunManualSync={runManualSync}
                 onNavigate={setTopSection}
               />
@@ -3169,7 +3261,7 @@ function App() {
                   onSyncOpenData={syncOpenSourceData}
         syncConfig={syncConfig}
         syncStatus={syncStatus}
-        syncBusy={syncBusy}
+        syncBusy={syncBusy || Boolean(syncStatus?.running)}
         onPatchSyncConfig={patchSyncConfig}
         onToggleSyncSource={toggleSyncSource}
         onSaveSyncConfig={saveSyncSchedule}
@@ -3469,6 +3561,10 @@ function ScreenStep({
             <input type="checkbox" checked={strategy.filterSuspended} onChange={(event) => patchStrategy({ filterSuspended: event.target.checked })} />
             过滤停牌股票
           </label>
+          <label className="check-line">
+            <input type="checkbox" checked={strategy.excludeDelisted ?? false} onChange={(event) => patchStrategy({ excludeDelisted: event.target.checked })} />
+            排除退市股票
+          </label>
         </div>
       </div>
 
@@ -3678,7 +3774,7 @@ function TradingStep({ strategy, patchTrading, factors }: { strategy: StrategyCo
           <SelectField label="空闲资金配置：" value={t.cashAsset} options={["无", "货币基金", "短债ETF"]} onChange={(cashAsset) => patchTrading({ cashAsset })} />
           <label className="check-line">
             <input type="checkbox" checked={t.realtimeBacktest} onChange={(event) => patchTrading({ realtimeBacktest: event.target.checked })} />
-            实时回测
+            实时规则模拟
           </label>
           <label className="check-line">
             <input type="checkbox" checked={t.multiPoint} onChange={(event) => patchTrading({ multiPoint: event.target.checked })} />
@@ -3796,6 +3892,9 @@ function TimingStep({ strategy, patchTiming }: { strategy: StrategyConfig; patch
           <span>自定义择时公式</span>
           <textarea value={timing.formula} onChange={(event) => patchTiming({ formula: event.target.value })} />
         </label>
+        <p className="timing-formula-hint" role="note">
+          选择“自定义择时公式”后，可在此保存条件配置。当前规则模拟仍按择时指数、模板与阈值模拟仓位，公式暂不独立解析执行。
+        </p>
       </div>
       <div className="template-grid">
         {["均线趋势", "估值分位", "宏观流动性", "行业轮动", "股指贴水", "风险预算"].map((item) => (
@@ -3833,8 +3932,9 @@ function HedgeStep({ strategy, patchHedge }: { strategy: StrategyConfig; patchHe
       <div className="hedge-note">
         <BarChart3 size={22} />
         <div>
-          <strong>Bun 对冲回测引擎</strong>
-          <p>回测时会按对冲比例扣减基准波动并计入期货成本，用于观察多空组合、低排名做空和风险敞口控制效果。</p>
+          <strong>Bun 对冲规则模拟</strong>
+          <p>规则模拟会按对冲比例扣减模拟基准波动并计入期货成本，用于观察多空组合、低排名做空和风险敞口控制效果。</p>
+          <p className="button-hint">基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。</p>
         </div>
       </div>
     </div>
@@ -3960,6 +4060,7 @@ function DashboardWorkspace({
   selectionRows,
   paperTradeState,
   openSourceSummary,
+  strategyName,
   savedStrategies,
   syncStatus,
   syncBusy,
@@ -3970,6 +4071,7 @@ function DashboardWorkspace({
   selectionRows: SelectionRow[];
   paperTradeState: PaperTradeState;
   openSourceSummary: OpenSourceDataSummary;
+  strategyName: string;
   savedStrategies: StrategyConfig[];
   syncStatus: SyncStatus | null;
   syncBusy: boolean;
@@ -4006,6 +4108,7 @@ function DashboardWorkspace({
   const strongIndustries = useMemo(() => allIndustryMomentum.slice(0, 5), [allIndustryMomentum]);
   const weakIndustries = useMemo(() => allIndustryMomentum.slice(-5).reverse(), [allIndustryMomentum]);
   const holdingSummary = useMemo(() => summarizeHoldings(paperTradeState, stocks), [paperTradeState, stocks]);
+  const strategyDailyChange = useMemo(() => computeStrategyDailyChange(selectionRows), [selectionRows]);
   const topSelections = useMemo(() => [...selectionRows].sort((a, b) => b.score - a.score).slice(0, 10), [selectionRows]);
   const unclassifiedCount = useMemo(() => stocks.filter((stock) => !stock.industry1 || stock.industry1 === "未分类").length, [stocks]);
   const marketSession = useMemo(() => {
@@ -4026,6 +4129,11 @@ function DashboardWorkspace({
   };
   const fmtPct = (v: number) => (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
   const fmtMoney = (v: number) => v.toFixed(2);
+  const pctTone = (value: number | null | undefined) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "neutral";
+    return value > 0 ? "positive" : value < 0 ? "negative" : "neutral";
+  };
+  const optionalPct = (value: number | undefined) => typeof value === "number" && Number.isFinite(value) ? fmtPct(value) : "--";
 
   const overview = marketOverview ?? temperature;
   const latestRun = syncStatus?.runs[0];
@@ -4033,7 +4141,14 @@ function DashboardWorkspace({
   const dataStatusLabel = syncBusy || syncStatus?.running ? "同步中" : latestRun?.ok === false ? "同步异常" : openSourceSummary.lastSyncAt ? "可用" : "待接入";
   const dataStatusTone = dataStatusLabel === "可用" ? "positive" : dataStatusLabel === "同步异常" ? "negative" : "neutral";
   const holdingRiskCount = holdingSummary.totalPnl < 0 ? 1 : 0;
-  const syncStateLabel = syncBusy ? "采集中" : syncStatus?.running ? "运行中" : latestRun?.ok === false ? "失败" : "就绪";
+  const strategyChangeDetail = selectionRows.length === 0
+    ? "待运行每日/实时选股"
+    : strategyDailyChange.holdingCount === 0
+      ? "暂无目标持仓"
+      : strategyDailyChange.changePercent === null
+        ? `行情覆盖 ${strategyDailyChange.coveragePercent.toFixed(0)}%（${strategyDailyChange.validCount}/${strategyDailyChange.holdingCount}），暂不计算`
+        : `${strategyName} · ${strategyDailyChange.holdingCount} 只 · 目标仓位 ${strategyDailyChange.targetWeight.toFixed(1)}%`;
+  const strategyChangeTitle = `按当前候选目标权重与真实行情当日涨跌幅计算，不使用规则模拟收益。${strategyChangeDetail}`;
 
   return (
     <main className="dashboard-workspace">
@@ -4059,9 +4174,11 @@ function DashboardWorkspace({
           <span>{holdingSummary.positionCount ? `${holdingSummary.positionCount} 只持仓` : "未导入持仓"}</span>
         </div>
         <div className="dashboard-status-item">
-          <span className="dashboard-status-label">同步任务</span>
-          <strong>{syncStateLabel}</strong>
-          <span>{latestRun ? `${latestRun.source} ${latestRun.rowCount} 行` : "无最近任务"}</span>
+          <span className="dashboard-status-label">策略涨跌幅</span>
+          <strong className={pctTone(strategyDailyChange.changePercent)}>
+            {strategyDailyChange.changePercent === null ? "--" : fmtPct(strategyDailyChange.changePercent)}
+          </strong>
+          <span title={strategyChangeTitle}>{strategyChangeDetail}</span>
         </div>
       </section>
 
@@ -4190,15 +4307,29 @@ function DashboardWorkspace({
       <section className="dashboard-card dashboard-selections">
         <div className="dashboard-card-header">
           <h3>选股工作区</h3>
-          <div className="dashboard-selection-tabs" role="tablist" aria-label="选股类型">
-            <button className={selectionMode === "daily" ? "active" : ""} onClick={() => setSelectionMode("daily")}>每日选股</button>
-            <button className={selectionMode === "realtime" ? "active" : ""} onClick={() => setSelectionMode("realtime")}>实时选股</button>
+          <div className="dashboard-selection-tabs" role="group" aria-label="选股类型">
+            <button
+              type="button"
+              className={selectionMode === "daily" ? "active" : ""}
+              aria-pressed={selectionMode === "daily"}
+              onClick={() => setSelectionMode("daily")}
+            >
+              每日选股
+            </button>
+            <button
+              type="button"
+              className={selectionMode === "realtime" ? "active" : ""}
+              aria-pressed={selectionMode === "realtime"}
+              onClick={() => setSelectionMode("realtime")}
+            >
+              实时选股
+            </button>
           </div>
         </div>
         <div className="dashboard-section-summary">
           <span>{selectionMode === "daily" ? "收盘后策略候选" : "盘中实时候选"}</span>
-          <strong>{topSelections.length}</strong>
-          <span>展示得分前 10，只用于工作台预览</span>
+          <strong>{selectionRows.length}</strong>
+          <span>候选总数，表格展示得分前 10</span>
         </div>
         {topSelections.length > 0 ? (
           <table className="dashboard-selection-table">
@@ -4206,6 +4337,7 @@ function DashboardWorkspace({
               <tr>
                 <th>代码</th>
                 <th>名称</th>
+                <th>涨跌幅</th>
                 <th>得分</th>
                 <th>权重</th>
                 <th>行业</th>
@@ -4217,8 +4349,9 @@ function DashboardWorkspace({
                 <tr key={row.stock.code}>
                   <td className="mono">{row.stock.code}</td>
                   <td>{row.stock.name}</td>
+                  <td className={`mono dashboard-selection-change ${pctTone(row.stock.metrics.pctChange)}`}>{optionalPct(row.stock.metrics.pctChange)}</td>
                   <td className="mono">{row.score.toFixed(1)}</td>
-                  <td className="mono">{(row.weight * 100).toFixed(1)}%</td>
+                  <td className="mono">{row.weight.toFixed(1)}%</td>
                   <td>{row.stock.industry1}</td>
                   <td><button className="dashboard-table-action" onClick={() => onNavigate("trade")}>交易计划</button></td>
                 </tr>
@@ -4344,7 +4477,6 @@ function SentimentWorkspace({
   newsSourceSettings: NewsSourceSettings;
   newsAnalysisModelSettings: NewsAnalysisModelSettings;
 }) {
-  const [sentimentTab, setSentimentTab] = useState<"overview" | "news">("overview");
   const [filters, setFilters] = useState<SentimentFilters>(defaultSentimentFilters);
   const [stockInfoTarget, setStockInfoTarget] = useState<StockInfoTarget | null>(null);
   const [rawSentimentEvents, setRawSentimentEvents] = useState<SentimentEvent[]>([]);
@@ -4487,31 +4619,17 @@ function SentimentWorkspace({
           <h2>舆情选股</h2>
           <p>独立事件驱动板块，用于筛选价值新闻、分类事件、展示关联股票并输出洞察报告，不生成买卖推荐。</p>
         </div>
-        <div className="sentiment-sub-tabs">
-          <button className={sentimentTab === "overview" ? "active" : ""} onClick={() => setSentimentTab("overview")}>
-            舆情概览
-          </button>
-          <button className={sentimentTab === "news" ? "active" : ""} onClick={() => setSentimentTab("news")}>
-            新闻页面
-          </button>
-        </div>
         <div className="settings-actions">
-          {sentimentTab === "overview" ? (
-            <>
-              <button className="btn" onClick={() => setFilters(defaultSentimentFilters)}>
-                重置筛选
-              </button>
-              <button className="btn primary" onClick={exportReport}>
-                <Download size={15} />
-                导出报告
-              </button>
-            </>
-          ) : null}
+          <button className="btn" onClick={() => setFilters(defaultSentimentFilters)}>
+            重置筛选
+          </button>
+          <button className="btn primary" onClick={exportReport}>
+            <Download size={15} />
+            导出报告
+          </button>
         </div>
       </div>
 
-      {sentimentTab === "overview" ? (
-        <>
       <RefreshControlBar
         title="舆情选股刷新"
         status={sentimentRefreshStatus}
@@ -4704,10 +4822,7 @@ function SentimentWorkspace({
           </div>
         </div>
       </section>
-        </>
-      ) : (
-        <NewsPage stocks={stocks} newsSourceSettings={newsSourceSettings} onOpenStockInfo={openStockInfo} />
-      )}
+      <NewsPage stocks={stocks} newsSourceSettings={newsSourceSettings} onOpenStockInfo={openStockInfo} />
       {stockInfoTarget ? (
         <StockInfoModal
           target={stockInfoTarget}
@@ -4874,6 +4989,10 @@ function NewsPage({
 
   return (
     <section className="news-page">
+      <div className="sentiment-panel-title news-page-title">
+        <h3>新闻页面</h3>
+        <span>真实新闻源列表、筛选和关联股票</span>
+      </div>
       <RefreshControlBar
         title="新闻页面刷新"
         status={newsRefreshStatus}
@@ -5787,8 +5906,8 @@ function SettingsWorkspace({
           <button className="btn" onClick={onTest}>
             测试连接
           </button>
-          <button className="btn" onClick={onSyncOpenData}>
-            同步开源数据
+          <button className="btn" onClick={onSyncOpenData} disabled={syncBusy}>
+            {syncBusy ? "同步中..." : "同步开源数据"}
           </button>
           <button className="btn primary" onClick={onSave}>
             <Save size={15} />
@@ -6114,7 +6233,13 @@ function SettingsWorkspace({
             <p>后台自动爬取数据并存储到本地 data-cache 目录，应用重启后仍保留快照。</p>
           </div>
           <div className="settings-actions">
-            <span className="settings-status">{syncBusy ? "采集中..." : syncStatus?.running ? "定时运行中" : "空闲"}</span>
+            <span className="settings-status">
+              {syncBusy
+                ? "采集中..."
+                : syncStatus?.running
+                  ? `运行中${syncStatus.activeSources?.length ? `：${syncStatus.activeSources.map((key) => scheduleSourceLabels.find((item) => item.key === key)?.label ?? key).join("、")}` : ""}`
+                  : "空闲"}
+            </span>
             <button className="btn" onClick={onRefreshSyncStatus}>刷新状态</button>
             <button className="btn" onClick={onRunManualSync} disabled={syncBusy}>立即采集</button>
             <button className="btn primary" onClick={onSaveSyncConfig} disabled={syncBusy}><Save size={15} />保存配置</button>
@@ -7754,12 +7879,12 @@ function BacktestPanel({
     { key: "daily", label: "每日选股", icon: <CalendarDays size={15} /> },
     { key: "realtime", label: "实时选股", icon: <Filter size={15} /> },
     { key: "rank", label: "排名分析", icon: <BarChart3 size={15} /> },
-    { key: "backtest", label: "策略回测", icon: <Activity size={15} /> },
+    { key: "backtest", label: "规则模拟", icon: <Activity size={15} /> },
     { key: "factorCorrelation", label: "因子相关性", icon: <LineChart size={15} /> }
   ];
   const description =
     tab === "backtest"
-      ? "计算以上策略模型在历史上的收益。"
+      ? "基于当前股票快照、因子分数和确定性规则生成，不读取逐日历史成交价格，不代表真实历史收益。"
       : tab === "rank"
         ? "查看当前股票池内所有股票的排名分数。"
         : tab === "factorCorrelation"
@@ -7784,10 +7909,10 @@ function BacktestPanel({
       <div className="backtest-config">
         <p>
           {description}
-          <a>了解回测</a>
+          <a>了解规则模拟</a>
         </p>
         <div className="config-row">
-          <span>回测时间：</span>
+          <span>模拟区间：</span>
           <button className="date-step">◀</button>
           <input type="date" value={config.startDate} onChange={(event) => setConfig({ ...config, startDate: event.target.value })} />
           <span>-</span>
@@ -7818,7 +7943,7 @@ function BacktestPanel({
                   suffix="只"
                 />
               ) : null}
-              <SelectField label="收益基准：" value={config.benchmark} options={["沪深300", "中证500", "创业板指", "科创50"]} onChange={(benchmark) => setConfig({ ...config, benchmark })} />
+              <SelectField label="模拟基准：" value={config.benchmark} options={["沪深300", "中证500", "创业板指", "科创50"]} onChange={(benchmark) => setConfig({ ...config, benchmark })} />
               <SelectField label="交易成本（单边）：" value={String(config.cost)} options={["0", "0.1", "0.2", "0.3", "0.5", "1"]} onChange={(cost) => setConfig({ ...config, cost: Number(cost) })} />
               <label className="check-line">
                 <input type="checkbox" checked={config.excludeTimeRange} onChange={(event) => setConfig({ ...config, excludeTimeRange: event.target.checked })} />
@@ -7830,14 +7955,14 @@ function BacktestPanel({
         <div className="button-row">
           <button className="btn primary" onClick={() => runCurrentTask(tab)}>
             <Play size={15} />
-            {tab === "backtest" ? "开始回测" : tab === "rank" || tab === "factorCorrelation" ? "开始分析" : "开始选股"}
+            {tab === "backtest" ? "开始规则模拟" : tab === "rank" || tab === "factorCorrelation" ? "开始分析" : "开始选股"}
           </button>
           {tab === "factorCorrelation" ? <span className="button-hint">分析排名因子IC关系</span> : null}
           {runStatus ? <span className={`run-status ${runStatus.includes("失败") ? "danger" : ""}`}>{runStatus}</span> : null}
           {tab !== "factorCorrelation" ? (
             <button className="btn" onClick={openCompare}>
               <BarChart3 size={15} />
-              对比策略指标
+              对比模拟指标
             </button>
           ) : null}
         </div>
@@ -7874,25 +7999,26 @@ function BacktestResultView({
   return (
     <div className="backtest-results">
       <div className="metric-cards">
-        <MetricCard title="累计收益" value={pct(result.metrics.cumulativeReturn)} />
-        <MetricCard title="年化收益" value={pct(result.metrics.annualReturn)} />
-        <MetricCard title="最大回撤" value={pct(result.metrics.maxDrawdown)} negative />
-        <MetricCard title="夏普比率" value={String(result.metrics.sharpe)} />
-        <MetricCard title="胜率" value={pct(result.metrics.winRate)} />
-        <MetricCard title="换手率" value={pct(result.metrics.turnover)} />
+        <MetricCard title="累计模拟收益" value={pct(result.metrics.cumulativeReturn)} />
+        <MetricCard title="年化模拟收益" value={pct(result.metrics.annualReturn)} />
+        <MetricCard title="模拟最大回撤" value={pct(result.metrics.maxDrawdown)} negative />
+        <MetricCard title="模拟夏普比率" value={String(result.metrics.sharpe)} />
+        <MetricCard title="模拟胜率" value={pct(result.metrics.winRate)} />
+        <MetricCard title="模拟换手率" value={pct(result.metrics.turnover)} />
       </div>
+      <p className="button-hint">{result.methodology.disclaimer}</p>
       <EquityChart result={result} hedge={strategy.hedge.enabled} />
       <div className="result-grid">
         <SelectionTable rows={result.rows} factors={factors} strategy={strategy} compact onOpenStockInfo={onOpenStockInfo} />
         <div className="mini-table">
-          <h3>年度收益统计</h3>
+          <h3>年度模拟收益统计</h3>
           <table>
             <thead>
               <tr>
                 <th>年份</th>
-                <th>策略</th>
-                <th>基准</th>
-                <th>超额</th>
+                <th>模拟策略</th>
+                <th>模拟基准</th>
+                <th>模拟超额</th>
               </tr>
             </thead>
             <tbody>
@@ -7906,7 +8032,7 @@ function BacktestResultView({
               ))}
             </tbody>
           </table>
-          <h3>调仓记录</h3>
+          <h3>模拟调仓记录</h3>
           <table>
             <tbody>
               {result.trades.slice(0, 8).map((trade) => (
@@ -7954,14 +8080,14 @@ function EquityChart({ result, hedge }: { result: BacktestResult; hedge: boolean
   return (
     <div className="chart-panel">
       <div className="chart-title">
-        <h3>策略净值曲线</h3>
+        <h3>模拟净值曲线</h3>
         <div className="legend">
-          <span className="strategy">策略</span>
-          <span className="benchmark">基准</span>
+          <span className="strategy">模拟策略</span>
+          <span className="benchmark">模拟基准</span>
           {hedge ? <span className="hedge">对冲前</span> : null}
         </div>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="净值曲线">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="规则模拟净值曲线">
         <g className="grid-lines">
           {[0, 1, 2, 3].map((line) => (
             <line key={line} x1="0" x2={width} y1={(height / 3) * line} y2={(height / 3) * line} />
@@ -8077,7 +8203,7 @@ function SelectionTable({
         </h3>
         <EmptyState>
           {compact
-            ? "暂无候选股票。请先运行回测/每日选股，或放宽筛选条件。"
+            ? "暂无候选股票。请先运行规则模拟/每日选股，或放宽筛选条件。"
             : "暂无选股结果。系统会优先通过 Bun 数据接口接入全市场股票；仍为空时，请同步真实财报补齐质量、估值和成长指标，或放宽当前筛选条件。"}
         </EmptyState>
       </div>
@@ -8236,15 +8362,15 @@ function FactorCorrelationPanel({ rows, factors, strategy }: { rows: RankingRow[
   if (!rows.length) {
     return (
       <div className="factor-correlation-panel">
-        <div className="factor-correlation-layout">
-          <div className="mini-table factor-ic-table">
-            <h3>??IC??</h3>
-            <EmptyState>????????????IC???</EmptyState>
-          </div>
-          <div className="mini-table factor-matrix-table">
-            <h3>???????</h3>
-            <EmptyState>???????????????</EmptyState>
-          </div>
+          <div className="factor-correlation-layout">
+            <div className="mini-table factor-ic-table">
+              <h3>因子IC概览</h3>
+              <EmptyState>当前没有排名分析结果。请先运行“开始分析”，再查看因子IC概览。</EmptyState>
+            </div>
+            <div className="mini-table factor-matrix-table">
+              <h3>因子相关性矩阵</h3>
+              <EmptyState>当前没有排名分析结果。请先运行“开始分析”，再查看因子相关性矩阵。</EmptyState>
+            </div>
         </div>
       </div>
     );
@@ -8390,7 +8516,7 @@ function AssetEditor({
         </table>
         <div className="corr-box">
           <div className="tabs">
-            <button className="active">收益曲线相关度</button>
+            <button className="active">模拟曲线相关度</button>
             <button>持股重合度</button>
             <button>暴露度优化权重</button>
           </div>
@@ -8406,12 +8532,12 @@ function ComparePanel({ result, strategy }: { result: BacktestResult | null; str
     <div className="compare-panel">
       <div className="metric-cards">
         <MetricCard title="策略资产数" value={String(strategy.assets.length || 1)} />
-        <MetricCard title="累计收益" value={result ? pct(result.metrics.cumulativeReturn) : "待回测"} />
-        <MetricCard title="最大回撤" value={result ? pct(result.metrics.maxDrawdown) : "待回测"} negative />
-        <MetricCard title="相关度估计" value={strategy.assets.length > 1 ? "0.42" : "1.00"} />
+        <MetricCard title="累计模拟收益" value={result ? pct(result.metrics.cumulativeReturn) : "待模拟"} />
+        <MetricCard title="模拟最大回撤" value={result ? pct(result.metrics.maxDrawdown) : "待模拟"} negative />
+        <MetricCard title="模拟相关度估计" value={strategy.assets.length > 1 ? "0.42" : "1.00"} />
       </div>
       <div className="mini-table full">
-        <h3>收益分析结果</h3>
+        <h3>模拟收益分析结果</h3>
         <table>
           <tbody>
             <tr>

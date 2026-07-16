@@ -20,43 +20,118 @@ export interface CrawlArticleRow {
   author?: string;
 }
 
-const domainLastRequestAt = new Map<string, number>();
+const domainNextRequestAt = new Map<string, number>();
 const memoryCache = new Map<string, { expiresAt: number; value: unknown }>();
+const inFlightCache = new Map<string, Promise<unknown>>();
+const MAX_MEMORY_CACHE_ENTRIES = 500;
+const CACHE_SWEEP_INTERVAL_MS = 60000;
+let lastCacheSweepAt = 0;
 
 export class CrawlError extends Error {}
 
+function sweepMemoryCache(now = Date.now()) {
+  if (now - lastCacheSweepAt < CACHE_SWEEP_INTERVAL_MS && memoryCache.size <= MAX_MEMORY_CACHE_ENTRIES) return;
+  lastCacheSweepAt = now;
+  for (const [key, entry] of memoryCache) {
+    if (now > entry.expiresAt) memoryCache.delete(key);
+  }
+  while (memoryCache.size > MAX_MEMORY_CACHE_ENTRIES) {
+    const oldestKey = memoryCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    memoryCache.delete(oldestKey);
+  }
+}
+
 export function cacheGet<T>(key: string): T | undefined {
+  sweepMemoryCache();
   const entry = memoryCache.get(key);
   if (!entry) return undefined;
   if (Date.now() > entry.expiresAt) {
     memoryCache.delete(key);
     return undefined;
   }
+  memoryCache.delete(key);
+  memoryCache.set(key, entry);
   return entry.value as T;
 }
 
 export function cacheSet<T>(key: string, value: T, ttlMs: number) {
+  sweepMemoryCache();
+  memoryCache.delete(key);
   memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  sweepMemoryCache();
   return value;
 }
 
-async function rateLimit(url: URL, minGapMs = 350) {
-  const key = url.hostname;
-  const last = domainLastRequestAt.get(key) ?? 0;
-  const waitMs = Math.max(0, minGapMs - (Date.now() - last));
-  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-  domainLastRequestAt.set(key, Date.now());
+export async function cacheGetOrCreate<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+  const cached = cacheGet<T>(key);
+  if (cached !== undefined) return cached;
+  const active = inFlightCache.get(key) as Promise<T> | undefined;
+  if (active) return active;
+
+  const request = loader()
+    .then((value) => cacheSet(key, value, ttlMs))
+    .finally(() => {
+      if (inFlightCache.get(key) === request) inFlightCache.delete(key);
+    });
+  inFlightCache.set(key, request);
+  return request;
 }
 
-export async function crawlerFetch(url: string | URL, init: RequestInit = {}, timeoutMs = 20000) {
+export async function mapConcurrent<T, R>(items: readonly T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  if (!items.length) return [];
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency) || 1, items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
+}
+
+function waitForRateLimit(waitMs: number, signal: AbortSignal) {
+  if (waitMs <= 0) return Promise.resolve();
+  if (signal.aborted) return Promise.reject(Object.assign(new Error("request aborted while rate-limited"), { name: "AbortError" }));
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, waitMs);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      reject(Object.assign(new Error("request aborted while rate-limited"), { name: "AbortError" }));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function rateLimit(url: URL, minGapMs: number, signal: AbortSignal) {
+  const key = url.hostname;
+  const now = Date.now();
+  const scheduledAt = Math.max(now, domainNextRequestAt.get(key) ?? 0);
+  domainNextRequestAt.set(key, scheduledAt + Math.max(0, minGapMs));
+  const waitMs = Math.max(0, scheduledAt - now);
+  await waitForRateLimit(waitMs, signal);
+}
+
+export async function crawlerFetch(url: string | URL, init: RequestInit = {}, timeoutMs = 20000, minGapMs = 350) {
   const target = typeof url === "string" ? new URL(url) : url;
-  await rateLimit(target);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = init.signal;
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   try {
+    await rateLimit(target, minGapMs, controller.signal);
     return await fetch(target, {
       ...init,
-      signal: init.signal ?? controller.signal,
+      signal: controller.signal,
       headers: {
         "accept": "application/json,text/plain,*/*",
         "user-agent": "StockChoose-BunCrawler/0.1 Mozilla/5.0",
@@ -65,11 +140,12 @@ export async function crawlerFetch(url: string | URL, init: RequestInit = {}, ti
     });
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
 
-export async function fetchJson(url: string | URL, init: RequestInit = {}, timeoutMs = 20000) {
-  const response = await crawlerFetch(url, init, timeoutMs);
+export async function fetchJson(url: string | URL, init: RequestInit = {}, timeoutMs = 20000, minGapMs = 350) {
+  const response = await crawlerFetch(url, init, timeoutMs, minGapMs);
   if (!response.ok) throw new CrawlError(`upstream HTTP ${response.status}`);
   try {
     return await response.json();
@@ -78,8 +154,8 @@ export async function fetchJson(url: string | URL, init: RequestInit = {}, timeo
   }
 }
 
-export async function fetchText(url: string | URL, init: RequestInit = {}, timeoutMs = 20000) {
-  const response = await crawlerFetch(url, init, timeoutMs);
+export async function fetchText(url: string | URL, init: RequestInit = {}, timeoutMs = 20000, minGapMs = 350) {
+  const response = await crawlerFetch(url, init, timeoutMs, minGapMs);
   if (!response.ok) throw new CrawlError(`upstream HTTP ${response.status}`);
   return await response.text();
 }
@@ -137,4 +213,3 @@ export function domainFromUrl(value: string) {
     return "crawler.news";
   }
 }
-

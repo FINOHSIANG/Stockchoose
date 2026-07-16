@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-10T15:44:00+08:00",
+  "title": "Design System: StockChoose Research Workstation",
+  "extensions": {
+    "colorMeta": {
+      "mineral-canvas": {
+        "role": "neutral",
+        "displayName": "Mineral Canvas",
+        "canonical": "oklch(97.5% 0.009 255)",
+        "tonalRamp": ["oklch(18% 0.012 255)", "oklch(28% 0.012 255)", "oklch(40% 0.011 255)", "oklch(54% 0.01 255)", "oklch(68% 0.01 255)", "oklch(80% 0.009 255)", "oklch(90% 0.009 255)", "oklch(97.5% 0.009 255)"]
+      },
+      "graphite-shell": {
+        "role": "neutral",
+        "displayName": "Light Tool Shell",
+        "canonical": "oklch(99.4% 0.002 275)",
+        "tonalRamp": ["oklch(89% 0.008 275)", "oklch(92% 0.007 275)", "oklch(94% 0.006 275)", "oklch(96% 0.005 275)", "oklch(97.5% 0.004 275)", "oklch(98.5% 0.003 275)", "oklch(99% 0.002 275)", "oklch(99.4% 0.002 275)"]
+      },
+      "signal-cobalt": {
+        "role": "primary",
+        "displayName": "Signal Violet",
+        "canonical": "oklch(58% 0.22 292)",
+        "tonalRamp": ["oklch(18% 0.09 292)", "oklch(28% 0.13 292)", "oklch(40% 0.18 292)", "oklch(50% 0.22 292)", "oklch(58% 0.22 292)", "oklch(70% 0.16 292)", "oklch(84% 0.08 292)", "oklch(94.5% 0.045 292)"]
+      },
+      "market-up": {
+        "role": "semantic",
+        "displayName": "A-Share Up",
+        "canonical": "oklch(56% 0.205 28)",
+        "tonalRamp": ["oklch(18% 0.08 28)", "oklch(28% 0.12 28)", "oklch(40% 0.17 28)", "oklch(50% 0.2 28)", "oklch(56% 0.205 28)", "oklch(70% 0.13 28)", "oklch(84% 0.07 28)", "oklch(94% 0.03 28)"]
+      },
+      "market-down": {
+        "role": "semantic",
+        "displayName": "A-Share Down",
+        "canonical": "oklch(55% 0.145 153)",
+        "tonalRamp": ["oklch(18% 0.06 153)", "oklch(28% 0.09 153)", "oklch(40% 0.12 153)", "oklch(50% 0.145 153)", "oklch(55% 0.145 153)", "oklch(70% 0.1 153)", "oklch(84% 0.055 153)", "oklch(94% 0.025 153)"]
+      }
+    },
+    "typographyMeta": {
+      "headline": {"displayName": "Headline", "purpose": "Page titles and major conclusions."},
+      "title": {"displayName": "Title", "purpose": "Panel, table group and workflow headings."},
+      "body": {"displayName": "Body", "purpose": "Explanations, help and empty states."},
+      "label": {"displayName": "Label", "purpose": "Buttons, tabs, fields and status labels."},
+      "data": {"displayName": "Data", "purpose": "Codes, money, ratios and timestamps."}
+    },
+    "shadows": [
+      {"name": "ambient-lift", "value": "0 10px 30px oklch(20% 0.02 255 / 0.08)", "purpose": "Top shell and key interactive surfaces."},
+      {"name": "floating-dialog", "value": "0 24px 64px oklch(18% 0.025 255 / 0.18)", "purpose": "Dialogs and stock detail overlays."},
+      {"name": "control-hover", "value": "0 4px 14px oklch(40% 0.12 292 / 0.16)", "purpose": "Short-lived hover feedback."}
+    ],
+    "motion": [
+      {"name": "state-fast", "value": "160ms cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Hover, focus and selection changes."},
+      {"name": "panel-standard", "value": "220ms cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Collapsible panels and overlays."}
+    ],
+    "breakpoints": [
+      {"name": "mobile", "value": "767px"},
+      {"name": "tablet", "value": "1199px"},
+      {"name": "desktop", "value": "1200px"}
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "One clear primary action per local task group.",
+      "html": "<button class=\"ds-btn-primary\">运行策略</button>",
+      "css": ".ds-btn-primary{height:36px;padding:0 14px;border:0;border-radius:6px;background:oklch(58% .22 292);color:oklch(99.2% .004 275);font:600 12px/1.3 'Segoe UI Variable','Microsoft YaHei UI',sans-serif;transition:background-color 160ms cubic-bezier(.22,1,.36,1),transform 160ms cubic-bezier(.22,1,.36,1),box-shadow 160ms cubic-bezier(.22,1,.36,1)}.ds-btn-primary:hover{background:oklch(50% .22 292);transform:translateY(-1px);box-shadow:0 4px 14px oklch(40% .12 292/.16)}.ds-btn-primary:focus-visible{outline:2px solid oklch(78% .12 292);outline-offset:2px}.ds-btn-primary:active{transform:translateY(0)}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Quiet utility action with a precise boundary.",
+      "html": "<button class=\"ds-btn-secondary\">导出报告</button>",
+      "css": ".ds-btn-secondary{height:36px;padding:0 14px;border:1px solid oklch(91.5% .012 275);border-radius:6px;background:oklch(99.4% .002 275);color:oklch(28% .026 258);font:600 12px/1.3 'Segoe UI Variable','Microsoft YaHei UI',sans-serif;transition:border-color 160ms cubic-bezier(.22,1,.36,1),background-color 160ms cubic-bezier(.22,1,.36,1)}.ds-btn-secondary:hover{border-color:oklch(72% .12 292);background:oklch(94.5% .045 292)}.ds-btn-secondary:focus-visible{outline:2px solid oklch(78% .12 292);outline-offset:2px}"
+    },
+    {
+      "name": "Research Input",
+      "kind": "input",
+      "refersTo": "input-default",
+      "description": "Compact, high-contrast field for filters and parameters.",
+      "html": "<input class=\"ds-input\" value=\"沪深300\" aria-label=\"收益基准\">",
+      "css": ".ds-input{height:36px;padding:0 10px;border:1px solid oklch(91.5% .012 275);border-radius:6px;background:oklch(99.4% .002 275);color:oklch(28% .026 258);font:400 13px/1.55 'Segoe UI Variable','Microsoft YaHei UI',sans-serif}.ds-input:hover{border-color:oklch(78% .045 275)}.ds-input:focus{outline:2px solid oklch(88% .08 292);outline-offset:1px;border-color:oklch(58% .22 292)}"
+    },
+    {
+      "name": "Active Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-active",
+      "description": "Current functional domain in the light application shell.",
+      "html": "<button class=\"ds-nav-active\"><span>策略</span></button>",
+      "css": ".ds-nav-active{height:38px;padding:0 12px;border:1px solid oklch(72% .12 292/.28);border-radius:6px;background:oklch(94.5% .045 292);color:oklch(50% .22 292);font:650 12px/1.3 'Segoe UI Variable','Microsoft YaHei UI',sans-serif}.ds-nav-active:focus-visible{outline:2px solid oklch(78% .12 292);outline-offset:2px}"
+    },
+    {
+      "name": "Research Panel",
+      "kind": "card",
+      "refersTo": "panel-raised",
+      "description": "A flat-at-rest analysis surface with clear internal hierarchy.",
+      "html": "<section class=\"ds-panel\"><div class=\"ds-panel-title\">市场总览</div><div class=\"ds-panel-copy\">当前状态与关键指标</div></section>",
+      "css": ".ds-panel{padding:16px;border:1px solid oklch(89% .014 255);border-radius:10px;background:oklch(99.2% .004 255);color:oklch(28% .026 258)}.ds-panel-title{font:650 15px/1.35 'Segoe UI Variable','Microsoft YaHei UI',sans-serif}.ds-panel-copy{margin-top:8px;color:oklch(50% .025 258);font:400 13px/1.55 'Segoe UI Variable','Microsoft YaHei UI',sans-serif}"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "description": "Text-backed semantic state, never color-only.",
+      "html": "<span class=\"ds-status\">● 数据可用</span>",
+      "css": ".ds-status{display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border:1px solid oklch(86% .05 153);border-radius:999px;background:oklch(95% .025 153);color:oklch(40% .12 153);font:600 12px/1.3 'Segoe UI Variable','Microsoft YaHei UI',sans-serif}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Analyst's Light Table",
+    "overview": "这是一张为持续研究而照亮的工作台：明亮但不空泛，精密但不压迫，所有层级都帮助用户从系统状态进入结论，再进入参数和证据。界面以桌面研究为主，不追求交易终端式的黑底霓虹，也不把每个模块做成同尺寸卡片。",
+    "keyCharacteristics": ["浅色高密度机构研究工作站", "近白工具栏与稀缺紫蓝交互强调", "主分析区优先，辅助信息不对称编排", "A 股红涨绿跌，状态绝不只靠颜色", "8px 节奏、克制圆角、结构化响应式"],
+    "rules": [
+      {"name": "The Ten Percent Rule", "body": "Signal Violet 在单屏内不超过约 10%，它只标记可操作性和当前上下文。", "section": "colors"},
+      {"name": "The China Market Rule", "body": "上涨永远使用 A-Share Up，下跌永远使用 A-Share Down；禁止套用海外绿涨红跌。", "section": "colors"},
+      {"name": "The Numeric Rhythm Rule", "body": "同一数据列必须使用等宽字体和稳定小数位，禁止数字在刷新时横向跳动。", "section": "typography"},
+      {"name": "The Flat-at-Rest Rule", "body": "普通面板静止时保持平坦；如果页面看起来像由许多漂浮白卡组成，阴影使用已经失败。", "section": "elevation"}
+    ],
+    "dos": ["Do 用主次不对称网格突出当前页面的第一结论，辅助区保持紧凑。", "Do 使用 8px 基础节奏和 12-16px 常规面板内边距，长表格保持 34-38px 行高。", "Do 保持 A 股红涨绿跌，并为所有语义色提供文字或图标冗余。", "Do 让所有按钮、输入、Tab、表格和空态在六个功能域中使用同一状态词汇。", "Do 保留真实数据不足、接口失败和未同步空态，不用样本值填满页面。"],
+    "donts": ["Don't 使用霓虹暗色加密货币终端的高饱和荧光色、玻璃拟态和无意义发光。", "Don't 使用消费级券商游戏化的庆祝动效、夸张收益暗示或强推交易视觉。", "Don't 制造通用后台卡片墙。", "Don't 复制 Behance 展示包装的紫色外框、植物插画、设备模型或海报场景。", "Don't 使用大于 1px 的彩色侧边框作为卡片强调条。", "Don't 使用渐变文字、弹跳动画或 transition: all。", "Don't 把无真实行为的控件包装成新能力，或在接口失败时展示伪数据。"]
+  }
+}

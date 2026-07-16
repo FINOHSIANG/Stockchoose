@@ -619,7 +619,10 @@ async function fetchTencentKlinePoints(stock: Stock, period: StockKlinePeriod, f
   if (!response.ok) throw new Error(`Bun Tencent K线接口 HTTP ${response.status}`);
   const points = stockKlinePointsFromPayload(await jsonFromResponse(response, "Bun Tencent kline API"));
   if (!points.length) throw new Error("Bun Tencent K线接口未返回有效历史行情");
-  return points;
+  return {
+    points,
+    source: response.headers.get("x-stockchoose-market-source") === "eastmoney-fallback" ? "eastmoney-fallback" as const : "tencent" as const
+  };
 }
 
 const klineErrorText = (error: unknown) => (error instanceof Error ? error.message : "未知网络错误");
@@ -632,12 +635,14 @@ export async function fetchStockKlineHistory(
   const checkedAt = new Date().toISOString();
 
   try {
-    const points = await fetchTencentKlinePoints(stock, period, fetchImpl);
+    const { points, source } = await fetchTencentKlinePoints(stock, period, fetchImpl);
     const visiblePoints = points.slice(-KLINE_PERIOD_LIMIT[period]);
     return {
       ok: true,
       checkedAt,
-      message: `已加载腾讯真实${KLINE_PERIOD_LABEL[period]}历史行情`,
+      message: source === "eastmoney-fallback"
+        ? `腾讯 K 线暂不可用，已加载东方财富备用${KLINE_PERIOD_LABEL[period]}历史行情`
+        : `已加载腾讯真实${KLINE_PERIOD_LABEL[period]}历史行情`,
       points: visiblePoints,
       sourceRows: points.length
     };
@@ -654,7 +659,8 @@ export async function fetchStockKlineHistory(
 
 export async function fetchStockProfileAutoMatch(
   stock: Stock,
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  forceRefresh = false
 ): Promise<StockProfileResult> {
   const checkedAt = new Date().toISOString();
   try {
@@ -668,6 +674,7 @@ export async function fetchStockProfileAutoMatch(
       const text = usefulProfileText(value);
       if (text) params.set(key, text);
     });
+    if (forceRefresh) params.set("force", "1");
 
     const code = encodeURIComponent(marketDataCodeForStock(stock));
     const query = params.toString();

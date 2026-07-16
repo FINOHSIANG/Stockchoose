@@ -136,10 +136,26 @@ describe("realMarketDataService", () => {
     expect(requestedUrl.searchParams.get("name")).toBe(baseStock.name);
     expect(requestedUrl.searchParams.get("industry1")).toBe(baseStock.industry1);
     expect(requestedUrl.searchParams.get("industry2")).toBe(baseStock.industry2);
+    expect(requestedUrl.searchParams.get("force")).toBeNull();
     expect(result.stock.website).toBe("https://www.moutaichina.com");
     expect(result.stock.industry1).toBe("食品饮料");
     expect(result.stock.industry2).toBe("白酒");
     expect(result.stock.industryTags).toEqual(expect.arrayContaining(["白酒", "食品饮料", "高端白酒", "贵州国企"]));
+  });
+
+  it("marks manual profile refreshes so the Bun cache is replaced", async () => {
+    const baseStock = STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      code: "600519",
+      name: baseStock.name,
+      industryTags: ["白酒"],
+      source: "eastmoney-f10-bun"
+    }), { status: 200 }));
+
+    await fetchStockProfileAutoMatch(baseStock, fetchMock, true);
+    const requestedUrl = new URL(String(fetchMock.mock.calls[0][0]), "http://stockchoose.test");
+
+    expect(requestedUrl.searchParams.get("force")).toBe("1");
   });
 
   it("keeps the original stock when the Bun profile API fails", async () => {
@@ -255,6 +271,18 @@ describe("realMarketDataService", () => {
     expect(requestedUrl).toContain("/api/market/tencent/kline-points");
     expect(requestedUrl).toContain("symbol=sh600519");
     expect(requestedUrl).toContain("period=week");
+  });
+
+  it("reports the Eastmoney fallback source when Tencent kline is blocked upstream", async () => {
+    const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([
+      { date: "2026-05-29", open: 1320, close: 1319, high: 1338, low: 1311, volume: 4.12 }
+    ]), { status: 200, headers: { "x-stockchoose-market-source": "eastmoney-fallback" } }));
+
+    const result = await fetchStockKlineHistory(stock, "week", fetchMock);
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("东方财富备用周K历史行情");
   });
 
   it("uses Bun structured Tencent kline points on the local app proxy", async () => {

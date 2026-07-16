@@ -1,13 +1,24 @@
 import type { Stock } from "../../src/types";
 import { isAllIndustry, stockMatchesIndustry } from "../../src/industryClassification";
-import { fetchJson, fetchText } from "../crawler/engine";
-import { amountToYi, asNumber, compactRow, fetchEastmoneySpotRows, fetchTencentKlinePoints, urlWithParams } from "./market";
+import { cacheGetOrCreate, cacheSet, fetchJson, fetchText, mapConcurrent } from "../crawler/engine";
+import { persistentCacheGetOrCreate } from "../lib/persistentCache";
+import { amountToYi, asNumber, compactRow, fetchEastmoneySpotRows, fetchKlinePointsWithFallback, urlWithParams } from "./market";
 
 const EASTMONEY_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get";
 const EASTMONEY_ANNOUNCEMENT_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann";
 const EASTMONEY_COMPANY_SURVEY_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax";
 const EASTMONEY_CORE_CONCEPTION_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax";
 const EASTMONEY_UT = "bd1d9ddb04089700cf9c27f6f7426281";
+const EASTMONEY_DATACENTER_REQUEST_GAP_MS = 90;
+const FINANCE_FETCH_CONCURRENCY = 6;
+const FINANCE_STATEMENT_CACHE_TTL_MS = 15 * 60 * 1000;
+const FINANCE_METRIC_CACHE_TTL_MS = 15 * 60 * 1000;
+const DAILY_REFERENCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const PROFILE_PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PROFILE_PARTIAL_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const FINANCE_PERSISTENT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ANALYST_PERSISTENT_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
+const DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS = 60 * 60 * 1000;
 
 const round = (value: number, precision = 2) => Math.round(value * 10 ** precision) / 10 ** precision;
 const textValue = (row: Record<string, unknown>, keys: string[]) => keys.map((key) => row[key]).find((value) => value !== undefined && value !== null && String(value).trim() !== "");
@@ -77,14 +88,15 @@ function datacenterUrl(reportName: string, columns: string, sortColumns: string,
 }
 
 async function fetchDatacenterPages(reportName: string, columns: string, sortColumns: string, sortTypes: string, filter?: string, pageSize = 500, maxPages = 5) {
-  const first = await fetchJson(datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, 1, pageSize), { headers: { referer: "https://data.eastmoney.com/" } }, 30000);
+  const first = await fetchJson(datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, 1, pageSize), { headers: { referer: "https://data.eastmoney.com/" } }, 30000, EASTMONEY_DATACENTER_REQUEST_GAP_MS);
   const totalPages = Math.max(1, Math.min(maxPages, Math.ceil((asNumber((first as any)?.result?.count) ?? pageSize) / pageSize)));
-  const rows = [...((((first as any)?.result?.data ?? []) as Record<string, unknown>[]))];
-  for (let page = 2; page <= totalPages; page += 1) {
-    const payload = await fetchJson(datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, page, pageSize), { headers: { referer: "https://data.eastmoney.com/" } }, 30000);
-    rows.push(...((((payload as any)?.result?.data ?? []) as Record<string, unknown>[])));
-  }
-  return rows;
+  const firstRows = [...((((first as any)?.result?.data ?? []) as Record<string, unknown>[]))];
+  const pageNumbers = Array.from({ length: Math.max(0, totalPages - 1) }, (_, index) => index + 2);
+  const laterPages = await mapConcurrent(pageNumbers, FINANCE_FETCH_CONCURRENCY, async (page) => {
+    const payload = await fetchJson(datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, page, pageSize), { headers: { referer: "https://data.eastmoney.com/" } }, 30000, EASTMONEY_DATACENTER_REQUEST_GAP_MS);
+    return (((payload as any)?.result?.data ?? []) as Record<string, unknown>[]);
+  });
+  return [...firstRows, ...laterPages.flat()];
 }
 
 export async function fetchAsharehubRows(baseUrl: string, endpoint: string, params: Record<string, string | number | undefined>, apiToken: string) {
@@ -106,56 +118,68 @@ export async function fetchAsharehubRows(baseUrl: string, endpoint: string, para
 }
 
 export async function fetchAnalystForecastRows() {
-  const rows = await fetchDatacenterPages("RPT_WEB_RESPREDICT", "WEB_RESPREDICT", "RATING_ORG_NUM", "-1", undefined, 500);
-  return rows.map((row) => {
-    const code = normalizeCode(textValue(row, ["SECURITY_CODE", "SECUCODE"]));
-    const epsA = numberAt(row, ["EPS1"]);
-    const epsE = numberAt(row, ["EPS2", "EPS3"]);
-    const targetHigh = numberAt(row, ["DEC_AIMPRICEMAX"]);
-    const targetLow = numberAt(row, ["DEC_AIMPRICEMIN"]);
-    const metrics: Record<string, number> = { realAnalystForecastSource: 1 };
-    withMetric(metrics, "recommendationCount", numberAt(row, ["RATING_ORG_NUM"]), 0);
-    withMetric(metrics, "targetPriceHigh", targetHigh);
-    withMetric(metrics, "targetPriceLow", targetLow);
-    withMetric(metrics, "targetPriceMid", targetHigh !== undefined && targetLow !== undefined ? (targetHigh + targetLow) / 2 : undefined);
-    withMetric(metrics, "epsForecastGrowth", epsA !== undefined && epsE !== undefined && Math.abs(epsA) > 0.0001 ? (epsE / epsA - 1) * 100 : undefined);
-    return { code, name: String(textValue(row, ["SECURITY_NAME_ABBR", "SECURITY_NAME"]) ?? code), reportDate: String(textValue(row, ["YEAR2", "YEAR3"]) ?? "forecast"), sourceRows: 1, metrics };
-  }).filter((row) => /^\d{6}$/.test(row.code));
+  return cacheGetOrCreate("eastmoney:analyst-forecasts", DAILY_REFERENCE_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("analyst-forecasts", "latest", ANALYST_PERSISTENT_CACHE_TTL_MS, async () => {
+      const rows = await fetchDatacenterPages("RPT_WEB_RESPREDICT", "WEB_RESPREDICT", "RATING_ORG_NUM", "-1", undefined, 500);
+      return rows.map((row) => {
+        const code = normalizeCode(textValue(row, ["SECURITY_CODE", "SECUCODE"]));
+        const epsA = numberAt(row, ["EPS1"]);
+        const epsE = numberAt(row, ["EPS2", "EPS3"]);
+        const targetHigh = numberAt(row, ["DEC_AIMPRICEMAX"]);
+        const targetLow = numberAt(row, ["DEC_AIMPRICEMIN"]);
+        const metrics: Record<string, number> = { realAnalystForecastSource: 1 };
+        withMetric(metrics, "recommendationCount", numberAt(row, ["RATING_ORG_NUM"]), 0);
+        withMetric(metrics, "targetPriceHigh", targetHigh);
+        withMetric(metrics, "targetPriceLow", targetLow);
+        withMetric(metrics, "targetPriceMid", targetHigh !== undefined && targetLow !== undefined ? (targetHigh + targetLow) / 2 : undefined);
+        withMetric(metrics, "epsForecastGrowth", epsA !== undefined && epsE !== undefined && Math.abs(epsA) > 0.0001 ? (epsE / epsA - 1) * 100 : undefined);
+        return { code, name: String(textValue(row, ["SECURITY_NAME_ABBR", "SECURITY_NAME"]) ?? code), reportDate: String(textValue(row, ["YEAR2", "YEAR3"]) ?? "forecast"), sourceRows: 1, metrics };
+      }).filter((row) => /^\d{6}$/.test(row.code));
+    })
+  );
 }
 
 export async function fetchMarginBalanceRows() {
-  const latestRows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "DATE", "DATE", "-1", undefined, 1, 1);
-  const latest = String(textValue(latestRows[0] ?? {}, ["DATE"]) ?? "").split(" ")[0];
-  const filter = latest ? `(DATE='${latest}')` : undefined;
-  const rows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "SCODE,SECNAME,DATE,RZYE,RQYE,RZRQYE,RZMRE,RZCHE,RZJME,FIN_BALANCE_GR,SECUCODE", "RZRQYE", "-1", filter, 500, 2);
-  return rows.map((row) => {
-    const metrics: Record<string, number> = { realMarginSource: 1 };
-    withMetric(metrics, "marginBalance", amountToYi(row.RZRQYE));
-    withMetric(metrics, "financingBalance", amountToYi(row.RZYE));
-    withMetric(metrics, "securitiesLendingBalance", amountToYi(row.RQYE));
-    withMetric(metrics, "financingBuyAmount", amountToYi(row.RZMRE));
-    withMetric(metrics, "financingRepayAmount", amountToYi(row.RZCHE));
-    withMetric(metrics, "financingNetBuyAmount", amountToYi(row.RZJME));
-    withMetric(metrics, "marginBalanceGrowthRate", asNumber(row.FIN_BALANCE_GR));
-    return { code: normalizeCode(row.SCODE), name: String(row.SECNAME ?? ""), reportDate: String(row.DATE ?? latest), sourceRows: 1, metrics };
-  }).filter((row) => /^\d{6}$/.test(row.code));
+  return cacheGetOrCreate("eastmoney:margin-balances", DAILY_REFERENCE_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("margin-balances", "latest", DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS, async () => {
+      const latestRows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "DATE", "DATE", "-1", undefined, 1, 1);
+      const latest = String(textValue(latestRows[0] ?? {}, ["DATE"]) ?? "").split(" ")[0];
+      const filter = latest ? `(DATE='${latest}')` : undefined;
+      const rows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "SCODE,SECNAME,DATE,RZYE,RQYE,RZRQYE,RZMRE,RZCHE,RZJME,FIN_BALANCE_GR,SECUCODE", "RZRQYE", "-1", filter, 500, 2);
+      return rows.map((row) => {
+        const metrics: Record<string, number> = { realMarginSource: 1 };
+        withMetric(metrics, "marginBalance", amountToYi(row.RZRQYE));
+        withMetric(metrics, "financingBalance", amountToYi(row.RZYE));
+        withMetric(metrics, "securitiesLendingBalance", amountToYi(row.RQYE));
+        withMetric(metrics, "financingBuyAmount", amountToYi(row.RZMRE));
+        withMetric(metrics, "financingRepayAmount", amountToYi(row.RZCHE));
+        withMetric(metrics, "financingNetBuyAmount", amountToYi(row.RZJME));
+        withMetric(metrics, "marginBalanceGrowthRate", asNumber(row.FIN_BALANCE_GR));
+        return { code: normalizeCode(row.SCODE), name: String(row.SECNAME ?? ""), reportDate: String(row.DATE ?? latest), sourceRows: 1, metrics };
+      }).filter((row) => /^\d{6}$/.test(row.code));
+    })
+  );
 }
 
 export async function fetchNorthHoldingRows() {
-  const latestRows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "TRADE_DATE", "TRADE_DATE", "-1", "(INTERVAL_TYPE=\"1\")", 1, 1);
-  const latest = String(textValue(latestRows[0] ?? {}, ["TRADE_DATE"]) ?? "").split(" ")[0];
-  const filter = latest ? `(INTERVAL_TYPE=\"1\")(TRADE_DATE>='${latest}')(TRADE_DATE<='${latest}')` : "(INTERVAL_TYPE=\"1\")";
-  const rows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "SECUCODE,SECURITY_CODE,SECURITY_NAME,TRADE_DATE,CLOSE_PRICE,CHANGE_RATE,HOLD_SHARES,HOLD_MARKET_CAP,A_SHARES_RATIO,HOLD_SHARES_RATIO,FREE_SHARES_RATIO,TOTAL_SHARES_RATIO,ADD_SHARES_REPAIR,PREDICT_AMC,HMC_CHANGE", "HOLD_MARKET_CAP", "-1", filter, 500, 2);
-  return rows.map((row) => {
-    const metrics: Record<string, number> = { realNorthHoldSource: 1 };
-    withMetric(metrics, "northHold", asNumber(row.HOLD_SHARES_RATIO));
-    withMetric(metrics, "northHoldShares", asNumber(row.HOLD_SHARES), 0);
-    withMetric(metrics, "northHoldMarketCap", amountToYi(row.HOLD_MARKET_CAP));
-    withMetric(metrics, "northHoldAsharesRatio", asNumber(row.A_SHARES_RATIO));
-    withMetric(metrics, "northHoldAddedShares", asNumber(row.ADD_SHARES_REPAIR), 0);
-    withMetric(metrics, "northHoldMarketCapChange", amountToYi(row.HMC_CHANGE));
-    return { code: normalizeCode(row.SECURITY_CODE), name: String(row.SECURITY_NAME ?? ""), reportDate: String(row.TRADE_DATE ?? latest), sourceRows: 1, metrics };
-  }).filter((row) => /^\d{6}$/.test(row.code));
+  return cacheGetOrCreate("eastmoney:north-holdings", DAILY_REFERENCE_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("north-holdings", "latest", DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS, async () => {
+      const latestRows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "TRADE_DATE", "TRADE_DATE", "-1", "(INTERVAL_TYPE=\"1\")", 1, 1);
+      const latest = String(textValue(latestRows[0] ?? {}, ["TRADE_DATE"]) ?? "").split(" ")[0];
+      const filter = latest ? `(INTERVAL_TYPE=\"1\")(TRADE_DATE>='${latest}')(TRADE_DATE<='${latest}')` : "(INTERVAL_TYPE=\"1\")";
+      const rows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "SECUCODE,SECURITY_CODE,SECURITY_NAME,TRADE_DATE,CLOSE_PRICE,CHANGE_RATE,HOLD_SHARES,HOLD_MARKET_CAP,A_SHARES_RATIO,HOLD_SHARES_RATIO,FREE_SHARES_RATIO,TOTAL_SHARES_RATIO,ADD_SHARES_REPAIR,PREDICT_AMC,HMC_CHANGE", "HOLD_MARKET_CAP", "-1", filter, 500, 2);
+      return rows.map((row) => {
+        const metrics: Record<string, number> = { realNorthHoldSource: 1 };
+        withMetric(metrics, "northHold", asNumber(row.HOLD_SHARES_RATIO));
+        withMetric(metrics, "northHoldShares", asNumber(row.HOLD_SHARES), 0);
+        withMetric(metrics, "northHoldMarketCap", amountToYi(row.HOLD_MARKET_CAP));
+        withMetric(metrics, "northHoldAsharesRatio", asNumber(row.A_SHARES_RATIO));
+        withMetric(metrics, "northHoldAddedShares", asNumber(row.ADD_SHARES_REPAIR), 0);
+        withMetric(metrics, "northHoldMarketCapChange", amountToYi(row.HMC_CHANGE));
+        return { code: normalizeCode(row.SECURITY_CODE), name: String(row.SECURITY_NAME ?? ""), reportDate: String(row.TRADE_DATE ?? latest), sourceRows: 1, metrics };
+      }).filter((row) => /^\d{6}$/.test(row.code));
+    })
+  );
 }
 
 export async function fetchFilingAnnouncements(codes: string[] = [], maxItems = 50) {
@@ -199,52 +223,102 @@ function eastmoneyF10Code(code: string) {
 }
 
 function profileTags(payload: any) {
-  const concept = [payload?.zygcfx, payload?.sshy].flat().filter(Array.isArray).flat();
+  const concept = [payload?.ssbk, payload?.zygcfx, payload?.sshy].filter(Array.isArray).flat();
   return Array.from(new Set(concept.map((row: any) => String(row.BOARD_NAME ?? row.CONCEPT_NAME ?? "").trim()).filter(Boolean))).slice(0, 12);
 }
 
-export async function fetchStockProfile(codeInput: string, fallback: { name?: string; industry1?: string; industry2?: string } = {}) {
-  const code = normalizeCode(codeInput);
-  const f10Code = eastmoneyF10Code(code);
-  const survey = await fetchJson(urlWithParams(EASTMONEY_COMPANY_SURVEY_URL, { code: f10Code }), { headers: { referer: "https://emweb.securities.eastmoney.com/" } }, 20000);
-  let concept: any = {};
-  try {
-    concept = await fetchJson(urlWithParams(EASTMONEY_CORE_CONCEPTION_URL, { code: f10Code }), { headers: { referer: "https://emweb.securities.eastmoney.com/" } }, 20000);
-  } catch {
-    concept = {};
-  }
-  const base = Array.isArray((survey as any)?.jbzl) ? (survey as any).jbzl[0] ?? {} : {};
-  const website = String(base.ORG_WEB ?? "").trim();
-  const normalizedWebsite = website && website.includes(".") ? (/^https?:\/\//i.test(website) ? website : `https://${website}`) : undefined;
-  const industry1 = String(base.INDUSTRY ?? fallback.industry1 ?? "").trim();
-  const industry2 = fallback.industry2 ?? industry1;
+interface CachedStockProfile {
+  profile: {
+    code: string;
+    name: string;
+    website?: string;
+    industry1: string;
+    industry2: string;
+    industryTags: string[];
+    source: string;
+  };
+  conceptLoaded: boolean;
+}
+
+function applyStockProfileFallback(cached: CachedStockProfile, fallback: { name?: string; industry1?: string; industry2?: string }) {
+  const profile = cached.profile;
+  const fallbackIndustry1 = String(fallback.industry1 ?? "").trim();
+  const fallbackIndustry2 = String(fallback.industry2 ?? "").trim();
+  const industry1 = profile.industry1 || fallbackIndustry1;
+  const industry2 = profile.industry2 || fallbackIndustry2 || industry1;
   return {
-    code,
-    name: String(base.SECURITY_NAME_ABBR ?? fallback.name ?? code),
-    website: normalizedWebsite,
+    ...profile,
+    name: profile.name && profile.name !== profile.code ? profile.name : String(fallback.name ?? profile.code),
     industry1,
     industry2,
-    industryTags: Array.from(new Set([industry1, industry2, ...profileTags(concept)].filter(Boolean))),
-    source: "eastmoney-f10-bun"
+    industryTags: Array.from(new Set([industry1, industry2, ...profile.industryTags].filter(Boolean)))
   };
+}
+
+export async function fetchStockProfile(codeInput: string, fallback: { name?: string; industry1?: string; industry2?: string; forceRefresh?: boolean } = {}) {
+  const code = normalizeCode(codeInput);
+  const memoryKey = `eastmoney:stock-profile:v5:${code}`;
+  const memoryTtlMs = 30 * 60 * 1000;
+  const load = () =>
+    persistentCacheGetOrCreate<CachedStockProfile>(
+      "stock-profile-v5",
+      code,
+      (value) => value.conceptLoaded ? PROFILE_PERSISTENT_CACHE_TTL_MS : PROFILE_PARTIAL_CACHE_TTL_MS,
+      async () => {
+        const f10Code = eastmoneyF10Code(code);
+        const survey = await fetchJson(urlWithParams(EASTMONEY_COMPANY_SURVEY_URL, { code: f10Code }), { headers: { referer: "https://emweb.securities.eastmoney.com/" } }, 20000);
+        let concept: any = {};
+        let conceptLoaded = true;
+        try {
+          concept = await fetchJson(urlWithParams(EASTMONEY_CORE_CONCEPTION_URL, { code: f10Code }), { headers: { referer: "https://emweb.securities.eastmoney.com/" } }, 20000);
+        } catch {
+          concept = {};
+          conceptLoaded = false;
+        }
+        const base = Array.isArray((survey as any)?.jbzl) ? (survey as any).jbzl[0] ?? {} : {};
+        const website = String(base.ORG_WEB ?? "").trim();
+        const normalizedWebsite = website && website.includes(".") ? (/^https?:\/\//i.test(website) ? website : `https://${website}`) : undefined;
+        const conceptTags = profileTags(concept);
+        conceptLoaded = conceptLoaded && conceptTags.length > 0;
+        const industry1 = String(textValue(base, ["INDUSTRY", "INDUSTRYCSRC1"]) ?? "").trim();
+        const industry2 = String(conceptTags[1] || conceptTags[0] || "").trim();
+        return {
+          profile: {
+            code,
+            name: String(base.SECURITY_NAME_ABBR ?? code),
+            website: normalizedWebsite,
+            industry1,
+            industry2,
+            industryTags: Array.from(new Set([industry1, industry2, ...conceptTags].filter(Boolean))),
+            source: "eastmoney-f10-bun"
+          },
+          conceptLoaded
+        };
+      },
+      { forceRefresh: fallback.forceRefresh }
+    );
+
+  const cached = fallback.forceRefresh
+    ? cacheSet(memoryKey, await load(), memoryTtlMs)
+    : await cacheGetOrCreate<CachedStockProfile>(memoryKey, memoryTtlMs, load);
+  return applyStockProfileFallback(cached, fallback);
 }
 
 export async function fetchTechnicalIndicators(codes: string[], limit = 120) {
   const uniqueCodes = Array.from(new Set(codes.map(normalizeCode).filter((code) => /^\d{6}$/.test(code)))).slice(0, 200);
-  const rows = [];
-  for (const code of uniqueCodes) {
+  const rows = await mapConcurrent(uniqueCodes, FINANCE_FETCH_CONCURRENCY, async (code) => {
     try {
-      const points = await fetchTencentKlinePoints(code, "day", Math.max(20, Math.min(limit, 250)));
+      const { points } = await fetchKlinePointsWithFallback(code, "day", Math.max(20, Math.min(limit, 250)));
       const closes = points.map((point) => point.close);
       const last = points.at(-1);
-      if (!last) continue;
+      if (!last) return undefined;
       const previous = points.at(-2);
       const ma = (days: number) => closes.slice(-days).reduce((sum, value) => sum + value, 0) / Math.max(1, closes.slice(-days).length);
       const momentum = (days: number) => closes.length > days ? (last.close / closes[closes.length - 1 - days] - 1) * 100 : undefined;
       const changes = points.slice(-20).map((point, index, arr) => index === 0 ? 0 : point.close / arr[index - 1].close - 1).slice(1);
       const avg = changes.reduce((sum, value) => sum + value, 0) / Math.max(1, changes.length);
       const volatility = Math.sqrt(changes.reduce((sum, value) => sum + (value - avg) ** 2, 0) / Math.max(1, changes.length)) * Math.sqrt(252) * 100;
-      rows.push({
+      return {
         code,
         name: code,
         reportDate: last.date,
@@ -259,15 +333,16 @@ export async function fetchTechnicalIndicators(codes: string[], limit = 120) {
           ["price", last.close],
           ["pctChange", previous ? round((last.close / previous.close - 1) * 100, 2) : undefined]
         ])
-      });
+      };
     } catch {
       // Skip individual unsupported/suspended symbols; the caller sees sourceRows through returned rows.
+      return undefined;
     }
-  }
-  return rows;
+  });
+  return rows.filter((row): row is NonNullable<typeof row> => Boolean(row));
 }
 
-export async function fetchFinanceStatements(reportDate: string) {
+async function fetchFinanceStatementsUncached(reportDate: string) {
   const normalized = normalizeReportDate(reportDate);
   const statementFilter = `(REPORT_DATE='${normalized.date}')`;
   const performanceFilter = `(REPORTDATE='${normalized.date}')`;
@@ -287,7 +362,16 @@ export async function fetchFinanceStatements(reportDate: string) {
   };
 }
 
-export async function fetchFinancialMetricRows(reportDate: string) {
+export async function fetchFinanceStatements(reportDate: string) {
+  const normalized = normalizeReportDate(reportDate);
+  return cacheGetOrCreate(`eastmoney:finance-statements:${normalized.yyyymmdd}`, FINANCE_STATEMENT_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("finance-statements", normalized.yyyymmdd, FINANCE_PERSISTENT_CACHE_TTL_MS, () =>
+      fetchFinanceStatementsUncached(normalized.date)
+    )
+  );
+}
+
+async function fetchFinancialMetricRowsUncached(reportDate: string) {
   const normalized = normalizeReportDate(reportDate);
   const rows = await fetchFinanceStatements(reportDate);
   const performanceByCode = rowByCode(rows.performanceRows);
@@ -381,17 +465,30 @@ export async function fetchFinancialMetricRows(reportDate: string) {
   }).filter((row) => /^\d{6}$/.test(row.code) && row.metrics.realAnnualReportSource === 1);
 }
 
+export async function fetchFinancialMetricRows(reportDate: string) {
+  const normalized = normalizeReportDate(reportDate);
+  return cacheGetOrCreate(`eastmoney:financial-metrics:${normalized.yyyymmdd}`, FINANCE_METRIC_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("financial-metrics", normalized.yyyymmdd, FINANCE_PERSISTENT_CACHE_TTL_MS, () =>
+      fetchFinancialMetricRowsUncached(normalized.date)
+    )
+  );
+}
+
+export function formatAnnualReportExport(row: { code: string; name: string; reportDate: string; metrics: Record<string, number> }, fallbackStockName: string) {
+  const csv = ["股票代码,股票名称,报告期,营业收入,净利润,ROE", [row.code, row.name, row.reportDate, row.metrics.revenue ?? "", row.metrics.netProfit ?? "", row.metrics.roe ?? ""].join(",")].join("\r\n");
+  return { year: row.reportDate.slice(0, 4), stockCode: row.code, stockName: row.name || fallbackStockName, reportDate: row.reportDate, source: "eastmoney-bun", sourceNote: "由 Bun 财报接口生成。", sourceCsv: csv, metrics: row.metrics };
+}
+
 export async function fetchAnnualReports(stock: Stock) {
   const rows = await fetchFinancialMetricRows("2025-12-31");
   const row = rows.find((item) => item.code === normalizeCode(stock.code));
   if (!row) return [];
-  const csv = ["鑲＄エ浠ｇ爜,鑲＄エ鍚嶇О,鎶ュ憡鏈?钀ヤ笟鏀跺叆,鍑€鍒╂鼎,ROE", [row.code, row.name, row.reportDate, row.metrics.revenue ?? "", row.metrics.netProfit ?? "", row.metrics.roe ?? ""].join(",")].join("\r\n");
-  return [{ year: row.reportDate.slice(0, 4), stockCode: row.code, stockName: row.name || stock.name, reportDate: row.reportDate, source: "eastmoney-bun", sourceNote: "鐢?Bun 璐㈡姤鎺ュ彛鐢熸垚銆?", sourceCsv: csv, metrics: row.metrics }];
+  return [formatAnnualReportExport(row, stock.name)];
 }
 
 const valuationProfile = {
-  industry: "閫氱敤琛屼笟",
-  model: "PE鐩堝埄",
+  industry: "通用行业",
+  model: "PE盈利",
   earningsWeight: 0.45,
   assetWeight: 0.2,
   salesWeight: 0.15,
@@ -406,19 +503,19 @@ const valuationProfile = {
 };
 
 function valuationVerdict(margin: number) {
-  if (margin >= 60) return "娣卞害浣庝及";
-  if (margin >= 35) return "浣庝及";
-  if (margin >= 10) return "鍚堢悊";
-  if (margin >= -15) return "鍋忛珮";
-  return "楂樹及";
+  if (margin >= 60) return "深度低估";
+  if (margin >= 35) return "低估";
+  if (margin >= 10) return "合理";
+  if (margin >= -15) return "偏高";
+  return "高估";
 }
 
 function valuationState(stock: Stock) {
   const growth = stock.metrics.netProfitGrowth ?? stock.metrics.revenueGrowth ?? 0;
-  if ((stock.metrics.debtRatio ?? 0) > 75 || growth < -30) return "鍥板鎵垮帇";
-  if (growth > 20) return "楂橀€熸垚闀?";
-  if (growth > 5) return "绋冲畾鎴愮啛";
-  return "鍛ㄦ湡淇";
+  if ((stock.metrics.debtRatio ?? 0) > 75 || growth < -30) return "困境承压";
+  if (growth > 20) return "高速成长";
+  if (growth > 5) return "稳定成熟";
+  return "周期修复";
 }
 
 function hasValuationInputs(stock: Stock) {
@@ -433,10 +530,10 @@ function isAllIndustryFilter(value: unknown) {
 export function buildBunValuationRows(stocks: Stock[], filters: any = {}) {
   const industryFilters = Array.isArray(filters?.industries) ? filters.industries : [];
   const shouldIncludeAllIndustries = !industryFilters.length || industryFilters.some(isAllIndustryFilter);
-  const industries = industryFilters.map((item: unknown) => String(item ?? "")).filter((item) => !isAllIndustryFilter(item));
+  const industries = industryFilters.map((item: unknown) => String(item ?? "")).filter((item: string) => !isAllIndustryFilter(item));
   return stocks
     .filter(hasValuationInputs)
-    .filter((stock) => shouldIncludeAllIndustries || industries.some((industry) => stockMatchesIndustry(stock, "industry1", industry) || stockMatchesIndustry(stock, "industry2", industry)))
+    .filter((stock) => shouldIncludeAllIndustries || industries.some((industry: string) => stockMatchesIndustry(stock, "industry1", industry) || stockMatchesIndustry(stock, "industry2", industry)))
     .map((stock) => {
       const metrics = stock.metrics;
       const price = Math.max(metrics.price ?? 0, 0.01);
@@ -473,20 +570,20 @@ export function buildBunValuationRows(stocks: Stock[], filters: any = {}) {
         safetyMargin,
         upside: safetyMargin,
         verdict: valuationVerdict(safetyMargin),
-        action: safetyMargin >= 35 ? "杩涘叆鍊欓€夋睜锛岀瓑寰呬环鏍煎洖鎾ゆ垨涓氱哗纭" : "鏈弧瓒充弗鑻涘彛寰勶紝鏆備笉閰嶇疆",
+        action: safetyMargin >= 35 ? "进入候选池，等待价格回撤或业绩确认" : "未满足严苛口径，暂不配置",
         positionHint: safetyMargin >= 60 ? "5-8%" : safetyMargin >= 35 ? "3-5%" : safetyMargin >= 10 ? "1-3%" : "0%",
         qualityScore: round(qualityScore, 1),
         growthScore: round(growthScore, 1),
         solvencyScore: round(solvencyScore, 1),
         governanceScore: round(governanceScore, 1),
         industryFitScore: 70,
-        statusModifier: state === "鍥板鎵垮帇" ? 0.55 : 0.78,
+        statusModifier: state === "困境承压" ? 0.55 : 0.78,
         governanceModifier: round(0.55 + governanceScore / 250, 2),
         financialModifier: round(0.55 + solvencyScore / 260, 2),
         riskDiscount: round(riskDiscount, 2),
         anchorValue: round(anchorValue, 2),
-        drivers: ["Bun 浼板€兼帴鍙ｄ粎浣跨敤浼犲叆鑲＄エ鐨勭湡瀹炶鎯呭拰璐㈠姟瀛楁璁＄畻", "浼板€奸敋鐐瑰彇鐩堝埄銆佽祫浜с€佹敹鍏ャ€佺幇閲戞祦妯″瀷涓緝浣庡€肩粍鍚"],
-        warnings: safetyMargin < 0 ? ["褰撳墠浠锋牸楂樹簬 Bun 鏍哥畻浠峰€"] : [],
+        drivers: ["Bun 估值接口仅使用传入股票的真实行情和财务字段计算", "估值锚点取盈利、资产、收入、现金流模型中较低值组合"],
+        warnings: safetyMargin < 0 ? ["当前价格高于 Bun 核算价值"] : [],
         components: {
           earningsValue: round(earningsValue, 2),
           assetValue: round(assetValue, 2),
@@ -496,7 +593,7 @@ export function buildBunValuationRows(stocks: Stock[], filters: any = {}) {
           weightedValue: round(anchorValue, 2),
           cashCoverage: round((metrics.operatingCashflow ?? 0) / Math.max(metrics.netProfit ?? 0.01, 0.01), 4),
           cashflowRequirementModifier: cashflowValue > 0 ? 1 : 0,
-          cashflowPolicy: { requiredCoverage: 0.8, strongCoverage: 1.2, floorModifier: 0.55, ceilingModifier: 1, penaltyWeight: 0.25, note: "Bun 閫氱敤鐜伴噾娴侀棬妲" },
+          cashflowPolicy: { requiredCoverage: 0.8, strongCoverage: 1.2, floorModifier: 0.55, ceilingModifier: 1, penaltyWeight: 0.25, note: "Bun 通用现金流门槛" },
           balanceSheet: {
             totalAssets: round(metrics.totalAssets ?? 0, 2),
             productionAssets: round(metrics.productionAssets ?? 0, 2),
@@ -513,14 +610,13 @@ export function buildBunValuationRows(stocks: Stock[], filters: any = {}) {
             productionAssetRatio: round(((metrics.productionAssets ?? 0) / Math.max(metrics.totalAssets ?? 1, 1)) * 100, 2)
           },
           formulaRows: [
-            { name: "鐩堝埄妯″瀷", formula: "max(EPS,0) * 鐩爣PE", substitution: `${round(Math.max(0, eps), 2)} * ${valuationProfile.targetPe}`, value: round(earningsValue, 2) },
-            { name: "璧勪骇妯″瀷", formula: "BPS * 鐩爣PB * 0.65", substitution: `${round(bps, 2)} * ${valuationProfile.targetPb} * 0.65`, value: round(assetValue, 2) },
-            { name: "鏀跺叆妯″瀷", formula: "鍗曡偂鏀跺叆 * 鐩爣PS * 0.55", substitution: `${round(revenuePerShare, 2)} * ${valuationProfile.targetPs} * 0.55`, value: round(salesValue, 2) },
-            { name: "鐜伴噾娴佹ā鍨?", formula: "鍗曡偂缁忚惀鐜伴噾娴?* 鐜伴噾娴佸€嶆暟 * 0.65", substitution: `${round(cashflowPerShare, 2)} * ${valuationProfile.cashflowMultiple} * 0.65`, value: round(cashflowValue, 2) }
+            { name: "盈利模型", formula: "max(EPS,0) * 目标PE", substitution: `${round(Math.max(0, eps), 2)} * ${valuationProfile.targetPe}`, value: round(earningsValue, 2) },
+            { name: "资产模型", formula: "BPS * 目标PB * 0.65", substitution: `${round(bps, 2)} * ${valuationProfile.targetPb} * 0.65`, value: round(assetValue, 2) },
+            { name: "收入模型", formula: "每股收入 * 目标PS * 0.55", substitution: `${round(revenuePerShare, 2)} * ${valuationProfile.targetPs} * 0.55`, value: round(salesValue, 2) },
+            { name: "现金流模型", formula: "每股经营现金流 * 现金流倍数 * 0.65", substitution: `${round(cashflowPerShare, 2)} * ${valuationProfile.cashflowMultiple} * 0.65`, value: round(cashflowValue, 2) }
           ]
         }
       };
     })
     .filter((row) => row.safetyMargin >= (filters?.minSafetyMargin ?? -999) && row.governanceScore >= (filters?.minGovernanceScore ?? 0));
 }
-
