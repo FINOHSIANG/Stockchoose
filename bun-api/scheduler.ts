@@ -1,23 +1,13 @@
 ﻿import { promises as fs } from "fs";
 import path from "path";
-import { resolveDataCacheDir } from "./lib/persistentCache";
+import { resolveDataCacheDir, writeFileAtomic } from "./lib/persistentCache";
+import { financialReportDateCandidates } from "../src/dataContracts";
 import { fetchEastmoneySpotRows, stockFromMarketRow } from "./services/market";
 import { fetchFinancialMetricRows, fetchAnalystForecastRows, fetchMarginBalanceRows, fetchNorthHoldingRows, fetchTechnicalIndicators } from "./services/finance";
 
 // Electron 使用 userData；命令行开发默认使用项目内 data-cache。
 export function dataCacheDir(): string {
   return resolveDataCacheDir();
-}
-
-async function ensureDir(dir: string) {
-  await fs.mkdir(dir, { recursive: true });
-}
-
-async function writeFileAtomic(filePath: string, content: string) {
-  await ensureDir(path.dirname(filePath));
-  const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, content, "utf8");
-  await fs.rename(tmp, filePath);
 }
 
 export interface ScheduleConfig {
@@ -39,14 +29,20 @@ export interface SyncRunRecord {
   finishedAt: string;
   ok: boolean;
   rowCount: number;
+  skipped?: boolean;
   error?: string;
 }
+
+export type SyncCompletionStatus = "idle" | "success" | "partial" | "failed";
+export type SyncSourceKey = keyof ScheduleConfig["sources"];
 
 export interface SyncStatus {
   config: ScheduleConfig;
   running: boolean;
   activeSources: string[];
   lastFullSync: string | null;
+  lastAttemptAt: string | null;
+  status: SyncCompletionStatus;
   runs: SyncRunRecord[];
   cacheFiles: Array<{ name: string; size: number; modifiedAt: string }>;
 }
@@ -74,6 +70,8 @@ let running = false;
 const runRecords: SyncRunRecord[] = [];
 const activeSources = new Set<string>();
 let statusHydrationPromise: Promise<void> | null = null;
+let lastAttemptAt: string | null = null;
+let syncStatus: SyncCompletionStatus = "idle";
 
 function log(msg: string) {
   console.log(`[scheduler] ${msg}`);
@@ -106,11 +104,13 @@ async function hydratePersistedStatus() {
     statusHydrationPromise = (async () => {
       try {
         const raw = await fs.readFile(STATUS_FILE(), "utf8");
-        const parsed = JSON.parse(raw) as { runs?: SyncRunRecord[]; lastFullSync?: string };
+        const parsed = JSON.parse(raw) as { runs?: SyncRunRecord[]; lastFullSync?: string; lastAttemptAt?: string; status?: SyncCompletionStatus };
         const savedRuns = Array.isArray(parsed.runs) ? parsed.runs.slice(-MAX_RUN_RECORDS) : [];
         runRecords.length = 0;
         runRecords.push(...savedRuns);
         if (parsed.lastFullSync) lastFullSync = parsed.lastFullSync;
+        if (parsed.lastAttemptAt) lastAttemptAt = parsed.lastAttemptAt;
+        if (parsed.status && ["idle", "success", "partial", "failed"].includes(parsed.status)) syncStatus = parsed.status;
       } catch {
         // no saved status yet
       }
@@ -122,13 +122,13 @@ async function hydratePersistedStatus() {
 export async function loadStatus(): Promise<SyncStatus> {
   await hydratePersistedStatus();
   const cacheFiles = await listCacheFiles();
-  return { config: currentConfig, running, activeSources: [...activeSources], lastFullSync, runs: [...runRecords].reverse().slice(0, 50), cacheFiles };
+  return { config: currentConfig, running, activeSources: [...activeSources], lastFullSync, lastAttemptAt, status: syncStatus, runs: [...runRecords].reverse().slice(0, 50), cacheFiles };
 }
 
 let lastFullSync: string | null = null;
 
 async function persistStatus() {
-  const payload = JSON.stringify({ runs: runRecords.slice(-MAX_RUN_RECORDS), lastFullSync });
+  const payload = JSON.stringify({ runs: runRecords.slice(-MAX_RUN_RECORDS), lastFullSync, lastAttemptAt, status: syncStatus });
   await writeFileAtomic(STATUS_FILE(), payload);
 }
 
@@ -137,7 +137,15 @@ function recordRun(record: SyncRunRecord) {
   if (runRecords.length > MAX_RUN_RECORDS) runRecords.splice(0, runRecords.length - MAX_RUN_RECORDS);
 }
 
+function skippedRun(source: string, error: string): SyncRunRecord {
+  const now = new Date().toISOString();
+  const record: SyncRunRecord = { source, startedAt: now, finishedAt: now, ok: false, skipped: true, rowCount: 0, error };
+  recordRun(record);
+  return record;
+}
+
 async function cacheSnapshot(name: string, data: unknown) {
+  if (!Array.isArray(data) || !data.length) throw new Error(`${name} returned no rows; previous snapshot retained`);
   const filePath = path.join(dataCacheDir(), "snapshots", `${name}.json`);
   await writeFileAtomic(filePath, JSON.stringify({ snapshotAt: new Date().toISOString(), data }));
 }
@@ -176,6 +184,7 @@ async function runSource(source: string, fn: () => Promise<number>): Promise<Syn
   const startedAt = new Date().toISOString();
   try {
     const rowCount = await fn();
+    if (!Number.isFinite(rowCount) || rowCount <= 0) throw new Error("source returned no usable rows");
     const record: SyncRunRecord = { source, startedAt, finishedAt: new Date().toISOString(), ok: true, rowCount };
     recordRun(record);
     return record;
@@ -198,10 +207,13 @@ async function taskMarketQuotes(): Promise<number> {
 }
 
 async function taskFinancialReports(): Promise<number> {
-  const reportDate = latestReportDate();
-  const rows = await fetchFinancialMetricRows(reportDate);
-  await cacheSnapshot("financial-reports", rows);
-  return rows.length;
+  for (const reportDate of financialReportDateCandidates()) {
+    const rows = await fetchFinancialMetricRows(reportDate);
+    if (!rows.length) continue;
+    await cacheSnapshot("financial-reports", rows);
+    return rows.length;
+  }
+  throw new Error("No financial report period returned usable rows");
 }
 
 async function taskAnalystForecasts(): Promise<number> {
@@ -232,37 +244,29 @@ async function taskTechnicalIndicators(): Promise<number> {
   return rows.length;
 }
 
-function latestReportDate(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
-  // Use most recent quarter end
-  if (month >= 10) return `${year}-09-30`;
-  if (month >= 7) return `${year}-06-30`;
-  if (month >= 4) return `${year}-03-31`;
-  return `${year - 1}-12-31`;
-}
+export type SyncTaskOverrides = Partial<Record<SyncSourceKey, () => Promise<number>>>;
 
-export async function runScheduledSync(config: ScheduleConfig): Promise<SyncRunRecord[]> {
+export async function runScheduledSync(config: ScheduleConfig, taskOverrides: SyncTaskOverrides = {}): Promise<SyncRunRecord[]> {
   await hydratePersistedStatus();
   if (running) {
     log("sync already in progress, skipping");
     return [];
   }
   running = true;
+  lastAttemptAt = new Date().toISOString();
   log("starting scheduled sync");
-  const tasks: Array<[string, boolean, () => Promise<number>]> = [
-    ["marketQuotes", config.sources.marketQuotes, taskMarketQuotes],
-    ["financialReports", config.sources.financialReports, taskFinancialReports],
-    ["analystForecasts", config.sources.analystForecasts, taskAnalystForecasts],
-    ["marginBalances", config.sources.marginBalances, taskMarginBalances],
-    ["northHoldings", config.sources.northHoldings, taskNorthHoldings],
-    ["technicalIndicators", config.sources.technicalIndicators, taskTechnicalIndicators],
+  const tasks: Array<[SyncSourceKey, boolean, () => Promise<number>]> = [
+    ["marketQuotes", config.sources.marketQuotes, taskOverrides.marketQuotes ?? taskMarketQuotes],
+    ["financialReports", config.sources.financialReports, taskOverrides.financialReports ?? taskFinancialReports],
+    ["analystForecasts", config.sources.analystForecasts, taskOverrides.analystForecasts ?? taskAnalystForecasts],
+    ["marginBalances", config.sources.marginBalances, taskOverrides.marginBalances ?? taskMarginBalances],
+    ["northHoldings", config.sources.northHoldings, taskOverrides.northHoldings ?? taskNorthHoldings],
+    ["technicalIndicators", config.sources.technicalIndicators, taskOverrides.technicalIndicators ?? taskTechnicalIndicators],
   ];
 
   try {
     const enabledTasks = tasks.filter(([, enabled]) => enabled);
-    const promises = new Map<string, Promise<SyncRunRecord>>();
+    const promises = new Map<SyncSourceKey, Promise<SyncRunRecord>>();
     const marketTask = enabledTasks.find(([name]) => name === "marketQuotes");
     const marketPromise = marketTask
       ? runSource(marketTask[0], marketTask[2]).then((record) => {
@@ -274,23 +278,33 @@ export async function runScheduledSync(config: ScheduleConfig): Promise<SyncRunR
 
     for (const [name, , fn] of enabledTasks) {
       if (name === "marketQuotes") continue;
-      const dependency = name === "technicalIndicators" && marketPromise ? marketPromise.then(() => undefined) : Promise.resolve();
-      const promise = dependency.then(() => {
+      const run = () => {
         log(`fetching ${name}...`);
         return runSource(name, fn);
-      }).then((record) => {
+      };
+      const promise = name === "technicalIndicators" && marketPromise
+        ? marketPromise.then((marketRecord) => marketRecord.ok
+            ? run()
+            : skippedRun(name, "marketQuotes failed; technical indicators skipped"))
+        : run();
+      promises.set(name, promise.then((record) => {
         log(`${name}: ${record.ok ? `${record.rowCount} rows` : `FAILED ${record.error}`}`);
         return record;
-      });
-      promises.set(name, promise);
+      }));
     }
 
     const results = await Promise.all(enabledTasks.map(([name]) => promises.get(name)!));
-    lastFullSync = new Date().toISOString();
+    const marketRecord = results.find((record) => record.source === "marketQuotes");
+    const allEnabledSucceeded = enabledTasks.length > 0 && results.length === enabledTasks.length && results.every((record) => record.ok);
+    const criticalMarketSucceeded = Boolean(marketRecord?.ok);
+    syncStatus = allEnabledSucceeded && criticalMarketSucceeded ? "success" : results.some((record) => record.ok) ? "partial" : "failed";
+    if (allEnabledSucceeded && criticalMarketSucceeded) lastFullSync = new Date().toISOString();
     await persistStatus();
-    log("scheduled sync complete");
+    log(`scheduled sync complete (${syncStatus})`);
     return results;
   } finally {
+    if (!Object.values(config.sources).some(Boolean)) syncStatus = "failed";
+    await persistStatus().catch(() => undefined);
     running = false;
   }
 }

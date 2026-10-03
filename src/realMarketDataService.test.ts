@@ -4,6 +4,7 @@ import {
   fetchStockProfileAutoMatch,
   fetchStockKlineHistory,
   generateTencentAshareCandidates,
+  syncBunStockUniverse,
   syncTencentAllAshareMarketData,
   syncTencentRealMarketData
 } from "./realMarketDataService";
@@ -107,6 +108,51 @@ afterEach(() => {
 });
 
 describe("realMarketDataService", () => {
+  it("bootstraps a usable stock universe and preserves existing real financial metrics", async () => {
+    const seed = {
+      ...STOCKS[0],
+      metrics: {
+        ...STOCKS[0].metrics,
+        revenue: 1275,
+        realAnnualReportSource: 1
+      }
+    };
+    const liveStock = {
+      ...seed,
+      name: "实时股票",
+      metrics: { price: 12.34, marketCap: 500, floatMarketCap: 420, realQuoteSource: 1 }
+    };
+    const invalidStock = {
+      ...STOCKS[1],
+      metrics: { price: 0, marketCap: 0, floatMarketCap: 0, realQuoteSource: 1 }
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("/api/data/stock-universe");
+      return new Response(JSON.stringify({ engine: "bun", checkedAt: "2026-08-09T00:00:00.000Z", stocks: [liveStock, invalidStock] }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-stockchoose-data-engine": "bun" }
+      });
+    });
+
+    const result = await syncBunStockUniverse([seed], fetchMock);
+
+    expect(result.ok).toBe(true);
+    expect(result.sourceRows).toBe(2);
+    expect(result.matchedRows).toBe(1);
+    expect(result.stocks[0].metrics.price).toBe(12.34);
+    expect(result.stocks[0].metrics.revenue).toBe(1275);
+    expect(result.stocks[0].metrics.realAnnualReportSource).toBe(1);
+  });
+
+  it("keeps cached stocks when the stock-universe interface fails", async () => {
+    const fetchMock = vi.fn(async () => new Response("upstream unavailable", { status: 502 }));
+    const result = await syncBunStockUniverse(STOCKS.slice(0, 2), fetchMock);
+
+    expect(result.ok).toBe(false);
+    expect(result.stocks).toEqual(STOCKS.slice(0, 2));
+    expect(result.details).toContain("HTTP 502");
+  });
+
   it("auto matches official website and industry tags through the Bun profile API", async () => {
     const baseStock = {
       ...(STOCKS.find((stock) => stock.code === "600519") ?? STOCKS[0]),
@@ -271,6 +317,22 @@ describe("realMarketDataService", () => {
     expect(requestedUrl).toContain("/api/market/tencent/kline-points");
     expect(requestedUrl).toContain("symbol=sh600519");
     expect(requestedUrl).toContain("period=week");
+    expect(requestedUrl).toContain("adjustment=qfq");
+  });
+
+  it("requests unadjusted kline history when the adjustment mode is switched", async () => {
+    const stock = STOCKS.find((item) => item.code === "600519") ?? STOCKS[0];
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify([
+      { date: "2026-05-29", open: 1320, close: 1319, high: 1338, low: 1311, volume: 4.12 }
+    ]), { status: 200 }));
+
+    const result = await fetchStockKlineHistory(stock, "day", fetchMock, "none");
+    const requestedUrl = String(fetchMock.mock.calls[0]?.[0] ?? "");
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("不复权日K历史行情");
+    expect(requestedUrl).toContain("period=day");
+    expect(requestedUrl).toContain("adjustment=none");
   });
 
   it("reports the Eastmoney fallback source when Tencent kline is blocked upstream", async () => {
@@ -282,7 +344,7 @@ describe("realMarketDataService", () => {
     const result = await fetchStockKlineHistory(stock, "week", fetchMock);
 
     expect(result.ok).toBe(true);
-    expect(result.message).toContain("东方财富备用周K历史行情");
+    expect(result.message).toContain("东方财富备用前复权周K历史行情");
   });
 
   it("uses Bun structured Tencent kline points on the local app proxy", async () => {

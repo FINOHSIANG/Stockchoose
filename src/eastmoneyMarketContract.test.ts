@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  ashareUniverseCodesFromRows,
   assertEastmoneySpotCompleteness,
   createEastmoneySpotPageUrl,
   dedupeEastmoneySpotRows,
+  isSelectableEastmoneySpotRow,
+  mapTencentQuoteToMarketRow,
+  tencentSymbolsFromQuery,
   planEastmoneySpotPages
 } from "../bun-api/services/market";
 import { buildMarketOverview } from "../bun-api/services/marketOverview";
@@ -44,6 +48,60 @@ describe("Eastmoney full-market contract", () => {
       Array.from({ length: 97 }, (_, index) => String(index + 1).padStart(6, "0"))
     ));
     expect(() => assertEastmoneySpotCompleteness(incompleteRows, 100)).toThrow(/97\.00%.*98\.00%/);
+  });
+
+  it("filters zero-price and zero-market-cap historical securities from the selectable universe", () => {
+    expect(isSelectableEastmoneySpotRow({
+      code: "000001",
+      price: 10.92,
+      marketCap: 2119.13,
+      floatMarketCap: 2119.09
+    })).toBe(true);
+    expect(isSelectableEastmoneySpotRow({
+      code: "000003",
+      price: 0,
+      marketCap: 0,
+      floatMarketCap: 0
+    })).toBe(false);
+    expect(isSelectableEastmoneySpotRow({
+      code: "000024",
+      price: 0,
+      marketCap: 100,
+      floatMarketCap: 80
+    })).toBe(false);
+  });
+
+  it("builds a deduplicated A-share fallback universe and excludes non-A-share rows", () => {
+    expect(ashareUniverseCodesFromRows([
+      { SECURITY_CODE: "600519", SECURITY_TYPE_CODE: "058001001" },
+      { SECUCODE: "000001.SZ", SECURITY_TYPE_CODE: "058001001" },
+      { SECURITY_CODE: "600519", SECURITY_TYPE_CODE: "058001001" },
+      { SECUCODE: "430001.NQ", SECURITY_TYPE_CODE: "058001008" },
+      { SECURITY_CODE: "000000", SECURITY_TYPE_CODE: "058001001" },
+      { SECURITY_CODE: "600000", SECURITY_TYPE_CODE: "unsupported" }
+    ])).toEqual(["000001", "600519"]);
+  });
+
+  it("maps Tencent quotes into the existing market row contract and preserves BSE prefixes", () => {
+    expect(tencentSymbolsFromQuery("920001,430001,600519")).toEqual(["bj920001", "bj430001", "sh600519"]);
+    const row = mapTencentQuoteToMarketRow({
+      symbol: "sh600519",
+      prefix: "sh",
+      code: "600519",
+      queryCode: "sh600519",
+      name: "贵州茅台",
+      price: 1237,
+      pctChange: -1.14,
+      volumeWanShou: 3.12,
+      amountYi: 38.67,
+      turnover: 0.25,
+      pe: 18.99,
+      pb: 6.15,
+      marketCapYi: 15463.51,
+      floatMarketCapYi: 15463.51
+    });
+    expect(row).toMatchObject({ code: "600519", price: 1237, amount: 38.67, marketCap: 15463.51 });
+    expect(isSelectableEastmoneySpotRow(row)).toBe(true);
   });
 
   it("returns a finite 0..100 score and keeps temperature as its compatibility alias", () => {

@@ -1,6 +1,7 @@
 import type { Stock } from "../../src/types";
 import type { CrawlArticleRow, CrawlSource } from "../crawler/engine";
 import { cacheGet, cacheSet, domainFromUrl, fetchJson, fetchText, parseRssArticles } from "../crawler/engine";
+import { assertSafeOutboundUrl } from "../lib/outboundSecurity";
 
 export interface NewsSourceDiagnostic {
   sourceId: string;
@@ -81,7 +82,9 @@ async function fetchNewsApiRows(source: CrawlSource) {
   url.searchParams.set("pageSize", String(clamp(source.maxItems ?? 20, 1, 100)));
   url.searchParams.set("sortBy", "publishedAt");
   if (source.language?.startsWith("zh")) url.searchParams.set("language", "zh");
+  await assertSafeOutboundUrl(url);
   const payload = await fetchJson(url, {
+    redirect: "error",
     headers: source.apiToken ? { authorization: `Bearer ${source.apiToken}`, "x-api-key": source.apiToken } : undefined
   }, 20000);
   return articleRowsFromPayload(payload, source.name);
@@ -91,14 +94,18 @@ async function fetchCustomRestRows(source: CrawlSource) {
   const url = new URL(source.baseUrl);
   if (source.query?.trim()) url.searchParams.set("q", source.query.trim());
   url.searchParams.set("limit", String(clamp(source.maxItems ?? 20, 1, 250)));
+  await assertSafeOutboundUrl(url);
   const payload = await fetchJson(url, {
+    redirect: "error",
     headers: source.apiToken ? { authorization: `Bearer ${source.apiToken}`, "x-api-key": source.apiToken } : undefined
   }, 20000);
   return articleRowsFromPayload(payload, source.name);
 }
 
 async function fetchRssRows(source: CrawlSource) {
-  const xml = await fetchText(source.baseUrl, {
+  const url = await assertSafeOutboundUrl(source.baseUrl);
+  const xml = await fetchText(url, {
+    redirect: "error",
     headers: source.apiToken ? { authorization: `Bearer ${source.apiToken}` } : undefined
   }, 20000);
   const rows = parseRssArticles(xml, source.maxItems ?? 20);
@@ -232,4 +239,3 @@ export async function fetchNewsArticles(sources: CrawlSource[], stocks: Stock[],
     sourceDiagnostics: diagnostics
   };
 }
-

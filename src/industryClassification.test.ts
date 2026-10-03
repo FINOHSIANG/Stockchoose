@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Stock } from "./types";
 import {
   ALL_INDUSTRIES,
+  PRIMARY_INDUSTRIES,
   compactIndustryTexts,
   industryMatchKey,
   inferPrimaryIndustry,
@@ -33,6 +34,12 @@ function stock(partial: Partial<Stock>): Stock {
 }
 
 describe("industryClassification canonicalization", () => {
+  it("exposes the complete primary industry list for selectors", () => {
+    expect(PRIMARY_INDUSTRIES).toHaveLength(31);
+    expect(PRIMARY_INDUSTRIES).toContain("农林牧渔");
+    expect(PRIMARY_INDUSTRIES).toContain("美容护理");
+  });
+
   it("normalizes unusable industry placeholders to empty", () => {
     expect(normalizedIndustryText("未分类")).toBe("");
     expect(normalizedIndustryText("腾讯行情")).toBe("");

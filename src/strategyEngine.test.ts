@@ -74,6 +74,124 @@ function strategy(patch: Partial<StrategyConfig>): StrategyConfig {
 }
 
 describe("strategyEngine", () => {
+  it("starts new strategies without preset ranking conditions", () => {
+    expect(createDefaultStrategy().ranks).toEqual([]);
+  });
+
+  it("keeps the stable input order and zero scores without effective ranking conditions", () => {
+    const unrankedStocks = [
+      { ...stock("600011", "行业A", 10), metrics: { valueScore: 10, amount: 1 } },
+      { ...stock("600012", "行业A", 20), metrics: { valueScore: 20, amount: 100 } },
+      { ...stock("600013", "行业B", 30), metrics: { valueScore: 30, amount: 10 } }
+    ];
+    const unrankedPools: StockPool[] = [{ id: "all", name: "全部股票", type: "static", codes: unrankedStocks.map((item) => item.code) }];
+
+    const screenRows = screenStocks(strategy({ poolLimit: 3, ranks: [] }), unrankedStocks, unrankedPools, factors);
+    const rankRows = rankingAnalysis(strategy({ ranks: [] }), unrankedStocks, unrankedPools, factors);
+
+    expect(screenRows.map((row) => row.stock.code)).toEqual(["600011", "600012", "600013"]);
+    expect(screenRows.map((row) => row.score)).toEqual([0, 0, 0]);
+    expect(rankRows.map((row) => row.stock.code)).toEqual(["600011", "600012", "600013"]);
+    expect(rankRows.map((row) => row.score)).toEqual([0, 0, 0]);
+  });
+
+  it("does not rank by a disabled condition but still supports an explicit amount rank", () => {
+    const amountFactor: Factor = {
+      key: "amount",
+      name: "成交额",
+      group: "行情",
+      description: "测试用成交额指标",
+      defaultOrder: "desc"
+    };
+    const unrankedStocks = [
+      { ...stock("600021", "行业A", 10), metrics: { valueScore: 10, amount: 1 } },
+      { ...stock("600022", "行业A", 20), metrics: { valueScore: 20, amount: 100 } },
+      { ...stock("600023", "行业B", 30), metrics: { valueScore: 30, amount: 10 } }
+    ];
+    const unrankedPools: StockPool[] = [{ id: "all", name: "全部股票", type: "static", codes: unrankedStocks.map((item) => item.code) }];
+    const amountRank: RankCondition = {
+      id: "rank-amount",
+      factorKey: "amount",
+      order: "desc",
+      range: "全部",
+      weight: 100,
+      enabled: true
+    };
+
+    const disabledRows = screenStocks(
+      strategy({ poolLimit: 3, ranks: [{ ...amountRank, enabled: false }] }),
+      unrankedStocks,
+      unrankedPools,
+      [...factors, amountFactor]
+    );
+    const explicitRows = screenStocks(
+      strategy({ poolLimit: 3, ranks: [amountRank] }),
+      unrankedStocks,
+      unrankedPools,
+      [...factors, amountFactor]
+    );
+
+    expect(disabledRows.map((row) => row.stock.code)).toEqual(["600021", "600022", "600023"]);
+    expect(disabledRows.map((row) => row.score)).toEqual([0, 0, 0]);
+    expect(explicitRows.map((row) => row.stock.code)).toEqual(["600022", "600023", "600021"]);
+  });
+
+  it("treats maxBuyPosition as a per-stock cap and leaves unallocatable exposure in cash", () => {
+    const baseTrading = createDefaultStrategy().trading;
+    const rows = screenStocks(
+      strategy({
+        poolLimit: 2,
+        trading: { ...baseTrading, maxHoldings: 2, maxBuyPosition: 20 }
+      }),
+      stocks.slice(0, 2),
+      [{ ...pools[0], codes: stocks.slice(0, 2).map((item) => item.code) }],
+      factors
+    );
+
+    expect(rows.map((row) => row.weight)).toEqual([20, 20]);
+    expect(rows.reduce((sum, row) => sum + row.weight, 0)).toBe(40);
+  });
+
+  it("fills the 100 percent target when enough capped holdings are available", () => {
+    const baseTrading = createDefaultStrategy().trading;
+    const tenStocks = Array.from({ length: 10 }, (_, index) => stock(`6010${String(index).padStart(2, "0")}`, "行业A", 100 - index));
+    const tenStockPools: StockPool[] = [{ id: "all", name: "全部股票", type: "static", codes: tenStocks.map((item) => item.code) }];
+    const rows = screenStocks(
+      strategy({
+        poolLimit: 10,
+        trading: { ...baseTrading, maxHoldings: 10, maxBuyPosition: 20 }
+      }),
+      tenStocks,
+      tenStockPools,
+      factors
+    );
+
+    expect(rows.every((row) => row.weight <= 20)).toBe(true);
+    expect(rows.reduce((sum, row) => sum + row.weight, 0)).toBe(100);
+  });
+
+  it("redistributes excess weight from a capped stock across the remaining holdings", () => {
+    const baseTrading = createDefaultStrategy().trading;
+    const marketCapStocks = [
+      { ...stock("600031", "行业A", 100), metrics: { valueScore: 100, amount: 1, marketCap: 800 } },
+      { ...stock("600032", "行业A", 90), metrics: { valueScore: 90, amount: 1, marketCap: 100 } },
+      { ...stock("600033", "行业B", 80), metrics: { valueScore: 80, amount: 1, marketCap: 100 } }
+    ];
+    const marketCapPools: StockPool[] = [{ id: "all", name: "全部股票", type: "static", codes: marketCapStocks.map((item) => item.code) }];
+    const rows = screenStocks(
+      strategy({
+        poolLimit: 3,
+        trading: { ...baseTrading, maxHoldings: 3, maxBuyPosition: 40, weightMethod: "总市值" }
+      }),
+      marketCapStocks,
+      marketCapPools,
+      factors
+    );
+
+    expect(rows.map((row) => row.weight)).toEqual([40, 30, 30]);
+    expect(rows.reduce((sum, row) => sum + row.weight, 0)).toBe(100);
+  });
+
   it("screens daily selections locally by strategy rank and limit", () => {
     const rows = screenStocks(
       strategy({
@@ -149,6 +267,24 @@ describe("strategyEngine", () => {
       factors
     );
     expect(excluded.map((row) => row.stock.code)).toEqual(["600007"]);
+  });
+
+  it("always excludes stocks with explicit zero price or market cap from selection results", () => {
+    const marketStocks: Stock[] = [
+      { ...stock("600010", "行业A", 100), metrics: { valueScore: 100, price: 0, marketCap: 0, floatMarketCap: 0 } },
+      { ...stock("600011", "行业A", 90), metrics: { valueScore: 90, price: 10, marketCap: 100, floatMarketCap: 80 } }
+    ];
+    const marketPools: StockPool[] = [{ id: "all", name: "all", type: "static", codes: marketStocks.map((item) => item.code) }];
+    const rank: RankCondition[] = [{ id: "rank-all", factorKey: "valueScore", order: "desc", range: "全部", weight: 100, enabled: true }];
+
+    const rows = screenStocks(
+      strategy({ poolLimit: 10, excludeDelisted: false, filterSuspended: false, ranks: rank }),
+      marketStocks,
+      marketPools,
+      factors
+    );
+
+    expect(rows.map((row) => row.stock.code)).toEqual(["600011"]);
   });
 
   it("builds local rank, backtest, and optimization results", () => {

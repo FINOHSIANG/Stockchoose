@@ -27,7 +27,7 @@ const bunProxyRules = [
   { prefix: "/gdelt-news", rewrite: rewriteGdeltNewsUrl }
 ];
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     {
       name: "stockchoose-bun-data-proxy",
@@ -41,8 +41,7 @@ export default defineConfig({
           if (handledByBun) return;
           response.writeHead(502, {
             "content-type": "text/plain; charset=utf-8",
-            "cache-control": "no-store",
-            "access-control-allow-origin": "*"
+            "cache-control": "no-store"
           });
           response.end("Bun AKTools data API is unavailable");
         });
@@ -57,8 +56,7 @@ export default defineConfig({
           if (request.url?.startsWith("/api")) {
             response.writeHead(502, {
               "content-type": "text/plain; charset=utf-8",
-              "cache-control": "no-store",
-              "access-control-allow-origin": "*"
+              "cache-control": "no-store"
             });
             response.end("Bun API is unavailable");
             return;
@@ -67,7 +65,7 @@ export default defineConfig({
         });
       }
     },
-    react()
+    ...(mode === "test" ? [] : [react()])
   ],
   base: "./",
   server: {
@@ -78,4 +76,4 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true
   }
-});
+}));

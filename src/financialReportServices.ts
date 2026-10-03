@@ -33,6 +33,17 @@ export interface AnnualFinancialReportMetrics {
   receivableRevenueRatio: number;
 }
 
+export type AnnualFinancialReportDetailSectionKey = "performance" | "income" | "balance" | "cashFlow";
+
+export interface AnnualFinancialReportDetailItem {
+  key: string;
+  label: string;
+  value?: number;
+  unit: "亿元" | "元" | "%" | "倍" | "人";
+}
+
+export type AnnualFinancialReportDetails = Record<AnnualFinancialReportDetailSectionKey, AnnualFinancialReportDetailItem[]>;
+
 export interface AnnualFinancialReport {
   code: string;
   name: string;
@@ -46,7 +57,8 @@ export interface AnnualFinancialReport {
   sourceFileName: string;
   sourceFileType: "CSV";
   sourceNote: string;
-  metrics: AnnualFinancialReportMetrics;
+  metrics: Partial<AnnualFinancialReportMetrics>;
+  details?: AnnualFinancialReportDetails;
   sourceCsv?: string;
 }
 
@@ -60,6 +72,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isFiniteNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+const annualReportDetailSectionKeys: AnnualFinancialReportDetailSectionKey[] = ["performance", "income", "balance", "cashFlow"];
+
+function annualReportDetailsFromPayload(value: unknown, index: number): AnnualFinancialReportDetails | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new Error(`Bun annual report API returned invalid annual report row ${index}: details must be an object`);
+
+  return Object.fromEntries(annualReportDetailSectionKeys.map((section) => {
+    const items = value[section];
+    if (!Array.isArray(items)) {
+      throw new Error(`Bun annual report API returned invalid annual report row ${index}: details.${section} must be an array`);
+    }
+    return [section, items.map((item, itemIndex) => {
+      if (!isRecord(item)) {
+        throw new Error(`Bun annual report API returned invalid annual report row ${index}: details.${section}[${itemIndex}] must be an object`);
+      }
+      if (typeof item.key !== "string" || !item.key.trim() || typeof item.label !== "string" || !item.label.trim()) {
+        throw new Error(`Bun annual report API returned invalid annual report row ${index}: details.${section}[${itemIndex}] needs key and label`);
+      }
+      if (!["亿元", "元", "%", "倍", "人"].includes(String(item.unit))) {
+        throw new Error(`Bun annual report API returned invalid annual report row ${index}: details.${section}[${itemIndex}] has invalid unit`);
+      }
+      if (item.value !== undefined && !isFiniteNumber(item.value)) {
+        throw new Error(`Bun annual report API returned invalid annual report row ${index}: details.${section}[${itemIndex}].value must be finite`);
+      }
+      return item as unknown as AnnualFinancialReportDetailItem;
+    })];
+  })) as AnnualFinancialReportDetails;
 }
 
 const annualReportStringFields: Array<keyof Omit<AnnualFinancialReport, "metrics" | "sourceCsv">> = [
@@ -116,21 +157,48 @@ function annualReportFromPayloadRow(row: unknown, index: number): AnnualFinancia
     throw new Error(`Bun annual report API returned invalid annual report row ${index}: metrics must be an object`);
   }
   for (const field of annualReportMetricFields) {
-    if (!isFiniteNumber(row.metrics[field])) {
+    if (row.metrics[field] !== undefined && row.metrics[field] !== null && !isFiniteNumber(row.metrics[field])) {
       throw new Error(`Bun annual report API returned invalid annual report row ${index}: metrics.${field} must be a finite number`);
     }
   }
+  const metrics = row.metrics;
+  if (!annualReportMetricFields.some((field) => isFiniteNumber(metrics[field]))) {
+    throw new Error(`Bun annual report API returned invalid annual report row ${index}: no financial metrics`);
+  }
+  row.metrics = Object.fromEntries(Object.entries(row.metrics).filter(([, value]) => value !== null));
+  row.details = annualReportDetailsFromPayload(row.details, index);
   return row as unknown as AnnualFinancialReport;
 }
 
+export function formatAnnualMetric(value: number | undefined, suffix: string, precision = 2) {
+  return value === undefined || !Number.isFinite(value) ? "未提供" : `${Number(value.toFixed(precision))}${suffix}`;
+}
+
+const annualRequests = new WeakMap<FetchLike, Map<string, Promise<AnnualFinancialReport[]>>>();
 export async function buildAnnualFinancialReportsBunFirst(stock: Stock, fetchImpl?: FetchLike): Promise<AnnualFinancialReport[]> {
   const request = fetchImpl ?? (typeof fetch === "function" ? fetch : undefined);
   if (!request) throw new Error("Bun annual report API unavailable: fetch is not available");
+  let active = annualRequests.get(request);
+  if (!active) {
+    active = new Map();
+    annualRequests.set(request, active);
+  }
+  const key = `${stock.exchange}:${stock.code}`;
+  const existing = active.get(key);
+  if (existing) return existing;
+  const task = requestAnnualReports(stock, request).finally(() => {
+    if (active.get(key) === task) active.delete(key);
+  });
+  active.set(key, task);
+  return task;
+}
 
+async function requestAnnualReports(stock: Stock, request: FetchLike): Promise<AnnualFinancialReport[]> {
   const response = await request(BUN_ANNUAL_REPORTS_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ stock })
+    body: JSON.stringify({ stock: { code: stock.code, name: stock.name, exchange: stock.exchange } }),
+    signal: AbortSignal.timeout(60000)
   });
   if (!response.ok) {
     const details = await response.text().catch(() => "");

@@ -221,7 +221,15 @@ function isDelistedStock(stock: Stock) {
   return stock.name.includes("退市") || stock.name.endsWith("退");
 }
 
+function hasExplicitInvalidMarketMetric(stock: Stock) {
+  return (["price", "marketCap", "floatMarketCap"] as const).some((key) =>
+    Object.prototype.hasOwnProperty.call(stock.metrics, key)
+      && (!Number.isFinite(stock.metrics[key]) || stock.metrics[key] <= 0)
+  );
+}
+
 function applySelector(strategy: StrategyConfig, stock: Stock) {
+  if (hasExplicitInvalidMarketMetric(stock)) return false;
   if (!isAll(strategy.indexMember) && !stock.indexes.includes(strategy.indexMember)) return false;
   if (!isAll(strategy.board) && stock.board !== strategy.board) return false;
   if (!isAllIndustry(strategy.industry1) && !stockMatchesIndustry(stock, "industry1", strategy.industry1)) return false;
@@ -324,12 +332,16 @@ function applyFilters(stocks: Stock[], strategy: StrategyConfig, factors: Factor
     .filter((row) => !row.failedReason);
 }
 
+function isEffectiveRank(rank: RankCondition) {
+  return rank.enabled && Number.isFinite(rank.weight) && rank.weight > 0;
+}
+
 function scoreRows(rows: Array<{ stock: Stock; passedFilters: number }>, ranks: RankCondition[], factors: Factor[]): SelectionRow[] {
-  const enabled = ranks.filter((rank) => rank.enabled && rank.weight > 0);
+  const enabled = ranks.filter(isEffectiveRank);
   if (!enabled.length) {
     return rows.map((row) => ({
       ...row,
-      score: row.stock.metrics.amount ?? 0,
+      score: 0,
       weight: 0
     }));
   }
@@ -398,11 +410,61 @@ function applyWeights(rows: SelectionRow[], strategy: StrategyConfig, weightLimi
     const value = positiveMetricValue(rawValue) ?? 0;
     return useSqrt ? Math.sqrt(Math.max(0, value)) : Math.max(0, value);
   };
-  const selectedTotal = selectedRows.reduce((sum, row) => sum + weightValueOf(row), 0);
+  const rawWeights = selectedRows.map(weightValueOf);
+  const rawTotal = rawWeights.reduce((sum, value) => sum + value, 0);
+  const configuredCap = Number(strategy.trading.maxBuyPosition);
+  const perStockCap = Number.isFinite(configuredCap) ? clamp(configuredCap, 0, 100) : 100;
+  const targetExposure = Math.min(100, perStockCap * selectedRows.length);
+  const allocatedWeights = new Array<number>(selectedRows.length).fill(0);
+
+  if (rawTotal > 0 && targetExposure > 0) {
+    let remainingTarget = targetExposure;
+    let remainingIndexes = rawWeights.map((value, index) => ({ value, index })).filter((item) => item.value > 0);
+
+    while (remainingIndexes.length && remainingTarget > 0) {
+      const remainingTotal = remainingIndexes.reduce((sum, item) => sum + item.value, 0);
+      if (remainingTotal <= 0) break;
+
+      const cappedIndexes = remainingIndexes.filter((item) => (remainingTarget * item.value) / remainingTotal > perStockCap);
+      if (!cappedIndexes.length) {
+        remainingIndexes.forEach((item) => {
+          allocatedWeights[item.index] = (remainingTarget * item.value) / remainingTotal;
+        });
+        remainingTarget = 0;
+        break;
+      }
+
+      const cappedSet = new Set(cappedIndexes.map((item) => item.index));
+      cappedIndexes.forEach((item) => {
+        allocatedWeights[item.index] = perStockCap;
+      });
+      remainingTarget = Math.max(0, remainingTarget - perStockCap * cappedIndexes.length);
+      remainingIndexes = remainingIndexes.filter((item) => !cappedSet.has(item.index));
+    }
+  }
+
+  const capCents = Math.max(0, Math.floor((perStockCap + Number.EPSILON) * 100));
+  const roundedWeights = allocatedWeights.map((value) => Math.min(capCents, Math.floor((value + Number.EPSILON) * 100)));
+  const allocatedTargetCents = Math.min(
+    10000,
+    capCents * selectedRows.length,
+    Math.round(allocatedWeights.reduce((sum, value) => sum + value, 0) * 100)
+  );
+  let remainingCents = Math.max(0, allocatedTargetCents - roundedWeights.reduce((sum, value) => sum + value, 0));
+  const remainderOrder = allocatedWeights
+    .map((value, index) => ({ index, remainder: value * 100 - Math.floor((value + Number.EPSILON) * 100) }))
+    .sort((left, right) => right.remainder - left.remainder);
+  for (const item of remainderOrder) {
+    if (remainingCents <= 0) break;
+    if (roundedWeights[item.index] >= capCents) continue;
+    roundedWeights[item.index] += 1;
+    remainingCents -= 1;
+  }
+
   const selectedWeightByCode = new Map(
-    selectedRows.map((row) => [
+    selectedRows.map((row, index) => [
       row.stock.code,
-      selectedTotal > 0 ? round((weightValueOf(row) / selectedTotal) * Math.min(strategy.trading.maxBuyPosition, 100), 2) : 0
+      roundedWeights[index] / 100
     ])
   );
   return rows.map((row) => ({
@@ -425,7 +487,10 @@ export function screenStocks(
     .filter((stock) => isAllPoolId(strategy.hotPoolId) || poolHasStock(hotCodes, stock))
     .filter((stock) => applySelector(strategy, stock));
   const filtered = applyFilters(universe, strategy, factors);
-  const scored = scoreRows(filtered, strategy.ranks, factors).sort((a, b) => b.score - a.score);
+  const scored = scoreRows(filtered, strategy.ranks, factors);
+  if (strategy.ranks.some(isEffectiveRank)) {
+    scored.sort((a, b) => b.score - a.score);
+  }
   const strategyLimit = positiveInt(strategy.poolLimit, 1);
   const resultLimit = Math.min(strategyLimit, positiveInt(options.resultLimit, strategyLimit));
   return applyWeights(scored.slice(0, resultLimit), strategy, positiveInt(options.weightLimit, positiveInt(strategy.trading.maxHoldings, 1)));
@@ -743,7 +808,10 @@ export function rankingAnalysis(strategy: StrategyConfig, stocks: Stock[], pools
     universe.map((stock) => ({ stock, passedFilters: 0 })),
     strategy.ranks,
     factors
-  ).sort((a, b) => b.score - a.score);
+  );
+  if (strategy.ranks.some(isEffectiveRank)) {
+    rows.sort((a, b) => b.score - a.score);
+  }
   return rows.map((row, index) => ({
     stock: row.stock,
     score: row.score,

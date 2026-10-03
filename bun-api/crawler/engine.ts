@@ -63,14 +63,14 @@ export function cacheSet<T>(key: string, value: T, ttlMs: number) {
   return value;
 }
 
-export async function cacheGetOrCreate<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+export async function cacheGetOrCreate<T>(key: string, ttlMs: number | ((value: T) => number), loader: () => Promise<T>): Promise<T> {
   const cached = cacheGet<T>(key);
   if (cached !== undefined) return cached;
   const active = inFlightCache.get(key) as Promise<T> | undefined;
   if (active) return active;
 
   const request = loader()
-    .then((value) => cacheSet(key, value, ttlMs))
+    .then((value) => cacheSet(key, value, typeof ttlMs === "function" ? ttlMs(value) : ttlMs))
     .finally(() => {
       if (inFlightCache.get(key) === request) inFlightCache.delete(key);
     });
@@ -129,7 +129,7 @@ export async function crawlerFetch(url: string | URL, init: RequestInit = {}, ti
   else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   try {
     await rateLimit(target, minGapMs, controller.signal);
-    return await fetch(target, {
+    const response = await fetch(target, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -138,6 +138,38 @@ export async function crawlerFetch(url: string | URL, init: RequestInit = {}, ti
         ...(init.headers ?? {})
       }
     });
+    if (!response.body) return response;
+    // 超时覆盖响应体读取，避免上游只发 headers 就让整个同步永久等待。
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const maxBytes = 64 * 1024 * 1024;
+    const abortReader = () => { void reader.cancel(controller.signal.reason).catch(() => undefined); };
+    controller.signal.addEventListener("abort", abortReader, { once: true });
+    try {
+      while (true) {
+        controller.signal.throwIfAborted();
+        const { done, value } = await reader.read();
+        controller.signal.throwIfAborted();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          throw new CrawlError("upstream response exceeds 64 MiB");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      controller.signal.removeEventListener("abort", abortReader);
+      reader.releaseLock();
+    }
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   } finally {
     clearTimeout(timeout);
     externalSignal?.removeEventListener("abort", abortFromExternal);

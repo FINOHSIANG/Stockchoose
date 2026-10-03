@@ -18,7 +18,7 @@ const unusableIndustryTexts = new Set([
   "涓滄柟璐㈠瘜琛屾儏"
 ]);
 
-const primaryIndustries = [
+export const PRIMARY_INDUSTRIES = [
   "农林牧渔",
   "基础化工",
   "钢铁",
@@ -50,7 +50,7 @@ const primaryIndustries = [
   "石油石化",
   "环保",
   "美容护理"
-];
+] as const;
 
 const secondaryToPrimaryEntries: Array<[string, string[]]> = [
   ["农林牧渔", ["种植业", "养殖业", "渔业", "饲料", "农产品加工", "动物保健"]],
@@ -129,7 +129,7 @@ function registerIndustryAlias(canonical: string, aliases: string[] = []) {
   });
 }
 
-primaryIndustries.forEach((industry) => registerIndustryAlias(industry));
+PRIMARY_INDUSTRIES.forEach((industry) => registerIndustryAlias(industry));
 secondaryToPrimaryEntries.forEach(([primary, secondaries]) => {
   secondaries.forEach((secondary) => {
     registerIndustryAlias(secondary);

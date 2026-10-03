@@ -8,7 +8,7 @@ export default defineConfig({
     trace: "on-first-retry"
   },
   webServer: {
-    command: "npm run dev:web -- --port 18973 --strictPort",
+    command: "cross-env STOCKCHOOSE_BUN_PORT=18083 STOCKCHOOSE_BUN_API_URL=http://127.0.0.1:18083 STOCKCHOOSE_AGENT_AUTH_FILE=tmp/agent-runtime/playwright-sidecar-auth npm run dev:web -- --port 18973 --strictPort",
     url: "http://127.0.0.1:18973",
     reuseExistingServer: false,
     timeout: 30_000

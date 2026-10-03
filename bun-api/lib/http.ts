@@ -9,27 +9,45 @@ export class ApiError extends Error {
   }
 }
 
+export const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
+export const MAX_RESPONSE_BODY_BYTES = 64 * 1024 * 1024;
+
+const responseHeaders = {
+  "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
+  "x-stockchoose-data-engine": "bun"
+};
+
 export function jsonResponse(payload: unknown, status = 200, headers: HeadersInit = {}) {
-  return new Response(JSON.stringify(payload), {
+  const body = JSON.stringify(payload);
+  if (new TextEncoder().encode(body).byteLength > MAX_RESPONSE_BODY_BYTES) {
+    return new Response(JSON.stringify({ message: "Bun data API response is too large" }), {
+      status: 413,
+      headers: {
+        ...responseHeaders,
+        "content-type": "application/json; charset=utf-8"
+      }
+    });
+  }
+  return new Response(body, {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-      "x-stockchoose-data-engine": "bun",
+      ...responseHeaders,
       ...headers
     }
   });
 }
 
 export function textResponse(text: string, status = 200, headers: HeadersInit = {}) {
+  if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BODY_BYTES) {
+    return jsonResponse({ message: "Bun data API response is too large" }, 413);
+  }
   return new Response(text, {
     status,
     headers: {
       "content-type": "text/plain; charset=utf-8",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-      "x-stockchoose-data-engine": "bun",
+      ...responseHeaders,
       ...headers
     }
   });
@@ -44,9 +62,19 @@ export function errorResponse(error: unknown) {
 }
 
 export async function requestJson<T = unknown>(request: Request): Promise<T> {
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+    throw new ApiError(413, "Request body is too large");
+  }
   try {
-    return (await request.json()) as T;
+    const bytes = await request.arrayBuffer();
+    if (bytes.byteLength > MAX_REQUEST_BODY_BYTES) {
+      throw new ApiError(413, "Request body is too large");
+    }
+    const text = new TextDecoder().decode(bytes);
+    return JSON.parse(text) as T;
   } catch (error) {
+    if (error instanceof ApiError) throw error;
     const details = error instanceof Error ? error.message : "invalid JSON";
     throw new ApiError(400, "Invalid JSON request body", details);
   }
@@ -55,4 +83,3 @@ export async function requestJson<T = unknown>(request: Request): Promise<T> {
 export function notFound(pathname: string) {
   return jsonResponse({ message: "Bun data API route not found", details: pathname }, 404);
 }
-

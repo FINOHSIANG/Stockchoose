@@ -1,4 +1,7 @@
-import { ApiError, errorResponse, jsonResponse, notFound, requestJson, textResponse } from "./lib/http";
+import { timingSafeEqual } from "node:crypto";
+import { ApiError, errorResponse, jsonResponse, MAX_REQUEST_BODY_BYTES, notFound, requestJson, textResponse } from "./lib/http";
+import { assertSafeOutboundUrl } from "./lib/outboundSecurity";
+import { fetchAktoolsRows, testAktoolsConnection } from "./services/aktools";
 import { fetchEastmoneyHistRows, fetchEastmoneySpotRows, fetchKlinePointsWithFallback, fetchTencentAshareQuoteRows, fetchTencentQuoteRows, fetchTencentQuoteText, stockFromMarketRow, tencentSymbolsFromQuery } from "./services/market";
 import { buildMarketOverview } from "./services/marketOverview";
 import { fetchEastmoneyNewsRows, fetchNewsArticles, fetchSourceRows, normalizeNewsArticles } from "./services/news";
@@ -6,24 +9,49 @@ import { buildBunValuationRows, fetchAnnualReports, fetchAnalystForecastRows, fe
 import { runStrategyBacktest, runStrategyOptimize, runStrategyRank, runStrategyScreen } from "./services/strategy";
 import { createBunTradePlan, submitPaperTrade, syncTradeAssets, tradePlanToClientText, tradePlanToCsv } from "./services/trade";
 import { initScheduler, loadStatus, saveConfig, triggerManualSync, readSnapshotRoute, DEFAULT_SCHEDULE_CONFIG } from "./scheduler";
+import { handleAgentRoute } from "./agent/routes";
 
 const DEFAULT_PORT = 18082;
 const startedAt = new Date().toISOString();
+const TOKEN_HEADER = "x-stockchoose-instance-token";
+const instanceToken = String(process.env.STOCKCHOOSE_BUN_API_TOKEN ?? "").trim();
+
+if (!instanceToken) {
+  throw new Error("STOCKCHOOSE_BUN_API_TOKEN is required to start the Bun data API");
+}
 
 function port() {
   return Number(process.env.STOCKCHOOSE_BUN_PORT || DEFAULT_PORT);
 }
 
-function normalizeAktoolsEndpoint(pathname: string) {
-  return pathname.replace(/^\/aktools\/?/, "").replace(/^api\/public\/?/, "").replace(/^\/+/, "");
+function tokenMatches(candidate: string) {
+  const actual = Buffer.from(instanceToken);
+  const received = Buffer.from(candidate);
+  return actual.length === received.length && timingSafeEqual(actual, received);
 }
 
-function rowsFromPayload(payload: unknown) {
-  if (Array.isArray(payload)) return payload;
-  const root = payload as any;
-  if (Array.isArray(root?.data)) return root.data;
-  if (Array.isArray(root?.rows)) return root.rows;
-  throw new ApiError(502, "Bun upstream payload is not row-bearing", "payload must be an array or contain data/rows");
+function assertTrustedRequest(request: Request) {
+  const url = new URL(request.url);
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
+    throw new ApiError(403, "Bun data API only accepts loopback requests");
+  }
+  if (!tokenMatches(request.headers.get(TOKEN_HEADER) ?? "")) {
+    throw new ApiError(401, "Bun data API instance token is missing or invalid");
+  }
+  const origin = request.headers.get("origin");
+  const allowedOrigins = new Set(
+    String(process.env.STOCKCHOOSE_ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+  if (origin && !allowedOrigins.has(origin)) {
+    throw new ApiError(403, "Bun data API origin is not allowed");
+  }
+}
+
+function normalizeAktoolsEndpoint(pathname: string) {
+  return pathname.replace(/^\/aktools\/?/, "").replace(/^api\/public\/?/, "").replace(/^\/+/, "");
 }
 
 async function aktoolsPayload(endpoint: string, params: URLSearchParams | Record<string, string>) {
@@ -41,20 +69,20 @@ async function handleIntegrationRows(request: Request) {
   if (baseUrl === "/aktools/api/public" || baseUrl.startsWith("/aktools/")) {
     return jsonResponse(await aktoolsPayload(endpoint, params));
   }
-  if (!/^https?:\/\//i.test(baseUrl)) throw new ApiError(400, "AKTools baseUrl must be /aktools or http(s)");
-  const url = new URL(`${baseUrl}/${endpoint}`);
-  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
-  const response = await fetch(url, { headers: { accept: "application/json,text/plain,*/*" } });
-  if (!response.ok) throw new ApiError(502, `AKTools upstream HTTP ${response.status}`);
-  return jsonResponse(await response.json());
+  return jsonResponse(await fetchAktoolsRows(baseUrl, endpoint, params));
 }
 
 async function handleSourceTest(request: Request) {
   const body = await requestJson<any>(request);
   const provider = String(body.provider ?? "");
   if (provider.includes("AKTools") || provider.includes("AKShare")) {
-    const rows = rowsFromPayload(await aktoolsPayload("stock_zh_a_hist", { symbol: "000001", start_date: "20240501", end_date: "20240531" }));
-    return jsonResponse({ engine: "bun", provider, ok: rows.length > 0, rowCount: rows.length, message: "连接检测通过", details: `Bun 原生数据接口已返回 ${rows.length} 条 A 股历史行情` });
+    const result = await testAktoolsConnection(String(body.baseUrl ?? ""), aktoolsPayload);
+    const label = result.source === "bun-native" ? "Bun 原生数据接口" : "所配置的 AKTools 数据接口";
+    return jsonResponse({
+      engine: "bun", provider, ...result,
+      message: result.ok ? "连接检测通过" : "连接检测失败",
+      details: `${label} ${result.endpoint} 返回 ${result.rowCount} 条历史行情；此检测不代表全市场和财务字段完整覆盖`
+    });
   }
   if (provider === "GDELT 2.1" || provider === "NewsAPI" || provider.includes("REST") || provider.includes("RSS")) {
     const rows = await fetchSourceRows({
@@ -74,9 +102,10 @@ async function handleSourceTest(request: Request) {
 
 
 async function route(request: Request) {
+  assertTrustedRequest(request);
   const url = new URL(request.url);
   const path = url.pathname;
-  if (request.method === "OPTIONS") return textResponse("", 204);
+  if (request.method === "OPTIONS") return textResponse("", 204, { allow: "GET, HEAD, POST" });
   if (path === "/health") return jsonResponse({ ok: true, service: "stockchoose-bun-api", version: "0.1.0", startedAt });
 
   if (path.startsWith("/aktools")) return jsonResponse(await aktoolsPayload(normalizeAktoolsEndpoint(path), url.searchParams));
@@ -84,8 +113,12 @@ async function route(request: Request) {
   if (path === "/api/integration/aktools/rows" && request.method === "POST") return await handleIntegrationRows(request);
   if (path === "/api/integration/asharehub/rows" && request.method === "POST") {
     const body = await requestJson<any>(request);
+    await assertSafeOutboundUrl(String(body.baseUrl ?? ""));
     return jsonResponse(await fetchAsharehubRows(String(body.baseUrl ?? ""), String(body.endpoint ?? ""), body.params ?? {}, String(body.apiToken ?? body.api_token ?? "")));
   }
+
+  const agentResponse = await handleAgentRoute(request, url);
+  if (agentResponse) return agentResponse;
 
   if (path === "/api/market/ashare/spot") return jsonResponse(await fetchEastmoneySpotRows());
   if (path === "/api/data/stock-universe") {
@@ -121,12 +154,12 @@ async function route(request: Request) {
   if (path === "/api/market/tencent/ashare/quotes") return jsonResponse(await fetchTencentAshareQuoteRows());
   if (path === "/api/market/tencent/kline-points" || path.match(/^\/api\/market\/stock\/[^/]+\/kline-points$/)) {
     const symbol = url.searchParams.get("symbol") ?? path.split("/").at(4) ?? "sh600519";
-    const result = await fetchKlinePointsWithFallback(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90));
+    const result = await fetchKlinePointsWithFallback(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90), url.searchParams.get("adjustment") ?? "qfq");
     return jsonResponse(result.points, 200, { "x-stockchoose-market-source": result.source });
   }
   if (path === "/api/market/tencent/kline" || path.match(/^\/api\/market\/stock\/[^/]+\/kline$/)) {
     const symbol = url.searchParams.get("symbol") ?? path.split("/").at(4) ?? "sh600519";
-    const result = await fetchKlinePointsWithFallback(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90));
+    const result = await fetchKlinePointsWithFallback(symbol, url.searchParams.get("period") ?? "day", Number(url.searchParams.get("limit") ?? 90), url.searchParams.get("adjustment") ?? "qfq");
     return jsonResponse(result.points, 200, { "x-stockchoose-market-source": result.source });
   }
   if (path === "/api/market/technical-indicators") return jsonResponse(await fetchTechnicalIndicators(String(url.searchParams.get("codes") ?? "").split(/[,;\s]+/), Number(url.searchParams.get("limit") ?? 120)));
@@ -275,6 +308,7 @@ Bun.serve({
   hostname: "127.0.0.1",
   port: port(),
   idleTimeout: 180,
+  maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
   async fetch(request) {
     try {
       return await route(request);

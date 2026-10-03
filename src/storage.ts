@@ -2,28 +2,91 @@ import type { BacktestConfig, Factor, StockPool, StrategyConfig } from "./types"
 
 const key = (name: string) => `stockchoose:${name}`;
 
+function desktopStorage() {
+  return typeof window !== "undefined" ? window.stockChooseDesktop?.storage : undefined;
+}
+
+function reportStorageFailure(name: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "unknown storage error");
+  console.warn("StockChoose storage failed for " + name + ": " + message);
+  if (typeof window !== "undefined" && typeof CustomEvent === "function") {
+    window.dispatchEvent(new CustomEvent("stockchoose:storage-error", { detail: { name, message } }));
+  }
+}
+
 export function loadLocal<T>(name: string, fallback: T): T {
+  const bridge = desktopStorage();
+  if (bridge) {
+    try {
+      const stored = bridge.load<T>(name);
+      if (!stored.ok) {
+        reportStorageFailure(name, stored.error);
+        return fallback;
+      }
+      if (stored.found) return stored.value as T;
+    } catch (error) {
+      reportStorageFailure(name, error);
+      return fallback;
+    }
+  }
+
   try {
     const raw = localStorage.getItem(key(name));
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
+    if (!raw) return fallback;
+    const value = JSON.parse(raw) as T;
+    if (bridge) {
+      const migrated = bridge.save(name, value);
+      if (migrated.ok) localStorage.removeItem(key(name));
+      else reportStorageFailure(name, migrated.error);
+    }
+    return value;
+  } catch (error) {
+    reportStorageFailure(name, error);
     return fallback;
   }
 }
 
 export function saveLocal<T>(name: string, value: T) {
+  const bridge = desktopStorage();
+  if (bridge) {
+    try {
+      const stored = bridge.save(name, value);
+      if (!stored.ok) throw new Error(stored.error || "desktop storage rejected the value");
+      localStorage.removeItem(key(name));
+      return true;
+    } catch (error) {
+      reportStorageFailure(name, error);
+      return false;
+    }
+  }
+
   try {
     localStorage.setItem(key(name), JSON.stringify(value));
-  } catch {
-    // Full-market quote snapshots can exceed browser storage quota; keep the current session usable.
+    return true;
+  } catch (error) {
+    reportStorageFailure(name, error);
+    return false;
   }
 }
 
 export function removeLocal(name: string) {
+  const bridge = desktopStorage();
+  if (bridge) {
+    try {
+      const removed = bridge.remove(name);
+      if (!removed.ok) throw new Error(removed.error || "desktop storage rejected the removal");
+    } catch (error) {
+      reportStorageFailure(name, error);
+      return false;
+    }
+  }
+
   try {
     localStorage.removeItem(key(name));
-  } catch {
-    // Ignore storage cleanup failures; the app should still render with empty runtime state.
+    return true;
+  } catch (error) {
+    reportStorageFailure(name, error);
+    return false;
   }
 }
 
@@ -61,11 +124,8 @@ export function createDefaultStrategy(): StrategyConfig {
     filterSuspended: false,
     excludeDelisted: false,
     filters: [],
-    ranks: [
-      { id: uid("rank"), factorKey: "qualityScore", order: "desc", range: "全部", weight: 50, enabled: true },
-      { id: uid("rank"), factorKey: "pe", order: "asc", range: "全部", weight: 25, enabled: true },
-      { id: uid("rank"), factorKey: "momentum60", order: "desc", range: "全部", weight: 25, enabled: true }
-    ],
+    // 排名条件由用户主动选择指标后生成，不预置任何排名参数。
+    ranks: [],
     trading: {
       mode: "模型I",
       period: 5,

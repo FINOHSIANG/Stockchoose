@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test("stock strategy workstation core flows", async ({ page }) => {
+  const freshNewsTime = new Date(Date.now() - 60_000).toISOString();
   const financialReportPayloads: Record<string, unknown[]> = {
     stock_yjbb_em: [
       {
@@ -320,7 +321,7 @@ test("stock strategy workstation core flows", async ({ page }) => {
           {
             url: "https://mock.news/maotai-risk",
             title: "贵州茅台、五粮液高端白酒批价波动，渠道库存风险警示",
-            seendate: "2026-05-30T11:00:00Z",
+            seendate: freshNewsTime,
             domain: "mock.news"
           }
         ]
@@ -361,8 +362,8 @@ test("stock strategy workstation core flows", async ({ page }) => {
             sentiment: "利空",
             importance: "头条",
             status: "unread",
-            publishedAt: "2026-05-30T11:00:00Z",
-            fetchedAt: "2026-05-30T11:00:00Z",
+            publishedAt: freshNewsTime,
+            fetchedAt: freshNewsTime,
             url: "https://mock.news/maotai-risk",
             imageUrl: "",
             author: "mock.news",
@@ -379,6 +380,39 @@ test("stock strategy workstation core flows", async ({ page }) => {
           }
         ],
         stats: { mode: "fast", scannedStocks: 2, requestCount: 1, returnedRows: 1, validArticles: 1 }
+      })
+    });
+  });
+  await page.route(/\/api\/sentiment\/events$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
+      body: JSON.stringify({
+        engine: "bun",
+        events: [
+          {
+            id: "mock-sentiment-event",
+            title: "高端白酒批价波动",
+            summary: "渠道库存风险警示",
+            category: "风险负面",
+            direction: "利空",
+            horizon: "短期",
+            severity: "特别重大",
+            occurredAt: freshNewsTime,
+            source: "mock.news",
+            sourceWeight: 80,
+            impact: 92,
+            relevance: 90,
+            confidence: 88,
+            novelty: 76,
+            persistence: 70,
+            riskPenalty: 8,
+            industries: ["食品饮料"],
+            keywords: ["白酒", "渠道库存"],
+            linkedCodes: ["600519", "000858"]
+          }
+        ]
       })
     });
   });
@@ -437,6 +471,121 @@ test("stock strategy workstation core flows", async ({ page }) => {
           riskEvents: [event],
           validationPoints: ["Bun sentiment analysis smoke mock"]
         }
+      })
+    });
+  });
+  await page.route(/\/api\/trade\/assets\/sync$/, async (route) => {
+    const requestBody = route.request().postDataJSON() as {
+      asset?: {
+        netValue?: number;
+        holdingValue?: number;
+        strategyCash?: number;
+        outsideAsset?: number;
+      };
+    };
+    const asset = requestBody.asset ?? {};
+    const holdingValue = Number(asset.holdingValue ?? 0);
+    const strategyCash = Number(asset.strategyCash ?? 0);
+    const outsideAsset = Number(asset.outsideAsset ?? 0);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
+      body: JSON.stringify({
+        ok: true,
+        asset: {
+          netValue: Number(asset.netValue ?? 1),
+          holdingValue,
+          strategyCash,
+          outsideAsset,
+          lastSyncedAt: new Date().toISOString()
+        },
+        strategyAsset: holdingValue + strategyCash,
+        accountAsset: holdingValue + strategyCash + outsideAsset,
+        message: "Bun smoke mock 已完成资产同步"
+      })
+    });
+  });
+  await page.route(/\/api\/trade\/plan$/, async (route) => {
+    const requestBody = route.request().postDataJSON() as {
+      strategy?: { id?: string; name?: string };
+      mode?: "manual" | "auto";
+      accountId?: string;
+    };
+    const generatedAt = new Date().toISOString();
+    const plan = {
+      id: `mock-plan-${requestBody.mode ?? "manual"}`,
+      strategyId: requestBody.strategy?.id ?? "mock-strategy",
+      strategyName: requestBody.strategy?.name ?? "交易计划",
+      accountId: requestBody.accountId ?? "PAPER-0001",
+      mode: requestBody.mode ?? "manual",
+      generatedAt,
+      status: "draft",
+      orders: [
+        {
+          clientOrderId: "mock-order-600519",
+          code: "600519",
+          name: "贵州茅台",
+          side: "买入",
+          shares: 100,
+          price: 1688.88,
+          amount: 168888,
+          status: "待确认"
+        }
+      ]
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
+      body: JSON.stringify({
+        plan,
+        clientText: "600519\t买入\t1688.880\t100",
+        csv: "clientOrderId,code,name,side,price,shares,amount,status\nmock-order-600519,600519,贵州茅台,买入,1688.88,100,168888,待确认"
+      })
+    });
+  });
+  await page.route(/\/api\/trade\/export$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
+      body: JSON.stringify({
+        clientText: "600519\t买入\t1688.880\t100",
+        csv: "clientOrderId,code,name,side,price,shares,amount,status\nmock-order-600519,600519,贵州茅台,买入,1688.88,100,168888,待确认"
+      })
+    });
+  });
+  await page.route(/\/api\/trade\/paper\/submit$/, async (route) => {
+    const requestBody = route.request().postDataJSON() as {
+      state?: { plans?: unknown[]; fills?: unknown[] };
+      plan?: Record<string, unknown> & { orders?: Array<Record<string, unknown>> };
+    };
+    const plan = requestBody.plan ?? {};
+    const filledAt = new Date().toISOString();
+    const filledOrders = (plan.orders ?? []).map((order) => ({ ...order, status: "已成交" }));
+    const filledPlan = { ...plan, status: "filled", orders: filledOrders };
+    const fills = filledOrders.map((order, index) => ({
+      id: `mock-fill-${index}`,
+      planId: plan.id,
+      strategyId: plan.strategyId,
+      strategyName: plan.strategyName,
+      clientOrderId: order.clientOrderId,
+      code: order.code,
+      name: order.name,
+      side: order.side,
+      shares: order.shares,
+      price: order.price,
+      amount: order.amount,
+      filledAt
+    }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "access-control-allow-origin": "*", "x-stockchoose-data-engine": "bun" },
+      body: JSON.stringify({
+        plans: [...(requestBody.state?.plans ?? []), filledPlan],
+        fills: [...(requestBody.state?.fills ?? []), ...fills]
       })
     });
   });
@@ -721,12 +870,18 @@ test("stock strategy workstation core flows", async ({ page }) => {
   await expect(page.getByText("草稿").first()).toBeVisible();
   await page.locator(".strategy-title").getByRole("button", { name: "新增策略" }).click();
   await expect(page.getByText("草稿").first()).toBeVisible();
+  await expect(page.getByText(/0筛选 \/ 0排名/).first()).toBeVisible();
   await page.locator(".strategy-title").getByRole("button", { name: "保存" }).click();
   await expect(page.getByText("已保存").first()).toBeVisible();
 
   await page.getByRole("button", { name: "财务指标" }).click();
   await page.getByRole("button", { name: /市盈率PE/ }).click();
   await expect(page.getByText("市盈率PE").last()).toBeVisible();
+  await page.getByRole("button", { name: "排名条件", exact: true }).click();
+  await page.locator(".factor-detail-grid button").first().click();
+  await page.getByRole("button", { name: "净资产收益率ROE", exact: true }).click();
+  await page.locator(".factor-detail-grid button").first().click();
+  await expect(page.locator(".rank-row")).toHaveCount(2);
 
   const backtestPanel = page.locator(".backtest-panel");
   await backtestPanel.getByRole("button", { name: "开始规则模拟", exact: true }).click();

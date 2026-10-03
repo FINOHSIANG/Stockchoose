@@ -4,7 +4,7 @@ const require = createRequire(import.meta.url);
 if (!process.env.STOCKCHOOSE_BUN_API_URL && !process.env.STOCKCHOOSE_BUN_PORT) {
   process.env.STOCKCHOOSE_BUN_PORT = String(19000 + Math.floor(Math.random() * 1000));
 }
-const { ensureBunApiRunning, bunApiBaseUrl, stopBunApiSidecar } = require("../electron/bun-api.cjs");
+const { ensureBunApiRunning, bunApiBaseUrl, bunApiRequestHeaders, stopBunApiSidecar } = require("../electron/bun-api.cjs");
 
 function parseArgs(argv) {
   const args = { json: false, keepSidecar: false, timeoutMs: 30000 };
@@ -197,7 +197,10 @@ function hasRealValuationMetrics(stock) {
 }
 
 async function readJsonResponse(baseUrl, path, options, timeoutMs) {
-  const response = await fetchWithTimeout(baseUrl + path, options, timeoutMs);
+  const response = await fetchWithTimeout(baseUrl + path, {
+    ...options,
+    headers: bunApiRequestHeaders(options?.headers ?? {})
+  }, timeoutMs);
   const text = await response.text();
   let payload;
   try {
@@ -254,7 +257,7 @@ async function runProbeOnce(baseUrl, item, timeoutMs) {
   if (item.custom === "realValuationPipeline") return await runRealValuationPipelineProbe(baseUrl, timeoutMs);
   const response = await fetchWithTimeout(baseUrl + item.path, {
     method: item.method || "GET",
-    headers: item.body ? { "content-type": "application/json" } : undefined,
+    headers: bunApiRequestHeaders(item.body ? { "content-type": "application/json" } : {}),
     body: item.body ? JSON.stringify(item.body) : undefined
   }, timeoutMs);
   const text = await response.text();

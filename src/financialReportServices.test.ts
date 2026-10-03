@@ -22,6 +22,12 @@ function bunAnnualReport(sourceCsv?: string): AnnualFinancialReport {
     sourceFileName: "600519-贵州茅台-2025-real-annual-report-source.csv",
     sourceFileType: "CSV",
     sourceNote: "由 Bun 财报接口生成，不倒推历史年度。",
+    details: {
+      performance: [{ key: "revenue", label: "营业收入", value: 1275, unit: "亿元" }],
+      income: [{ key: "netProfit", label: "净利润", value: 747, unit: "亿元" }],
+      balance: [{ key: "totalAssets", label: "资产总计", value: 2550, unit: "亿元" }],
+      cashFlow: [{ key: "operatingNetCash", label: "经营活动现金流量净额", value: 650, unit: "亿元" }]
+    },
     sourceCsv,
     metrics: {
       revenue: 1275,

@@ -1,10 +1,15 @@
 import {
   defaultScheduleConfig,
+  fetchSyncSnapshot,
   fetchSyncStatus,
+  isSyncSourceKey,
   scheduleSourceLabels,
   saveSyncConfig as saveScheduleSyncConfig,
   triggerManualSync,
   type ScheduleConfig,
+  type SyncRunRecord,
+  type SyncSnapshot,
+  type SyncSourceKey,
   type SyncStatus
 } from "./syncSchedulerService";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -63,6 +68,7 @@ import {
 } from "./strategyEngine";
 import {
   ALL_INDUSTRIES,
+  PRIMARY_INDUSTRIES,
   compactIndustryTexts,
   inferPrimaryIndustry,
   inferSecondaryIndustry,
@@ -82,6 +88,7 @@ import {
 } from "./integrationServices";
 import {
   defaultOpenSourceDataSummary,
+  hydrateOpenSourceSyncSnapshots,
   syncOpenSourceFinancialReports,
   syncOpenSourceMarketData,
   type OpenSourceDataSummary
@@ -168,8 +175,11 @@ import {
 } from "./newsPageServices";
 import {
   buildAnnualFinancialReportsBunFirst,
+  formatAnnualMetric,
   buildFinancialReportSourceDataUrl,
   type AnnualFinancialReport,
+  type AnnualFinancialReportDetailItem,
+  type AnnualFinancialReportDetailSectionKey,
   type AnnualFinancialReportYear
 } from "./financialReportServices";
 import {
@@ -188,8 +198,10 @@ import {
 import {
   fetchStockProfileAutoMatch,
   fetchStockKlineHistory,
+  syncBunStockUniverse,
   syncTencentAllAshareMarketData,
   syncTencentRealMarketData,
+  type StockKlineAdjustment,
   type StockKlineHistoryResult,
   type StockKlinePeriod,
   type StockKlinePoint,
@@ -204,6 +216,10 @@ import {
   stockCodeForStorage,
   stockMatchesCodeQuery
 } from "./stockIdentity";
+import { findStockSuggestions } from "./stockSearch";
+import { AgentDock } from "./agent/AgentDock";
+import { persistAgentDockExpanded, readInitialAgentDockExpanded } from "./agent/agentDockState";
+import type { AgentWorkspaceAction } from "./agent/agentTypes";
 import {
   computeMarketTemperature,
   computeIndustryMomentum,
@@ -441,6 +457,11 @@ const stockKlinePeriodOptions: Array<{ value: StockKlinePeriod; label: string }>
   { value: "day", label: "日K" },
   { value: "week", label: "周K" },
   { value: "month", label: "月K" }
+];
+
+const stockKlineAdjustmentOptions: Array<{ value: StockKlineAdjustment; label: string }> = [
+  { value: "qfq", label: "前复权" },
+  { value: "none", label: "不复权" }
 ];
 
 const valuationSortLabels: Record<ValuationSortKey, string> = {
@@ -1017,22 +1038,34 @@ function formatKlinePointDate(date: string) {
 
 function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const isSinglePoint = points.length === 1;
+  const latestPoint = points[points.length - 1];
   const width = 780;
-  const height = 320;
+  const height = isSinglePoint ? 270 : 320;
   const left = 46;
   const right = 18;
   const top = 18;
-  const priceHeight = 210;
-  const volumeTop = 244;
-  const volumeHeight = 48;
+  const priceHeight = isSinglePoint ? 164 : 210;
+  const volumeTop = isSinglePoint ? 202 : 244;
+  const volumeHeight = isSinglePoint ? 38 : 48;
   const plotWidth = width - left - right;
   const plotRight = width - right;
-  const priceMax = Math.max(...points.map((point) => point.high));
-  const priceMin = Math.min(...points.map((point) => point.low));
-  const priceRange = Math.max(priceMax - priceMin, 0.01);
+  const rawPriceMax = Math.max(...points.map((point) => point.high));
+  const rawPriceMin = Math.min(...points.map((point) => point.low));
+  const rawPriceRange = Math.max(rawPriceMax - rawPriceMin, 0);
+  const pricePadding = points.length === 1 || rawPriceRange === 0
+    ? rawPriceRange > 0
+      ? Math.max(rawPriceRange * 0.12, 0.01)
+      : Math.max(Math.abs(rawPriceMax) * 0.01, 0.02)
+    : 0;
+  const priceMax = rawPriceMax + pricePadding;
+  const priceMin = rawPriceMin - pricePadding;
+  const priceRange = Math.max(priceMax - priceMin, 0.02);
   const volumeMax = Math.max(...points.map((point) => point.volume), 1);
   const step = plotWidth / points.length;
-  const candleWidth = Math.max(4, step * 0.56);
+  const candleWidth = Math.min(28, Math.max(4, step * 0.56));
+  const showMa5 = points.length >= 5;
+  const showMa20 = points.length >= 20;
   const ma5 = movingAverage(points, 5);
   const ma20 = movingAverage(points, 20);
   const yPrice = (value: number) => top + ((priceMax - value) / priceRange) * priceHeight;
@@ -1051,12 +1084,25 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
   const tooltipHeight = 104;
   const tooltipX = hoveredX > plotRight - tooltipWidth - 12 ? hoveredX - tooltipWidth - 12 : hoveredX + 12;
   const tooltipY = hoveredPoint ? Math.max(top + 4, Math.min(volumeTop - tooltipHeight - 8, yPrice(hoveredPoint.high) - 18)) : top;
-  const closeChange = hoveredPoint && hoveredPoint.open ? ((hoveredPoint.close - hoveredPoint.open) / hoveredPoint.open) * 100 : 0;
+  const closeChange = hoveredPoint && hoveredPoint.open ? ((hoveredPoint.close - hoveredPoint.open) / hoveredPoint.open) * 100 : null;
+  const axisIndexes = Array.from(new Set([0, Math.floor((points.length - 1) / 2), points.length - 1]));
+  const singlePointChange = isSinglePoint && latestPoint.open ? ((latestPoint.close - latestPoint.open) / latestPoint.open) * 100 : null;
+  const singlePointAmplitude = isSinglePoint && latestPoint.open ? ((latestPoint.high - latestPoint.low) / latestPoint.open) * 100 : null;
 
   return (
     <>
+      {isSinglePoint ? (
+        <div className="stock-kline-single-summary" aria-label="单日行情摘要">
+          <div><span>开盘</span><strong>{latestPoint.open.toFixed(2)}</strong></div>
+          <div><span>最高</span><strong>{latestPoint.high.toFixed(2)}</strong></div>
+          <div><span>最低</span><strong>{latestPoint.low.toFixed(2)}</strong></div>
+          <div><span>收盘</span><strong>{latestPoint.close.toFixed(2)}</strong></div>
+          <div><span>日内涨跌</span><strong className={singlePointChange !== null && singlePointChange < 0 ? "negative" : "positive"}>{singlePointChange === null ? "—" : pct(singlePointChange)}</strong></div>
+          <div><span>振幅</span><strong>{singlePointAmplitude === null ? "—" : `${singlePointAmplitude.toFixed(2)}%`}</strong></div>
+        </div>
+      ) : null}
       <div className="stock-kline-chart-wrap">
-        <svg className="stock-kline-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="股票真实K线图" onMouseLeave={() => setHoveredIndex(null)}>
+        <svg className={`stock-kline-chart${isSinglePoint ? " single-point" : ""}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="股票真实K线图" onMouseLeave={() => setHoveredIndex(null)}>
           {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
             const y = top + ratio * priceHeight;
             const price = priceMax - ratio * priceRange;
@@ -1067,8 +1113,8 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
               </g>
             );
           })}
-          <path d={maPath(ma5)} className="kline-ma ma5" />
-          <path d={maPath(ma20)} className="kline-ma ma20" />
+          {showMa5 ? <path d={maPath(ma5)} className="kline-ma ma5" /> : null}
+          {showMa20 ? <path d={maPath(ma20)} className="kline-ma ma20" /> : null}
           {points.map((point, index) => {
             const rising = point.close >= point.open;
             const x = xPoint(index);
@@ -1088,7 +1134,7 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
             );
           })}
           <line x1={left} y1={volumeTop} x2={plotRight} y2={volumeTop} className="kline-grid strong" />
-          {[0, Math.floor(points.length / 2), points.length - 1].map((index) => (
+          {axisIndexes.map((index) => (
             <text key={index} x={xPoint(index)} y={height - 8} textAnchor="middle" className="kline-axis">{formatKlineAxisDate(points[index].date)}</text>
           ))}
           {points.map((point, index) => {
@@ -1119,8 +1165,8 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
               <text x={tooltipX + 92} y={tooltipY + 39} className="kline-tooltip-text">收盘 {hoveredPoint.close.toFixed(2)}</text>
               <text x={tooltipX + 10} y={tooltipY + 59} className="kline-tooltip-text">最高 {hoveredPoint.high.toFixed(2)}</text>
               <text x={tooltipX + 92} y={tooltipY + 59} className="kline-tooltip-text">最低 {hoveredPoint.low.toFixed(2)}</text>
-              <text x={tooltipX + 10} y={tooltipY + 79} className={closeChange >= 0 ? "kline-tooltip-change positive" : "kline-tooltip-change negative"}>
-                涨跌 {pct(closeChange)}
+              <text x={tooltipX + 10} y={tooltipY + 79} className={closeChange === null ? "kline-tooltip-change neutral" : closeChange >= 0 ? "kline-tooltip-change positive" : "kline-tooltip-change negative"}>
+                涨跌 {closeChange === null ? "—" : pct(closeChange)}
               </text>
               <text x={tooltipX + 10} y={tooltipY + 96} className="kline-tooltip-text">成交量 {hoveredPoint.volume.toFixed(2)} 万手</text>
             </g>
@@ -1128,11 +1174,12 @@ function StockKlineChart({ points }: { points: StockKlinePoint[] }) {
         </svg>
       </div>
       <div className="stock-kline-legend">
-        <span className="ma5">MA5</span>
-        <span className="ma20">MA20</span>
-        <span>最高 {points[points.length - 1].high.toFixed(2)}</span>
-        <span>最低 {points[points.length - 1].low.toFixed(2)}</span>
-        <span>成交量 {points[points.length - 1].volume.toFixed(2)} 万手</span>
+        {showMa5 ? <span className="ma5">MA5</span> : null}
+        {showMa20 ? <span className="ma20">MA20</span> : null}
+        <span className="stock-kline-data-count">{points.length === 1 ? "单日数据" : `${points.length} 个交易日`}</span>
+        {!isSinglePoint ? <span>最高 {latestPoint.high.toFixed(2)}</span> : null}
+        {!isSinglePoint ? <span>最低 {latestPoint.low.toFixed(2)}</span> : null}
+        <span>成交量 {latestPoint.volume.toFixed(2)} 万手</span>
       </div>
     </>
   );
@@ -1142,43 +1189,61 @@ function StockKlinePanel({
   result,
   loading,
   period,
-  onPeriodChange
+  adjustment,
+  onPeriodChange,
+  onAdjustmentChange
 }: {
   result: StockKlineHistoryResult | null;
   loading: boolean;
   period: StockKlinePeriod;
+  adjustment: StockKlineAdjustment;
   onPeriodChange: (period: StockKlinePeriod) => void;
+  onAdjustmentChange: (adjustment: StockKlineAdjustment) => void;
 }) {
   const points = result?.points ?? [];
   const latest = points[points.length - 1];
-  const previous = points[points.length - 2] ?? latest;
-  const latestChange = latest && previous?.close ? ((latest.close - previous.close) / previous.close) * 100 : 0;
+  const previous = points[points.length - 2];
+  const latestChange = latest && previous?.close ? ((latest.close - previous.close) / previous.close) * 100 : null;
 
   return (
     <div className="stock-kline-panel">
       <div className="stock-kline-head">
         <div>
           <h4>K线走势</h4>
-          <span>真实历史行情，按股票交易口径切换日K、周K、月K；不使用模拟走势。</span>
+          <span>真实历史行情，可切换日K、周K、月K及前复权、不复权；不使用模拟走势。</span>
         </div>
         <div className="stock-kline-actions">
-          <div className="stock-kline-periods" role="tablist" aria-label="K线周期">
-            {stockKlinePeriodOptions.map((option) => (
-              <button
-                key={option.value}
-                className={period === option.value ? "active" : ""}
-                onClick={() => onPeriodChange(option.value)}
-                role="tab"
-                aria-selected={period === option.value}
-              >
-                {option.label}
-              </button>
-            ))}
+          <div className="stock-kline-controls">
+            <div className="stock-kline-periods" role="tablist" aria-label="K线周期">
+              {stockKlinePeriodOptions.map((option) => (
+                <button
+                  key={option.value}
+                  className={period === option.value ? "active" : ""}
+                  onClick={() => onPeriodChange(option.value)}
+                  role="tab"
+                  aria-selected={period === option.value}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className="stock-kline-adjustments" role="group" aria-label="K线复权方式">
+              {stockKlineAdjustmentOptions.map((option) => (
+                <button
+                  key={option.value}
+                  className={adjustment === option.value ? "active" : ""}
+                  onClick={() => onAdjustmentChange(option.value)}
+                  aria-pressed={adjustment === option.value}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           </div>
           {latest ? (
             <div className="stock-kline-latest">
               <strong>{latest.close.toFixed(2)}</strong>
-              <em className={latestChange >= 0 ? "positive" : "negative"}>{pct(latestChange)}</em>
+              <em className={latestChange === null ? "neutral" : latestChange >= 0 ? "positive" : "negative"}>{latestChange === null ? "单日" : pct(latestChange)}</em>
             </div>
           ) : null}
         </div>
@@ -1226,16 +1291,16 @@ function StockInfoDetailGrid({
 
 function buildAnnualReportStatementItems(report: AnnualFinancialReport) {
   return [
-    { label: "营业收入", value: `${round(report.metrics.revenue, 2)} 亿` },
-    { label: "归母净利润", value: `${round(report.metrics.netProfit, 2)} 亿` },
-    { label: "经营现金流", value: `${round(report.metrics.operatingCashflow, 2)} 亿` },
-    { label: "总资产", value: `${round(report.metrics.totalAssets, 2)} 亿` },
-    { label: "总负债", value: `${round(report.metrics.totalLiabilities, 2)} 亿` },
-    { label: "存货", value: `${round(report.metrics.inventory, 2)} 亿` },
-    { label: "应收账款", value: `${round(report.metrics.receivables, 2)} 亿` },
-    { label: "每股收益 EPS", value: `${round(report.metrics.eps, 2)} 元` },
-    { label: "每股净资产 BPS", value: `${round(report.metrics.bps, 2)} 元` },
-    { label: "员工人数", value: `${round(report.metrics.employeeCount, 0)} 人` },
+    { label: "营业收入", value: formatAnnualMetric(report.metrics.revenue, " 亿") },
+    { label: "归母净利润", value: formatAnnualMetric(report.metrics.netProfit, " 亿") },
+    { label: "经营现金流", value: formatAnnualMetric(report.metrics.operatingCashflow, " 亿") },
+    { label: "总资产", value: formatAnnualMetric(report.metrics.totalAssets, " 亿") },
+    { label: "总负债", value: formatAnnualMetric(report.metrics.totalLiabilities, " 亿") },
+    { label: "存货", value: formatAnnualMetric(report.metrics.inventory, " 亿") },
+    { label: "应收账款", value: formatAnnualMetric(report.metrics.receivables, " 亿") },
+    { label: "每股收益 EPS", value: formatAnnualMetric(report.metrics.eps, " 元") },
+    { label: "每股净资产 BPS", value: formatAnnualMetric(report.metrics.bps, " 元") },
+    { label: "员工人数", value: formatAnnualMetric(report.metrics.employeeCount, " 人", 0) },
     { label: "报告期", value: report.periodEnd },
     { label: "审计意见", value: report.auditOpinion }
   ];
@@ -1243,30 +1308,119 @@ function buildAnnualReportStatementItems(report: AnnualFinancialReport) {
 
 function buildAnnualReportRatioItems(report: AnnualFinancialReport) {
   return [
-    { label: "毛利率", value: `${round(report.metrics.grossMargin, 2)}%` },
-    { label: "净利率", value: `${round(report.metrics.netMargin, 2)}%` },
-    { label: "ROE", value: `${round(report.metrics.roe, 2)}%` },
-    { label: "ROA", value: `${round(report.metrics.roa, 2)}%` },
-    { label: "营收增长", value: `${round(report.metrics.revenueGrowth, 2)}%` },
-    { label: "净利增长", value: `${round(report.metrics.profitGrowth, 2)}%` },
-    { label: "资产负债率", value: `${round(report.metrics.debtRatio, 2)}%` },
-    { label: "流动比率", value: `${round(report.metrics.currentRatio, 2)}x` },
-    { label: "总资产周转率", value: `${round(report.metrics.assetTurnover, 2)}x` },
-    { label: "股息率", value: `${round(report.metrics.dividendYield, 2)}%` },
-    { label: "现金流/净利润", value: `${round(report.metrics.cashProfitRatio, 2)}%` },
-    { label: "应收/收入", value: `${round(report.metrics.receivableRevenueRatio, 2)}%` }
+    { label: "毛利率", value: formatAnnualMetric(report.metrics.grossMargin, "%") },
+    { label: "净利率", value: formatAnnualMetric(report.metrics.netMargin, "%") },
+    { label: "ROE", value: formatAnnualMetric(report.metrics.roe, "%") },
+    { label: "ROA", value: formatAnnualMetric(report.metrics.roa, "%") },
+    { label: "营收增长", value: formatAnnualMetric(report.metrics.revenueGrowth, "%") },
+    { label: "净利增长", value: formatAnnualMetric(report.metrics.profitGrowth, "%") },
+    { label: "资产负债率", value: formatAnnualMetric(report.metrics.debtRatio, "%") },
+    { label: "流动比率", value: formatAnnualMetric(report.metrics.currentRatio, "x") },
+    { label: "总资产周转率", value: formatAnnualMetric(report.metrics.assetTurnover, "x") },
+    { label: "股息率", value: formatAnnualMetric(report.metrics.dividendYield, "%") },
+    { label: "现金流/净利润", value: formatAnnualMetric(report.metrics.cashProfitRatio, "%") },
+    { label: "应收/收入", value: formatAnnualMetric(report.metrics.receivableRevenueRatio, "%") }
   ];
+}
+
+const annualReportDetailSections: Array<{ key: AnnualFinancialReportDetailSectionKey; label: string; description: string }> = [
+  { key: "performance", label: "业绩摘要", description: "核心业绩、每股指标与同比变化" },
+  { key: "income", label: "利润表", description: "收入、成本、期间费用与利润构成" },
+  { key: "balance", label: "资产负债表", description: "资产、负债与股东权益构成" },
+  { key: "cashFlow", label: "现金流量表", description: "经营、投资与筹资活动现金流" }
+];
+
+function formatAnnualReportDetailValue(item: AnnualFinancialReportDetailItem) {
+  return formatAnnualMetric(item.value, ` ${item.unit}`, item.unit === "人" ? 0 : 2);
+}
+
+function AnnualFinancialReportDetailModal({ report, onClose }: { report: AnnualFinancialReport; onClose: () => void }) {
+  const [activeSection, setActiveSection] = useState<AnnualFinancialReportDetailSectionKey>("performance");
+  const section = annualReportDetailSections.find((item) => item.key === activeSection) ?? annualReportDetailSections[0];
+  const items = report.details?.[activeSection] ?? [];
+
+  return (
+    <Modal title={`详细财报 · ${report.name} ${report.year}`} onClose={onClose} wide>
+      <div className="annual-report-detail">
+        <div className="annual-report-detail-meta">
+          <div><span>股票</span><strong>{report.name} {report.code}</strong></div>
+          <div><span>报告期</span><strong>{report.periodEnd}</strong></div>
+          <div><span>披露日期</span><strong>{report.disclosureDate}</strong></div>
+          <div><span>数据来源</span><strong>{report.sourceProvider}</strong></div>
+        </div>
+
+        <div className="annual-report-detail-tabs" role="tablist" aria-label="详细财报类型">
+          {annualReportDetailSections.map((item) => (
+            <button
+              key={item.key}
+              className={item.key === activeSection ? "active" : ""}
+              onClick={() => setActiveSection(item.key)}
+              role="tab"
+              aria-selected={item.key === activeSection}
+              type="button"
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="annual-report-detail-heading">
+          <div>
+            <h4>{section.label}</h4>
+            <p>{section.description}，金额单位为人民币亿元。</p>
+          </div>
+          <span>{items.filter((item) => item.value !== undefined).length}/{items.length} 项已披露</span>
+        </div>
+
+        {items.length ? (
+          <div className="annual-report-detail-table-wrap">
+            <table className="annual-report-detail-table">
+              <thead>
+                <tr><th>财务项目</th><th>本期数值</th></tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item.key}>
+                    <td>{item.label}</td>
+                    <td className={item.value === undefined ? "missing" : ""}>{formatAnnualReportDetailValue(item)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="stock-related-info-empty">当前接口尚未返回该报表的明细字段，请稍后重新同步真实财报。</div>
+        )}
+
+        <div className="annual-report-detail-source">
+          <div>
+            <span>数据说明</span>
+            <strong>{report.auditOpinion}</strong>
+            <em>{report.sourceNote}</em>
+          </div>
+          {report.sourceCsv?.trim() ? (
+            <a className="btn" href={buildFinancialReportSourceDataUrl(report)} download={report.sourceFileName}>
+              <Download size={14} />
+              下载源文件
+            </a>
+          ) : null}
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
   const [reports, setReports] = useState<AnnualFinancialReport[]>([]);
   const [selectedYear, setSelectedYear] = useState<AnnualFinancialReportYear>("");
   const [annualReportStatus, setAnnualReportStatus] = useState("Bun 年报接口等待请求");
+  const [detailOpen, setDetailOpen] = useState(false);
 
   useEffect(
     function loadAnnualReportsFromBun() {
       let cancelled = false;
       setReports([]);
+      setDetailOpen(false);
       setAnnualReportStatus("正在通过 Bun 年报接口读取真实财报...");
       buildAnnualFinancialReportsBunFirst(stock)
         .then((nextReports) => {
@@ -1285,7 +1439,7 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
         cancelled = true;
       };
     },
-    [stock]
+    [stock.code, stock.exchange]
   );
 
   useEffect(
@@ -1340,6 +1494,10 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
               </button>
             ))}
           </div>
+          <button className="btn annual-report-detail-trigger" type="button" onClick={() => setDetailOpen(true)}>
+            <FileText size={14} />
+            查看详细财报
+          </button>
           {hasSourceCsv ? (
             <a className="btn annual-report-source-download" href={buildFinancialReportSourceDataUrl(selectedReport)} download={selectedReport.sourceFileName}>
               <Download size={14} />
@@ -1392,6 +1550,7 @@ function StockAnnualFinancialReportSection({ stock }: { stock: Stock }) {
           </div>
         ))}
       </div>
+      {detailOpen ? <AnnualFinancialReportDetailModal report={selectedReport} onClose={() => setDetailOpen(false)} /> : null}
     </div>
   );
 }
@@ -1793,6 +1952,7 @@ function StockInfoModal({
   const sourceStock = target.stock;
   const [liveStock, setLiveStock] = useState<Stock | null>(() => sourceStock ?? null);
   const [klinePeriod, setKlinePeriod] = useState<StockKlinePeriod>("day");
+  const [klineAdjustment, setKlineAdjustment] = useState<StockKlineAdjustment>("qfq");
   const [klineResult, setKlineResult] = useState<StockKlineHistoryResult | null>(null);
   const [klineLoading, setKlineLoading] = useState(false);
   const [stockInfoSyncStatus, setStockInfoSyncStatus] = useState("腾讯股票信息接口已就绪");
@@ -1861,7 +2021,7 @@ function StockInfoModal({
       setKlineLoading(true);
       setKlineResult(null);
 
-      fetchStockKlineHistory(stock, klinePeriod)
+      fetchStockKlineHistory(stock, klinePeriod, fetch, klineAdjustment)
         .then((result) => {
           if (active) setKlineResult(result);
         })
@@ -1883,7 +2043,7 @@ function StockInfoModal({
         active = false;
       };
     },
-    [stockCode, klinePeriod]
+    [stockCode, klinePeriod, klineAdjustment]
   );
 
   const refreshStockProfile = async () => {
@@ -1999,7 +2159,14 @@ function StockInfoModal({
           ))}
         </div>
 
-        <StockKlinePanel result={klineResult} loading={klineLoading} period={klinePeriod} onPeriodChange={setKlinePeriod} />
+        <StockKlinePanel
+          result={klineResult}
+          loading={klineLoading}
+          period={klinePeriod}
+          adjustment={klineAdjustment}
+          onPeriodChange={setKlinePeriod}
+          onAdjustmentChange={setKlineAdjustment}
+        />
 
         <StockOfficialInfoSection
           stock={stock}
@@ -2173,6 +2340,14 @@ function StrategyManagerSidebar({
   );
 }
 
+interface SnapshotHydrationOutcome {
+  ok: boolean;
+  partial: boolean;
+  unchanged: boolean;
+  details: string;
+  hydratedSources: SyncSourceKey[];
+}
+
 function App() {
   purgeLegacyLocalFakeData();
   const [strategy, setStrategy] = useState<StrategyConfig>(() => ensureStrategyUpdatedAt(loadLocal("draftStrategy", createDefaultStrategy())));
@@ -2184,6 +2359,7 @@ function App() {
   const [activeStep, setActiveStep] = useState<StepKey>("screen");
   const [topSection, setTopSection] = useState<MainSection>("dashboard");
   const [managerCollapsed, setManagerCollapsed] = useState(false);
+  const [agentExpanded, setAgentExpanded] = useState(readInitialAgentDockExpanded);
   const [activeFactorGroup, setActiveFactorGroup] = useState<FactorGroup>("行情");
   const [conditionTab, setConditionTab] = useState<"filter" | "rank">("filter");
   const [backtestTab, setBacktestTab] = useState<BacktestTab>("backtest");
@@ -2207,16 +2383,25 @@ function App() {
   );
   const [newsAnalysisModelStatus, setNewsAnalysisModelStatus] = useState("新闻分析模型未测试");
   const [stocks, setStocks] = useState<Stock[]>(() => ensureStockData(loadLocal("openSourceStocks", [])));
+  const stocksRef = useRef(stocks);
+  stocksRef.current = stocks;
   const [openSourceSummary, setOpenSourceSummary] = useState<OpenSourceDataSummary>(() => ({
     ...defaultOpenSourceDataSummary,
     stockCount: 0,
     ...loadLocal("openSourceDataSummary", {})
   }));
+  const openSourceSummaryRef = useRef(openSourceSummary);
+  openSourceSummaryRef.current = openSourceSummary;
 
   const [syncConfig, setSyncConfig] = useState<ScheduleConfig>(() => ({ ...defaultScheduleConfig }));
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
   const syncStatusRequestIdRef = useRef(0);
+  const snapshotHydrationInFlightRef = useRef<Promise<SnapshotHydrationOutcome> | null>(null);
+  const stockUniverseBootstrapRef = useRef<ReturnType<typeof syncBunStockUniverse> | null>(null);
+  const lastHydratedSnapshotSignatureRef = useRef("");
+  const observedSyncStartedAtRef = useRef<number | null>(null);
+  const lastObservedFullSyncRef = useRef<string | null>(null);
   const [valuationDataSource, setValuationDataSource] = useState<Exclude<ValuationDataSource, "akshare">>(() =>
     ensureValuationDataSource(loadLocal<ValuationDataSource>("valuationDataSource", "none"))
   );
@@ -2239,12 +2424,210 @@ function App() {
   const [poolDraft, setPoolDraft] = useState({ name: "我的股票池", codes: "600519,300750,002594,600036,600900" });
   const [customFactorDraft, setCustomFactorDraft] = useState({ name: "质量成长合成", formula: "qualityScore * 0.6 + revenueGrowth * 0.4 - pe * 0.2" });
 
+  useEffect(() => {
+    persistAgentDockExpanded(agentExpanded);
+  }, [agentExpanded]);
+
+  useEffect(() => {
+    const workspaceKeys = new Set([
+      "stockchoose:draftStrategy",
+      "stockchoose:savedStrategies",
+      "stockchoose:holdingStrategies",
+      "stockchoose:customPools",
+      "stockchoose:customFactors"
+    ]);
+    const reloadWorkspaceState = () => {
+      setStrategy(ensureStrategyUpdatedAt(loadLocal("draftStrategy", createDefaultStrategy())));
+      setSavedStrategies(loadLocal<StrategyConfig[]>("savedStrategies", []).map(ensureStrategyUpdatedAt));
+      setHoldingStrategies(loadLocal<StrategyConfig[]>("holdingStrategies", []).map(ensureStrategyUpdatedAt));
+      setCustomPools(loadLocal<StockPool[]>("customPools", []));
+      setCustomFactors(loadLocal<Factor[]>("customFactors", []));
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key && workspaceKeys.has(event.key)) reloadWorkspaceState();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "hidden") reloadWorkspaceState();
+    };
+    window.addEventListener("storage", handleStorage);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const cachedStocks = stocksRef.current;
+    const hasUsableCachedQuotes = cachedStocks.some((stock) =>
+      Number.isFinite(stock.metrics.price)
+      && stock.metrics.price > 0
+      && Number.isFinite(stock.metrics.marketCap)
+      && stock.metrics.marketCap > 0
+    );
+    const lastSyncTime = Date.parse(openSourceSummaryRef.current.lastSyncAt || "");
+    const cacheIsFresh = Number.isFinite(lastSyncTime) && Date.now() - lastSyncTime < 30 * 60 * 1000;
+    if (hasUsableCachedQuotes && cacheIsFresh) return;
+
+    let active = true;
+    setInfoSourceStatus(hasUsableCachedQuotes ? "本地行情已过期，正在后台刷新股票接口..." : "正在自动接入全市场股票行情...");
+    const task = stockUniverseBootstrapRef.current ?? syncBunStockUniverse(cachedStocks);
+    stockUniverseBootstrapRef.current = task;
+    void task.then((result) => {
+      if (!active) return;
+      if (!result.ok) {
+        const fallback = hasUsableCachedQuotes ? "；继续使用本地缓存" : "";
+        setInfoSourceStatus(`${result.message}：${result.details}${fallback}`);
+        return;
+      }
+
+      const nextSummary: OpenSourceDataSummary = {
+        ...openSourceSummaryRef.current,
+        provider: "Bun / Eastmoney",
+        lastSyncAt: result.checkedAt,
+        matchedRows: result.matchedRows,
+        sourceRows: result.sourceRows,
+        stockCount: result.stocks.length,
+        details: result.details
+      };
+      stocksRef.current = result.stocks;
+      openSourceSummaryRef.current = nextSummary;
+      setStocks(result.stocks);
+      setOpenSourceSummary(nextSummary);
+      setValuationDataSource("openSource");
+      setValuationRealDataStatus(result.details);
+      setInfoSourceStatus(`${result.message}：${result.details}`);
+      saveLocal("openSourceStocks", result.stocks);
+      saveLocal("openSourceDataSummary", nextSummary);
+      saveLocal<ValuationDataSource>("valuationDataSource", "openSource");
+    }).catch((error) => {
+      if (active) setInfoSourceStatus(`股票行情自动接入失败：${readableError(error)}`);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const readLatestSyncStatus = async (isActive: () => boolean = () => true) => {
     const requestId = ++syncStatusRequestIdRef.current;
     const next = await fetchSyncStatus();
     if (!isActive() || requestId !== syncStatusRequestIdRef.current) return null;
     setSyncStatus(next);
     return next;
+  };
+
+  const hydrateSuccessfulSyncSnapshots = async (runs: SyncRunRecord[]): Promise<SnapshotHydrationOutcome> => {
+    if (snapshotHydrationInFlightRef.current) return snapshotHydrationInFlightRef.current;
+
+    const task = (async (): Promise<SnapshotHydrationOutcome> => {
+      const successfulSources = Array.from(new Set(
+        runs.filter((run) => run.ok && isSyncSourceKey(run.source)).map((run) => run.source as SyncSourceKey)
+      ));
+      const failedRunCount = runs.filter((run) => !run.ok).length;
+      if (!successfulSources.length) {
+        return {
+          ok: false,
+          partial: failedRunCount > 0,
+          unchanged: false,
+          details: runs.length ? "本轮没有可加载的成功快照" : "本轮没有启用的数据源",
+          hydratedSources: []
+        };
+      }
+
+      const loaded = await Promise.allSettled(successfulSources.map(async (source) => ({
+        source,
+        snapshot: await fetchSyncSnapshot(source)
+      })));
+      const snapshots: Partial<Record<SyncSourceKey, SyncSnapshot<unknown>>> = {};
+      const loadErrors: string[] = [];
+      loaded.forEach((entry, index) => {
+        const source = successfulSources[index];
+        if (entry.status === "fulfilled") snapshots[source] = entry.value.snapshot;
+        else loadErrors.push(`${source}: ${readableError(entry.reason)}`);
+      });
+
+      const signature = Object.entries(snapshots)
+        .map(([source, snapshot]) => `${source}:${snapshot?.snapshotAt ?? ""}`)
+        .sort()
+        .join("|");
+      const partialBeforeHydration = failedRunCount > 0 || loadErrors.length > 0;
+      if (signature && signature === lastHydratedSnapshotSignatureRef.current) {
+        return {
+          ok: true,
+          partial: partialBeforeHydration,
+          unchanged: true,
+          details: partialBeforeHydration ? `快照已加载；部分任务未完成${loadErrors.length ? `：${loadErrors.join("；")}` : ""}` : "快照已是最新版本",
+          hydratedSources: Object.keys(snapshots).filter(isSyncSourceKey)
+        };
+      }
+
+      const hydration = hydrateOpenSourceSyncSnapshots(stocksRef.current, snapshots);
+      const partial = partialBeforeHydration || hydration.failedSources.length > 0;
+      const errorDetails = [
+        ...loadErrors,
+        ...hydration.failedSources.map(({ source, error }) => `${source}: ${error}`)
+      ];
+      if (!hydration.ok) {
+        return {
+          ok: false,
+          partial,
+          unchanged: false,
+          details: errorDetails.length ? errorDetails.join("；") : hydration.details,
+          hydratedSources: []
+        };
+      }
+
+      const previousSummary = openSourceSummaryRef.current;
+      const nextSummary: OpenSourceDataSummary = { ...previousSummary, ...hydration.summary };
+      const preserveSummaryField = <K extends keyof OpenSourceDataSummary>(field: K) => {
+        nextSummary[field] = previousSummary[field];
+      };
+      const preserveSummaryFields = (source: SyncSourceKey, fields: Array<keyof OpenSourceDataSummary>) => {
+        if (hydration.hydratedSources.includes(source)) return;
+        fields.forEach((field) => {
+          preserveSummaryField(field);
+        });
+      };
+      preserveSummaryFields("marketQuotes", ["matchedRows", "sourceRows"]);
+      preserveSummaryFields("financialReports", ["financeMatchedRows", "financeSourceRows"]);
+      preserveSummaryFields("analystForecasts", ["analystMatchedRows", "analystSourceRows"]);
+      preserveSummaryFields("marginBalances", ["marginMatchedRows", "marginSourceRows"]);
+      preserveSummaryFields("northHoldings", ["northHoldMatchedRows", "northHoldSourceRows"]);
+      preserveSummaryFields("technicalIndicators", ["technicalMatchedRows", "technicalSourceRows"]);
+      nextSummary.details = partial && errorDetails.length
+        ? `${hydration.details}；部分任务未完成：${errorDetails.join("；")}`
+        : hydration.details;
+
+      stocksRef.current = hydration.stocks;
+      openSourceSummaryRef.current = nextSummary;
+      setStocks(hydration.stocks);
+      setOpenSourceSummary(nextSummary);
+      setValuationDataSource("openSource");
+      setValuationRealDataStatus(nextSummary.details);
+      setResult(null);
+      setRankRows([]);
+      setSelectionRows([]);
+      saveLocal("openSourceStocks", hydration.stocks);
+      saveLocal("openSourceDataSummary", nextSummary);
+      saveLocal<ValuationDataSource>("valuationDataSource", "openSource");
+      lastHydratedSnapshotSignatureRef.current = signature;
+
+      return {
+        ok: true,
+        partial,
+        unchanged: false,
+        details: nextSummary.details,
+        hydratedSources: hydration.hydratedSources
+      };
+    })();
+
+    snapshotHydrationInFlightRef.current = task;
+    try {
+      return await task;
+    } finally {
+      if (snapshotHydrationInFlightRef.current === task) snapshotHydrationInFlightRef.current = null;
+    }
   };
 
   useEffect(() => {
@@ -2267,6 +2650,8 @@ function App() {
     const requestId = ++syncStatusRequestIdRef.current;
     void fetchSyncStatus().then((next) => {
       if (cancelled || requestId !== syncStatusRequestIdRef.current) return;
+      lastObservedFullSyncRef.current = next.lastFullSync;
+      if (next.running) observedSyncStartedAtRef.current = next.lastAttemptAt ? Date.parse(next.lastAttemptAt) : Date.now() - 1000;
       setSyncConfig(next.config);
       setSyncStatus(next);
     }).catch(() => undefined);
@@ -2277,14 +2662,51 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    if (syncStatus?.running && observedSyncStartedAtRef.current === null) {
+      observedSyncStartedAtRef.current = syncStatus.lastAttemptAt ? Date.parse(syncStatus.lastAttemptAt) : Date.now() - 1000;
+    }
+
+    const previousFullSync = lastObservedFullSyncRef.current;
+    const currentFullSync = syncStatus?.lastFullSync ?? null;
+    if (!syncStatus?.running && currentFullSync && previousFullSync !== currentFullSync) {
+      const previousTime = previousFullSync ? Date.parse(previousFullSync) : 0;
+      const currentTime = Date.parse(currentFullSync);
+      const completedRuns = (syncStatus?.runs ?? []).filter((run) => {
+        const finishedAt = Date.parse(run.finishedAt);
+        return run.ok && finishedAt > previousTime && finishedAt <= currentTime + 1000;
+      });
+      lastObservedFullSyncRef.current = currentFullSync;
+      if (completedRuns.length) {
+        void hydrateSuccessfulSyncSnapshots(completedRuns).then((outcome) => {
+          if (!active || outcome.unchanged) return;
+          setInfoSourceStatus(outcome.partial ? `后台数据采集部分完成：${outcome.details}` : `后台数据采集已完成：${outcome.details}`);
+        }).catch((error) => {
+          if (active) setInfoSourceStatus(`后台快照加载失败：${readableError(error)}`);
+        });
+      }
+    }
+
     const intervalMs = syncStatus?.running ? 1500 : 15000;
     const timer = window.setInterval(() => {
       void readLatestSyncStatus(() => active).then((next) => {
         if (!next) return;
         if (next.running && next.activeSources?.length) {
+          if (observedSyncStartedAtRef.current === null) {
+            observedSyncStartedAtRef.current = next.lastAttemptAt ? Date.parse(next.lastAttemptAt) : Date.now() - 1000;
+          }
           setInfoSourceStatus(`正在采集：${next.activeSources.join("、")}`);
         } else if (!next.running && syncStatus?.running) {
-          setInfoSourceStatus("后台数据采集已完成");
+          const observedAt = observedSyncStartedAtRef.current ?? 0;
+          observedSyncStartedAtRef.current = null;
+          const completedRuns = next.runs.filter((run) => Date.parse(run.startedAt) >= observedAt);
+          void hydrateSuccessfulSyncSnapshots(completedRuns).then((outcome) => {
+            if (!active) return;
+            if (!outcome.ok) setInfoSourceStatus(`后台数据采集失败：${outcome.details}`);
+            else if (outcome.partial || next.status === "partial") setInfoSourceStatus(`后台数据采集部分完成：${outcome.details}`);
+            else setInfoSourceStatus(`后台数据采集已完成：${outcome.details}`);
+          }).catch((error) => {
+            if (active) setInfoSourceStatus(`后台快照加载失败：${readableError(error)}`);
+          });
         }
       }).catch(() => undefined);
     }, intervalMs);
@@ -2292,7 +2714,7 @@ function App() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [syncStatus?.running]);
+  }, [syncStatus?.running, syncStatus?.lastFullSync]);
 
   useEffect(() => {
     saveLocal("draftStrategy", strategy);
@@ -2727,6 +3149,7 @@ function App() {
     setSyncBusy(true);
     setInfoSourceStatus("正在手动触发数据采集...");
     const manualStartedAt = Date.now();
+    observedSyncStartedAtRef.current = manualStartedAt;
     let pollActive = true;
     const pollTimer = window.setInterval(() => {
       void readLatestSyncStatus(() => pollActive).then((next) => {
@@ -2741,13 +3164,20 @@ function App() {
       pollActive = false;
       window.clearInterval(pollTimer);
       const okCount = result.results.filter((r) => r.ok).length;
+      const hydration = await hydrateSuccessfulSyncSnapshots(result.results);
       await refreshSyncStatus();
-      const dataResult = await performOpenSourceDataSync();
-      setInfoSourceStatus(`手动同步完成：${okCount}/${result.results.length} 个采集任务成功；${dataResult.details}`);
+      if (!hydration.ok) {
+        setInfoSourceStatus(`手动同步失败：${okCount}/${result.results.length} 个采集任务成功；${hydration.details}`);
+      } else if (result.status === "partial" || hydration.partial) {
+        setInfoSourceStatus(`手动同步部分完成：${okCount}/${result.results.length} 个采集任务成功；${hydration.details}`);
+      } else {
+        setInfoSourceStatus(`手动同步完成：${okCount}/${result.results.length} 个采集任务成功；${hydration.details}`);
+      }
     } catch (error) {
       setInfoSourceStatus("手动同步失败：" + readableError(error));
     } finally {
       pollActive = false;
+      observedSyncStartedAtRef.current = null;
       window.clearInterval(pollTimer);
       setSyncBusy(false);
     }
@@ -3037,9 +3467,102 @@ function App() {
     }
   };
 
+  const applyAgentWorkspaceAction = (action: AgentWorkspaceAction) => {
+    const payload = action.payload;
+    const text = (key: string) => typeof payload[key] === "string" ? String(payload[key]).trim() : "";
+
+    if (action.type === "create-strategy") {
+      const next = touchStrategyUpdatedAt({
+        ...createDefaultStrategy(),
+        name: text("name") || "Agent Strategy",
+        description: text("description"),
+        poolId: text("poolId") || "all"
+      });
+      setSavedStrategies((current) => {
+        const list = [next, ...current.filter((item) => item.id !== next.id)];
+        saveLocal("savedStrategies", list);
+        return list;
+      });
+      if (payload.addToHoldings === true) {
+        setHoldingStrategies((current) => {
+          const list = [next, ...current.filter((item) => item.id !== next.id)].slice(0, 20);
+          saveLocal("holdingStrategies", list);
+          return list;
+        });
+      }
+      setResult(null);
+      setRankRows([]);
+      setSelectionRows([]);
+      setTopSection("strategy");
+      persistStrategy(next, false);
+      return {
+        message: `Created strategy: ${next.name}`,
+        result: { strategyId: next.id, name: next.name, section: "strategy", saved: true, addedToHoldings: payload.addToHoldings === true }
+      };
+    }
+
+    if (action.type === "create-stock-pool") {
+      const codes = Array.isArray(payload.codes) ? payload.codes.map(String) : [];
+      const next = createStaticPool(text("name") || "Agent Stock Pool", codes);
+      setCustomPools((current) => {
+        const list = [...current, next];
+        saveLocal("customPools", list);
+        return list;
+      });
+      if (payload.select !== false) {
+        setStrategy((current) => {
+          const updated = touchStrategyUpdatedAt({ ...current, poolId: next.id });
+          saveLocal("draftStrategy", updated);
+          return updated;
+        });
+      }
+      setTopSection("strategy");
+      return {
+        message: `Created stock pool: ${next.name}`,
+        result: { poolId: next.id, name: next.name, codeCount: next.codes.length, selected: payload.select !== false, section: "strategy" }
+      };
+    }
+
+    if (action.type === "create-custom-factor") {
+      const next = createCustomFactor(text("name") || "Agent Factor", text("formula"));
+      setCustomFactors((current) => {
+        const list = [...current, next];
+        saveLocal("customFactors", list);
+        return list;
+      });
+      setActiveFactorGroup(next.group);
+      setTopSection("strategy");
+      return {
+        message: `Created custom factor: ${next.name}`,
+        result: { factorKey: next.key, name: next.name, formula: next.formula, section: "strategy" }
+      };
+    }
+
+    if (action.type === "open-section") {
+      const section = text("section") as MainSection;
+      if (!["dashboard", "strategy", "trade", "sentiment", "valuation", "settings"].includes(section)) {
+        throw new Error("Unsupported workspace section");
+      }
+      setTopSection(section);
+      return { message: `Opened section: ${section}`, result: { section } };
+    }
+
+    throw new Error("Unsupported Agent workspace action");
+  };
+
   return (
     <>
-      <div className="app-shell" data-section={topSection}>
+      <div className="app-shell" data-section={topSection} data-agent-expanded={agentExpanded ? "true" : "false"}>
+        <AgentDock
+          expanded={agentExpanded}
+          onExpandedChange={setAgentExpanded}
+          context={{
+            section: topSection,
+            strategyId: strategy.id,
+            poolId: strategy.poolId
+          }}
+          onWorkspaceAction={applyAgentWorkspaceAction}
+        />
         <header className="primary-nav">
           <div className="app-brand" aria-label="StockChoose A股研究工作站">
             <span className="app-brand-mark" aria-hidden="true">
@@ -3049,8 +3572,7 @@ function App() {
               <i />
             </span>
             <span className="app-brand-copy">
-              <strong>STOCKCHOOSE</strong>
-              <small>A-SHARE RESEARCH OS</small>
+              <img className="app-brand-wordmark" src="/brand/stockchoose-wordmark.png" alt="STOCKCHOOSE" />
             </span>
           </div>
           <button type="button" aria-pressed={topSection === "dashboard"} className={topSection === "dashboard" ? "active" : ""} onClick={() => setTopSection("dashboard")}>
@@ -3108,6 +3630,7 @@ function App() {
                 syncStatus={syncStatus}
                 syncBusy={syncBusy || Boolean(syncStatus?.running)}
                 onRunManualSync={runManualSync}
+                onOpenStockInfo={openStockInfo}
                 onNavigate={setTopSection}
               />
             ) : topSection === "strategy" ? (
@@ -4065,6 +4588,7 @@ function DashboardWorkspace({
   syncStatus,
   syncBusy,
   onRunManualSync,
+  onOpenStockInfo,
   onNavigate
 }: {
   stocks: Stock[];
@@ -4076,12 +4600,17 @@ function DashboardWorkspace({
   syncStatus: SyncStatus | null;
   syncBusy: boolean;
   onRunManualSync: () => void;
+  onOpenStockInfo: (stock: StockReference) => void;
   onNavigate: (section: MainSection) => void;
 }) {
   const [marketOverview, setMarketOverview] = useState<MarketTemperature | null>(null);
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketError, setMarketError] = useState("");
   const [selectionMode, setSelectionMode] = useState<"daily" | "realtime">("daily");
+  const [stockSearchQuery, setStockSearchQuery] = useState("");
+  const [stockSearchOpen, setStockSearchOpen] = useState(false);
+  const [stockSearchActiveIndex, setStockSearchActiveIndex] = useState(0);
+  const stockSuggestions = useMemo(() => findStockSuggestions(stocks, stockSearchQuery), [stocks, stockSearchQuery]);
 
   useEffect(() => {
     const fetchOverview = async () => {
@@ -4105,8 +4634,14 @@ function DashboardWorkspace({
 
   const temperature = useMemo(() => computeMarketTemperature(stocks), [stocks]);
   const allIndustryMomentum = useMemo(() => computeIndustryMomentum(stocks, 200), [stocks]);
-  const strongIndustries = useMemo(() => allIndustryMomentum.slice(0, 5), [allIndustryMomentum]);
-  const weakIndustries = useMemo(() => allIndustryMomentum.slice(-5).reverse(), [allIndustryMomentum]);
+  const strongIndustries = useMemo(
+    () => allIndustryMomentum.filter((item) => item.avgChange > 0).slice(0, 5),
+    [allIndustryMomentum]
+  );
+  const weakIndustries = useMemo(
+    () => allIndustryMomentum.filter((item) => item.avgChange < 0).sort((left, right) => left.avgChange - right.avgChange).slice(0, 5),
+    [allIndustryMomentum]
+  );
   const holdingSummary = useMemo(() => summarizeHoldings(paperTradeState, stocks), [paperTradeState, stocks]);
   const strategyDailyChange = useMemo(() => computeStrategyDailyChange(selectionRows), [selectionRows]);
   const topSelections = useMemo(() => [...selectionRows].sort((a, b) => b.score - a.score).slice(0, 10), [selectionRows]);
@@ -4149,9 +4684,117 @@ function DashboardWorkspace({
         ? `行情覆盖 ${strategyDailyChange.coveragePercent.toFixed(0)}%（${strategyDailyChange.validCount}/${strategyDailyChange.holdingCount}），暂不计算`
         : `${strategyName} · ${strategyDailyChange.holdingCount} 只 · 目标仓位 ${strategyDailyChange.targetWeight.toFixed(1)}%`;
   const strategyChangeTitle = `按当前候选目标权重与真实行情当日涨跌幅计算，不使用规则模拟收益。${strategyChangeDetail}`;
+  const selectSuggestedStock = (stock: Stock) => {
+    setStockSearchQuery(`${stock.name} ${displayStockCode(stock)}`);
+    setStockSearchOpen(false);
+    onOpenStockInfo(stock);
+  };
+  const handleStockSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      setStockSearchOpen(false);
+      return;
+    }
+    if (!stockSuggestions.items.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      setStockSearchOpen(true);
+      setStockSearchActiveIndex((current) => (current + direction + stockSuggestions.items.length) % stockSuggestions.items.length);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      selectSuggestedStock(stockSuggestions.items[Math.min(stockSearchActiveIndex, stockSuggestions.items.length - 1)]);
+    }
+  };
 
   return (
     <main className="dashboard-workspace">
+      <section
+        className="dashboard-stock-search"
+        aria-label="个股搜索与检索"
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setStockSearchOpen(false);
+        }}
+      >
+        <div className="dashboard-stock-search-heading">
+          <span>个股检索</span>
+          <em>{stocks.length ? `${stocks.length.toLocaleString()} 只股票` : "等待行情数据"}</em>
+        </div>
+        <div className={`dashboard-stock-search-control ${stockSearchOpen ? "active" : ""}`}>
+          <Search size={17} aria-hidden="true" />
+          <input
+            type="search"
+            value={stockSearchQuery}
+            placeholder="输入股票代码或名称，如 600519、贵州茅台"
+            role="combobox"
+            aria-label="搜索个股代码或名称"
+            aria-autocomplete="list"
+            aria-expanded={stockSearchOpen}
+            aria-controls="dashboard-stock-suggestion-list"
+            aria-activedescendant={stockSearchOpen && stockSuggestions.items.length ? `dashboard-stock-suggestion-${stockSearchActiveIndex}` : undefined}
+            onFocus={() => setStockSearchOpen(Boolean(stockSearchQuery.trim()))}
+            onChange={(event) => {
+              setStockSearchQuery(event.target.value);
+              setStockSearchActiveIndex(0);
+              setStockSearchOpen(Boolean(event.target.value.trim()));
+            }}
+            onKeyDown={handleStockSearchKeyDown}
+          />
+          {stockSearchQuery ? (
+            <button
+              className="dashboard-stock-search-clear"
+              type="button"
+              aria-label="清空个股搜索"
+              onClick={() => {
+                setStockSearchQuery("");
+                setStockSearchOpen(false);
+              }}
+            >
+              <X size={14} />
+            </button>
+          ) : null}
+          <button
+            className="dashboard-stock-search-submit"
+            type="button"
+            disabled={!stockSuggestions.items.length}
+            onClick={() => selectSuggestedStock(stockSuggestions.items[0])}
+          >
+            查看个股
+          </button>
+        </div>
+        {stockSearchOpen ? (
+          <div className="dashboard-stock-suggestions" id="dashboard-stock-suggestion-list" role="listbox">
+            <div className="dashboard-stock-suggestions-meta">
+              <span>{stockSuggestions.total ? "联想结果" : "未找到匹配股票"}</span>
+              {stockSuggestions.total ? <em>匹配 {stockSuggestions.total} 只，展示前 {stockSuggestions.items.length} 只</em> : <em>请检查代码或名称</em>}
+            </div>
+            {stockSuggestions.items.map((stock, index) => (
+              <button
+                id={`dashboard-stock-suggestion-${index}`}
+                className={index === stockSearchActiveIndex ? "active" : ""}
+                type="button"
+                role="option"
+                aria-selected={index === stockSearchActiveIndex}
+                key={`${stock.exchange}-${stock.code}`}
+                onMouseEnter={() => setStockSearchActiveIndex(index)}
+                onClick={() => selectSuggestedStock(stock)}
+              >
+                <span className="dashboard-stock-suggestion-identity">
+                  <strong>{stock.name}</strong>
+                  <em>{displayStockCode(stock)}</em>
+                </span>
+                <span className="dashboard-stock-suggestion-industry">{stock.industry2 || stock.industry1 || "未分类"}</span>
+                <span className="dashboard-stock-suggestion-quote">
+                  <strong>{formatStockMetric(stock, "price", " 元")}</strong>
+                  <em className={pctTone(stock.metrics.pctChange)}>{optionalPct(stock.metrics.pctChange)}</em>
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
       <section className="dashboard-status-strip">
         <div className="dashboard-status-item">
           <span className="dashboard-status-label">数据状态</span>
@@ -4375,31 +5018,35 @@ function DashboardWorkspace({
           <h3>行业轮动</h3>
           <span className="dashboard-data-source">未分类 {unclassifiedCount}</span>
         </div>
-        {allIndustryMomentum.length > 0 ? (
+        {strongIndustries.length > 0 || weakIndustries.length > 0 ? (
           <div className="dashboard-industry-columns">
             <div className="dashboard-industry-column">
               <div className="dashboard-column-title">强势行业</div>
-              {strongIndustries.map((item, idx) => (
+              {strongIndustries.length ? strongIndustries.map((item, idx) => (
                 <div className="dashboard-industry-row" key={item.industry}>
                   <span className="dashboard-industry-rank">{idx + 1}</span>
-                  <span className="dashboard-industry-name">{item.industry}</span>
+                  <div className="dashboard-industry-main">
+                    <strong className="dashboard-industry-name">{item.industry}</strong>
+                    <span className="dashboard-industry-top">领涨 {item.topStock}</span>
+                  </div>
                   <span className="dashboard-industry-count">{item.stockCount} 只</span>
-                  <span className="dashboard-industry-top">{item.topStock}</span>
                   <span className="dashboard-industry-change positive">{fmtPct(item.avgChange)}</span>
                 </div>
-              ))}
+              )) : <span className="dashboard-industry-empty">暂无上涨行业</span>}
             </div>
             <div className="dashboard-industry-column">
               <div className="dashboard-column-title">弱势行业</div>
-              {weakIndustries.map((item, idx) => (
+              {weakIndustries.length ? weakIndustries.map((item, idx) => (
                 <div className="dashboard-industry-row" key={item.industry}>
                   <span className="dashboard-industry-rank">{idx + 1}</span>
-                  <span className="dashboard-industry-name">{item.industry}</span>
+                  <div className="dashboard-industry-main">
+                    <strong className="dashboard-industry-name">{item.industry}</strong>
+                    <span className="dashboard-industry-top">领跌 {item.bottomStock}</span>
+                  </div>
                   <span className="dashboard-industry-count">{item.stockCount} 只</span>
-                  <span className="dashboard-industry-top">{item.topStock}</span>
                   <span className="dashboard-industry-change negative">{fmtPct(item.avgChange)}</span>
                 </div>
-              ))}
+              )) : <span className="dashboard-industry-empty">暂无下跌行业</span>}
             </div>
           </div>
         ) : (
@@ -5213,7 +5860,13 @@ function ValuationWorkspace({
   });
   const [valuationPage, setValuationPage] = useState(1);
   const [valuationPageSize, setValuationPageSize] = useState(defaultValuationPageSize);
-  const industryOptions = useMemo(() => ["全部", ...Array.from(new Set(stocks.map((stock) => stock.industry1))).sort()], [stocks]);
+  const industryOptions = useMemo(() => {
+    const standardIndustries = new Set<string>(PRIMARY_INDUSTRIES);
+    const additionalIndustries = compactIndustryTexts(stocks.map(inferPrimaryIndustry))
+      .filter((industry) => !standardIndustries.has(industry))
+      .sort();
+    return [ALL_INDUSTRIES, ...PRIMARY_INDUSTRIES, ...additionalIndustries];
+  }, [stocks]);
   const missingRealValuationCount = useMemo(
     () => (isRealDataReady ? stocks.filter((stock) => !hasRequiredRealValuationData(stock)).length : stocks.length),
     [isRealDataReady, stocks]

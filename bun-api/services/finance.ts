@@ -1,29 +1,36 @@
 import type { Stock } from "../../src/types";
 import { isAllIndustry, stockMatchesIndustry } from "../../src/industryClassification";
 import { cacheGetOrCreate, cacheSet, fetchJson, fetchText, mapConcurrent } from "../crawler/engine";
+import { assertSafeOutboundUrl } from "../lib/outboundSecurity";
 import { persistentCacheGetOrCreate } from "../lib/persistentCache";
 import { amountToYi, asNumber, compactRow, fetchEastmoneySpotRows, fetchKlinePointsWithFallback, urlWithParams } from "./market";
+import { fetchDatacenterRows } from "./datacenter";
+import { latestAnnualReportDate } from "../../src/dataContracts";
 
 const EASTMONEY_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get";
 const EASTMONEY_ANNOUNCEMENT_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann";
 const EASTMONEY_COMPANY_SURVEY_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax";
 const EASTMONEY_CORE_CONCEPTION_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/CoreConception/PageAjax";
 const EASTMONEY_UT = "bd1d9ddb04089700cf9c27f6f7426281";
-const EASTMONEY_DATACENTER_REQUEST_GAP_MS = 90;
+const ASHARE_FINANCE_FILTER = '(SECURITY_TYPE_CODE in ("058001001","058001008"))';
 const FINANCE_FETCH_CONCURRENCY = 6;
 const FINANCE_STATEMENT_CACHE_TTL_MS = 15 * 60 * 1000;
 const FINANCE_METRIC_CACHE_TTL_MS = 15 * 60 * 1000;
 const DAILY_REFERENCE_CACHE_TTL_MS = 5 * 60 * 1000;
 const PROFILE_PERSISTENT_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PROFILE_PARTIAL_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const FINANCE_PERSISTENT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const FINANCE_PERSISTENT_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 const ANALYST_PERSISTENT_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 const DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS = 60 * 60 * 1000;
 
 const round = (value: number, precision = 2) => Math.round(value * 10 ** precision) / 10 ** precision;
 const textValue = (row: Record<string, unknown>, keys: string[]) => keys.map((key) => row[key]).find((value) => value !== undefined && value !== null && String(value).trim() !== "");
 const numberAt = (row: Record<string, unknown>, keys: string[]) => keys.map((key) => asNumber(row[key])).find((value) => value !== undefined);
-const normalizeCode = (value: unknown) => String(value ?? "").replace(/\D/g, "").padStart(6, "0").slice(-6);
+const normalizeCode = (value: unknown) => {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/^(?:(?:SH|SZ|BJ))?(\d{6})(?:\.(?:SH|SZ|BJ))?$/i);
+  return match && match[1] !== "000000" ? match[1] : "";
+};
 
 function withMetric(metrics: Record<string, number>, key: string, value: number | undefined, precision = 2) {
   if (value === undefined || !Number.isFinite(value)) return metrics;
@@ -44,9 +51,10 @@ function safeRatio(numerator: number | undefined, denominator: number | undefine
 }
 
 function normalizeReportDate(reportDate: string | undefined) {
-  const raw = String(reportDate ?? "").trim() || "2025-12-31";
+  const raw = String(reportDate ?? "").trim() || latestAnnualReportDate();
   const compact = raw.replace(/[^0-9]/g, "");
-  const yyyymmdd = compact.length >= 8 ? compact.slice(0, 8) : "20251231";
+  if (!/^\d{8}$/.test(compact) || !/^(0331|0630|0930|1231)$/.test(compact.slice(4))) throw new Error("Invalid financial report date");
+  const yyyymmdd = compact;
   return {
     date: `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`,
     yyyymmdd,
@@ -57,6 +65,8 @@ function normalizeReportDate(reportDate: string | undefined) {
 function rowByCode(rows: Record<string, unknown>[]) {
   const map = new Map<string, Record<string, unknown>>();
   rows.forEach((row) => {
+    if (row.SECURITY_TYPE_CODE && !["058001001", "058001008"].includes(String(row.SECURITY_TYPE_CODE))) return;
+    if (String(row.SECUCODE ?? "").endsWith(".NQ")) return;
     const code = normalizeCode(textValue(row, ["SECURITY_CODE", "SECUCODE"]));
     if (/^\d{6}$/.test(code) && !map.has(code)) map.set(code, row);
   });
@@ -64,12 +74,13 @@ function rowByCode(rows: Record<string, unknown>[]) {
 }
 
 function disclosureDateNumber(...rows: Array<Record<string, unknown> | undefined>) {
+  const dates: number[] = [];
   for (const row of rows) {
-    const raw = row ? textValue(row, ["NOTICE_DATE", "鍏憡鏃ユ湡", "鎶湶鏃ユ湡"]) : undefined;
+    const raw = row ? textValue(row, ["NOTICE_DATE", "公告日期", "最新公告日期", "披露日期", "鍏憡鏃ユ湡", "鎶湶鏃ユ湡"]) : undefined;
     const compact = String(raw ?? "").replace(/[^0-9]/g, "").slice(0, 8);
-    if (compact.length === 8) return Number(compact);
+    if (compact.length === 8) dates.push(Number(compact));
   }
-  return undefined;
+  return dates.length ? Math.max(...dates) : undefined;
 }
 
 function datacenterUrl(reportName: string, columns: string, sortColumns: string, sortTypes: string, filter?: string, pageNumber = 1, pageSize = 500) {
@@ -87,16 +98,8 @@ function datacenterUrl(reportName: string, columns: string, sortColumns: string,
   return urlWithParams(EASTMONEY_DATACENTER_URL, params);
 }
 
-async function fetchDatacenterPages(reportName: string, columns: string, sortColumns: string, sortTypes: string, filter?: string, pageSize = 500, maxPages = 5) {
-  const first = await fetchJson(datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, 1, pageSize), { headers: { referer: "https://data.eastmoney.com/" } }, 30000, EASTMONEY_DATACENTER_REQUEST_GAP_MS);
-  const totalPages = Math.max(1, Math.min(maxPages, Math.ceil((asNumber((first as any)?.result?.count) ?? pageSize) / pageSize)));
-  const firstRows = [...((((first as any)?.result?.data ?? []) as Record<string, unknown>[]))];
-  const pageNumbers = Array.from({ length: Math.max(0, totalPages - 1) }, (_, index) => index + 2);
-  const laterPages = await mapConcurrent(pageNumbers, FINANCE_FETCH_CONCURRENCY, async (page) => {
-    const payload = await fetchJson(datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, page, pageSize), { headers: { referer: "https://data.eastmoney.com/" } }, 30000, EASTMONEY_DATACENTER_REQUEST_GAP_MS);
-    return (((payload as any)?.result?.data ?? []) as Record<string, unknown>[]);
-  });
-  return [...firstRows, ...laterPages.flat()];
+async function fetchDatacenterPages(reportName: string, columns: string, sortColumns: string, sortTypes: string, filter?: string, pageSize = 500, maxPages = 30, firstPageOnly = false) {
+  return fetchDatacenterRows((page) => datacenterUrl(reportName, columns, sortColumns, sortTypes, filter, page, pageSize), { maxPages, firstPageOnly });
 }
 
 export async function fetchAsharehubRows(baseUrl: string, endpoint: string, params: Record<string, string | number | undefined>, apiToken: string) {
@@ -108,7 +111,11 @@ export async function fetchAsharehubRows(baseUrl: string, endpoint: string, para
   Object.entries(params ?? {}).forEach(([key, value]) => {
     if (value !== undefined && value !== null && String(value).trim() !== "") url.searchParams.set(key, String(value));
   });
-  const payload = await fetchJson(url, { headers: { "x-api-key": apiToken, authorization: `Bearer ${apiToken}` } }, 30000);
+  await assertSafeOutboundUrl(url);
+  const payload = await fetchJson(url, {
+    redirect: "error",
+    headers: { "x-api-key": apiToken, authorization: `Bearer ${apiToken}` }
+  }, 30000);
   if (Array.isArray(payload)) return payload;
   const root = payload as any;
   if (Array.isArray(root?.data)) return root.data;
@@ -118,8 +125,8 @@ export async function fetchAsharehubRows(baseUrl: string, endpoint: string, para
 }
 
 export async function fetchAnalystForecastRows() {
-  return cacheGetOrCreate("eastmoney:analyst-forecasts", DAILY_REFERENCE_CACHE_TTL_MS, () =>
-    persistentCacheGetOrCreate("analyst-forecasts", "latest", ANALYST_PERSISTENT_CACHE_TTL_MS, async () => {
+  return cacheGetOrCreate("eastmoney:analyst-forecasts:v2", DAILY_REFERENCE_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("analyst-forecasts-v2", "latest", ANALYST_PERSISTENT_CACHE_TTL_MS, async () => {
       const rows = await fetchDatacenterPages("RPT_WEB_RESPREDICT", "WEB_RESPREDICT", "RATING_ORG_NUM", "-1", undefined, 500);
       return rows.map((row) => {
         const code = normalizeCode(textValue(row, ["SECURITY_CODE", "SECUCODE"]));
@@ -140,12 +147,13 @@ export async function fetchAnalystForecastRows() {
 }
 
 export async function fetchMarginBalanceRows() {
-  return cacheGetOrCreate("eastmoney:margin-balances", DAILY_REFERENCE_CACHE_TTL_MS, () =>
-    persistentCacheGetOrCreate("margin-balances", "latest", DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS, async () => {
-      const latestRows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "DATE", "DATE", "-1", undefined, 1, 1);
+  return cacheGetOrCreate("eastmoney:margin-balances:v2", DAILY_REFERENCE_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("margin-balances-v2", "latest", DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS, async () => {
+      const latestRows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "DATE", "DATE", "-1", undefined, 1, 1, true);
       const latest = String(textValue(latestRows[0] ?? {}, ["DATE"]) ?? "").split(" ")[0];
       const filter = latest ? `(DATE='${latest}')` : undefined;
-      const rows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "SCODE,SECNAME,DATE,RZYE,RQYE,RZRQYE,RZMRE,RZCHE,RZJME,FIN_BALANCE_GR,SECUCODE", "RZRQYE", "-1", filter, 500, 2);
+      if (!latest) throw new Error("Margin data has no trade date");
+      const rows = await fetchDatacenterPages("RPTA_WEB_RZRQ_GGMX", "SCODE,SECNAME,DATE,RZYE,RQYE,RZRQYE,RZMRE,RZCHE,RZJME,FIN_BALANCE_GR,SECUCODE", "SCODE", "1", filter);
       return rows.map((row) => {
         const metrics: Record<string, number> = { realMarginSource: 1 };
         withMetric(metrics, "marginBalance", amountToYi(row.RZRQYE));
@@ -162,12 +170,13 @@ export async function fetchMarginBalanceRows() {
 }
 
 export async function fetchNorthHoldingRows() {
-  return cacheGetOrCreate("eastmoney:north-holdings", DAILY_REFERENCE_CACHE_TTL_MS, () =>
-    persistentCacheGetOrCreate("north-holdings", "latest", DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS, async () => {
-      const latestRows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "TRADE_DATE", "TRADE_DATE", "-1", "(INTERVAL_TYPE=\"1\")", 1, 1);
+  return cacheGetOrCreate("eastmoney:north-holdings:v2", DAILY_REFERENCE_CACHE_TTL_MS, () =>
+    persistentCacheGetOrCreate("north-holdings-v2", "latest", DAILY_REFERENCE_PERSISTENT_CACHE_TTL_MS, async () => {
+      const latestRows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "TRADE_DATE", "TRADE_DATE", "-1", "(INTERVAL_TYPE=\"1\")", 1, 1, true);
       const latest = String(textValue(latestRows[0] ?? {}, ["TRADE_DATE"]) ?? "").split(" ")[0];
       const filter = latest ? `(INTERVAL_TYPE=\"1\")(TRADE_DATE>='${latest}')(TRADE_DATE<='${latest}')` : "(INTERVAL_TYPE=\"1\")";
-      const rows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "SECUCODE,SECURITY_CODE,SECURITY_NAME,TRADE_DATE,CLOSE_PRICE,CHANGE_RATE,HOLD_SHARES,HOLD_MARKET_CAP,A_SHARES_RATIO,HOLD_SHARES_RATIO,FREE_SHARES_RATIO,TOTAL_SHARES_RATIO,ADD_SHARES_REPAIR,PREDICT_AMC,HMC_CHANGE", "HOLD_MARKET_CAP", "-1", filter, 500, 2);
+      if (!latest) throw new Error("North holdings have no trade date");
+      const rows = await fetchDatacenterPages("RPT_MUTUAL_HOLDSTOCKNDATE_STA", "SECUCODE,SECURITY_CODE,SECURITY_NAME,TRADE_DATE,CLOSE_PRICE,CHANGE_RATE,HOLD_SHARES,HOLD_MARKET_CAP,A_SHARES_RATIO,HOLD_SHARES_RATIO,FREE_SHARES_RATIO,TOTAL_SHARES_RATIO,ADD_SHARES_REPAIR,PREDICT_AMC,HMC_CHANGE", "SECURITY_CODE", "1", filter);
       return rows.map((row) => {
         const metrics: Record<string, number> = { realNorthHoldSource: 1 };
         withMetric(metrics, "northHold", asNumber(row.HOLD_SHARES_RATIO));
@@ -344,8 +353,8 @@ export async function fetchTechnicalIndicators(codes: string[], limit = 120) {
 
 async function fetchFinanceStatementsUncached(reportDate: string) {
   const normalized = normalizeReportDate(reportDate);
-  const statementFilter = `(REPORT_DATE='${normalized.date}')`;
-  const performanceFilter = `(REPORTDATE='${normalized.date}')`;
+  const statementFilter = `${ASHARE_FINANCE_FILTER}(REPORT_DATE='${normalized.date}')`;
+  const performanceFilter = `${ASHARE_FINANCE_FILTER}(REPORTDATE='${normalized.date}')`;
   const [performanceRows, incomeRows, balanceRows, cashFlowRows] = await Promise.all([
     fetchDatacenterPages("RPT_LICO_FN_CPD", "ALL", "SECURITY_CODE", "1", performanceFilter, 500, 30),
     fetchDatacenterPages("RPT_DMSK_FN_INCOME", "ALL", "SECURITY_CODE", "1", statementFilter, 500, 15),
@@ -364,16 +373,28 @@ async function fetchFinanceStatementsUncached(reportDate: string) {
 
 export async function fetchFinanceStatements(reportDate: string) {
   const normalized = normalizeReportDate(reportDate);
-  return cacheGetOrCreate(`eastmoney:finance-statements:${normalized.yyyymmdd}`, FINANCE_STATEMENT_CACHE_TTL_MS, () =>
-    persistentCacheGetOrCreate("finance-statements", normalized.yyyymmdd, FINANCE_PERSISTENT_CACHE_TTL_MS, () =>
+  const hasRows = (rows: Awaited<ReturnType<typeof fetchFinanceStatementsUncached>>) =>
+    rows.performanceRows.length + rows.incomeRows.length + rows.balanceRows.length + rows.cashFlowRows.length > 0;
+  return cacheGetOrCreate(`eastmoney:finance-statements:${normalized.yyyymmdd}`, (rows) => hasRows(rows) ? FINANCE_STATEMENT_CACHE_TTL_MS : 60000, () =>
+    persistentCacheGetOrCreate("finance-statements-v2", normalized.yyyymmdd, (rows) => hasRows(rows) ? FINANCE_PERSISTENT_CACHE_TTL_MS : 60000, () =>
       fetchFinanceStatementsUncached(normalized.date)
     )
   );
 }
 
 async function fetchFinancialMetricRowsUncached(reportDate: string) {
-  const normalized = normalizeReportDate(reportDate);
   const rows = await fetchFinanceStatements(reportDate);
+  return buildFinancialMetricRows(rows);
+}
+
+export function buildFinancialMetricRows(rows: {
+  performanceRows: Record<string, unknown>[];
+  incomeRows: Record<string, unknown>[];
+  balanceRows: Record<string, unknown>[];
+  cashFlowRows: Record<string, unknown>[];
+  reportDate: string;
+}) {
+  const normalized = normalizeReportDate(rows.reportDate);
   const performanceByCode = rowByCode(rows.performanceRows);
   const incomeByCode = rowByCode(rows.incomeRows);
   const balanceByCode = rowByCode(rows.balanceRows);
@@ -396,9 +417,10 @@ async function fetchFinancialMetricRowsUncached(reportDate: string) {
       amountToYi(numberAt(performance ?? {}, ["PARENT_NETPROFIT", "NETPROFIT"]))
     );
     const operatingCost = firstDefined(
-      amountToYi(numberAt(income ?? {}, ["TOTAL_OPERATE_COST", "OPERATE_COST"])),
-      amountToYi(numberAt(performance ?? {}, ["TOTAL_OPERATE_COST", "OPERATE_COST"]))
+      amountToYi(numberAt(income ?? {}, ["OPERATE_COST"])),
+      amountToYi(numberAt(performance ?? {}, ["OPERATE_COST"]))
     );
+    const operatingRevenue = amountToYi(numberAt(income ?? {}, ["OPERATE_INCOME"]));
     const operatingCashflow = amountToYi(numberAt(cashFlow ?? {}, ["NETCASH_OPERATE", "NET_CASH_FLOWS_OPERATE"]));
     const totalAssets = amountToYi(numberAt(balance ?? {}, ["TOTAL_ASSETS"]));
     const totalLiabilities = amountToYi(numberAt(balance ?? {}, ["TOTAL_LIABILITIES"]));
@@ -430,11 +452,11 @@ async function fetchFinancialMetricRowsUncached(reportDate: string) {
     withMetric(metrics, "totalLiabilities", totalLiabilities);
     withMetric(metrics, "inventory", inventory);
     withMetric(metrics, "receivables", receivables);
-    withMetric(metrics, "eps", numberAt(performance ?? income ?? {}, ["BASIC_EPS", "EPSJB"]));
+    withMetric(metrics, "eps", firstDefined(numberAt(performance ?? {}, ["BASIC_EPS", "EPSJB"]), numberAt(income ?? {}, ["BASIC_EPS", "EPSJB"])));
     withMetric(metrics, "bps", numberAt(performance ?? {}, ["BPS"]));
     withMetric(metrics, "roe", numberAt(performance ?? {}, ["WEIGHTAVG_ROE", "ROE_WEIGHT"]));
     withMetric(metrics, "roa", safeRatio(netProfit, totalAssets));
-    withMetric(metrics, "grossMargin", firstDefined(numberAt(performance ?? {}, ["XSMLL"]), revenue !== undefined && operatingCost !== undefined ? safeRatio(revenue - operatingCost, revenue) : undefined));
+    withMetric(metrics, "grossMargin", firstDefined(numberAt(performance ?? {}, ["XSMLL"]), operatingRevenue !== undefined && operatingCost !== undefined ? safeRatio(operatingRevenue - operatingCost, operatingRevenue) : undefined));
     withMetric(metrics, "netMargin", safeRatio(netProfit, revenue));
     withMetric(metrics, "revenueGrowth", numberAt(performance ?? {}, ["YSTZ"]));
     withMetric(metrics, "netProfitGrowth", numberAt(performance ?? {}, ["SJLTZ"]));
@@ -449,7 +471,7 @@ async function fetchFinancialMetricRowsUncached(reportDate: string) {
     withMetric(metrics, "nonInterestBearingDebt", totalLiabilities !== undefined && interestBearingDebt !== undefined ? Math.max(totalLiabilities - interestBearingDebt, 0) : undefined);
     withMetric(metrics, "qualityScore", metrics.roe !== undefined && metrics.netMargin !== undefined && metrics.debtRatio !== undefined ? Math.max(0, Math.min(100, metrics.roe * 1.5 + metrics.netMargin * 0.8 - metrics.debtRatio * 0.2 + 50)) : undefined);
     const hasReportData = [revenue, netProfit, operatingCashflow, totalAssets, totalLiabilities].some((value) => value !== undefined && Number.isFinite(value));
-    const noticeDate = disclosureDateNumber(performance, income, balance, cashFlow) ?? normalized.number;
+    const noticeDate = disclosureDateNumber(performance, income, balance, cashFlow);
     withMetric(metrics, "realAnnualReportSource", hasReportData ? 1 : undefined, 0);
     withMetric(metrics, "realFinancialReportDate", hasReportData ? normalized.number : undefined, 0);
     withMetric(metrics, "realFinancialReportDisclosureDate", hasReportData ? noticeDate : undefined, 0);
@@ -467,23 +489,162 @@ async function fetchFinancialMetricRowsUncached(reportDate: string) {
 
 export async function fetchFinancialMetricRows(reportDate: string) {
   const normalized = normalizeReportDate(reportDate);
-  return cacheGetOrCreate(`eastmoney:financial-metrics:${normalized.yyyymmdd}`, FINANCE_METRIC_CACHE_TTL_MS, () =>
-    persistentCacheGetOrCreate("financial-metrics", normalized.yyyymmdd, FINANCE_PERSISTENT_CACHE_TTL_MS, () =>
+  return cacheGetOrCreate(`eastmoney:financial-metrics:${normalized.yyyymmdd}`, (rows) => rows.length ? FINANCE_METRIC_CACHE_TTL_MS : 60000, () =>
+    persistentCacheGetOrCreate("financial-metrics-v2", normalized.yyyymmdd, (rows) => rows.length ? FINANCE_PERSISTENT_CACHE_TTL_MS : 60000, () =>
       fetchFinancialMetricRowsUncached(normalized.date)
     )
   );
 }
 
-export function formatAnnualReportExport(row: { code: string; name: string; reportDate: string; metrics: Record<string, number> }, fallbackStockName: string) {
+type AnnualReportSourceRows = {
+  performance?: Record<string, unknown>;
+  income?: Record<string, unknown>;
+  balance?: Record<string, unknown>;
+  cashFlow?: Record<string, unknown>;
+};
+
+type AnnualReportDetailUnit = "亿元" | "元" | "%" | "倍" | "人";
+
+function annualReportDetailItem(
+  key: string,
+  label: string,
+  row: Record<string, unknown> | undefined,
+  fields: string[],
+  unit: AnnualReportDetailUnit = "亿元"
+) {
+  const rawValue = numberAt(row ?? {}, fields);
+  const normalizedValue = unit === "亿元" ? amountToYi(rawValue) : rawValue;
+  return {
+    key,
+    label,
+    ...(normalizedValue !== undefined && Number.isFinite(normalizedValue) ? { value: round(normalizedValue, unit === "人" ? 0 : 2) } : {}),
+    unit
+  };
+}
+
+export function buildAnnualReportDetails(rows: AnnualReportSourceRows = {}) {
+  return {
+    performance: [
+      annualReportDetailItem("revenue", "营业收入", rows.performance, ["TOTAL_OPERATE_INCOME", "OPERATE_INCOME"]),
+      annualReportDetailItem("netProfit", "归母净利润", rows.performance, ["PARENT_NETPROFIT", "NETPROFIT"]),
+      annualReportDetailItem("deductedNetProfit", "扣非归母净利润", rows.performance, ["DEDUCT_PARENT_NETPROFIT", "KCFJCXSYJLR"]),
+      annualReportDetailItem("eps", "基本每股收益", rows.performance, ["BASIC_EPS", "EPSJB"], "元"),
+      annualReportDetailItem("bps", "每股净资产", rows.performance, ["BPS"], "元"),
+      annualReportDetailItem("roe", "加权净资产收益率", rows.performance, ["WEIGHTAVG_ROE", "ROE_WEIGHT"], "%"),
+      annualReportDetailItem("revenueGrowth", "营业收入同比增长", rows.performance, ["YSTZ"], "%"),
+      annualReportDetailItem("profitGrowth", "归母净利润同比增长", rows.performance, ["SJLTZ"], "%")
+    ],
+    income: [
+      annualReportDetailItem("totalOperatingRevenue", "营业总收入", rows.income, ["TOTAL_OPERATE_INCOME", "OPERATE_INCOME"]),
+      annualReportDetailItem("operatingRevenue", "营业收入", rows.income, ["OPERATE_INCOME"]),
+      annualReportDetailItem("operatingCost", "营业成本", rows.income, ["OPERATE_COST"]),
+      annualReportDetailItem("sellingExpense", "销售费用", rows.income, ["SALE_EXPENSE"]),
+      annualReportDetailItem("managementExpense", "管理费用", rows.income, ["MANAGE_EXPENSE"]),
+      annualReportDetailItem("researchExpense", "研发费用", rows.income, ["RESEARCH_EXPENSE"]),
+      annualReportDetailItem("financialExpense", "财务费用", rows.income, ["FINANCE_EXPENSE"]),
+      annualReportDetailItem("operatingProfit", "营业利润", rows.income, ["OPERATE_PROFIT"]),
+      annualReportDetailItem("totalProfit", "利润总额", rows.income, ["TOTAL_PROFIT"]),
+      annualReportDetailItem("incomeTax", "所得税费用", rows.income, ["INCOME_TAX"]),
+      annualReportDetailItem("netProfit", "净利润", rows.income, ["NETPROFIT"]),
+      annualReportDetailItem("parentNetProfit", "归母净利润", rows.income, ["PARENT_NETPROFIT", "NETPROFIT"])
+    ],
+    balance: [
+      annualReportDetailItem("cash", "货币资金", rows.balance, ["MONETARYFUNDS"]),
+      annualReportDetailItem("tradingAssets", "交易性金融资产", rows.balance, ["TRADING_FINANCIAL_ASSETS", "TRADE_FINASSET"]),
+      annualReportDetailItem("receivables", "应收账款", rows.balance, ["ACCOUNTS_RECE"]),
+      annualReportDetailItem("prepayment", "预付款项", rows.balance, ["PREPAYMENT"]),
+      annualReportDetailItem("inventory", "存货", rows.balance, ["INVENTORY"]),
+      annualReportDetailItem("currentAssets", "流动资产合计", rows.balance, ["TOTAL_CURRENT_ASSETS"]),
+      annualReportDetailItem("longEquityInvestment", "长期股权投资", rows.balance, ["LONG_EQUITY_INVEST"]),
+      annualReportDetailItem("fixedAssets", "固定资产", rows.balance, ["FIXED_ASSET"]),
+      annualReportDetailItem("constructionInProgress", "在建工程", rows.balance, ["CIP", "CONSTRUCTION_IN_PROCESS"]),
+      annualReportDetailItem("intangibleAssets", "无形资产", rows.balance, ["INTANGIBLE_ASSET"]),
+      annualReportDetailItem("totalAssets", "资产总计", rows.balance, ["TOTAL_ASSETS"]),
+      annualReportDetailItem("shortLoan", "短期借款", rows.balance, ["SHORT_LOAN"]),
+      annualReportDetailItem("accountsPayable", "应付账款", rows.balance, ["ACCOUNTS_PAYABLE"]),
+      annualReportDetailItem("contractLiabilities", "合同负债", rows.balance, ["CONTRACT_LIAB"]),
+      annualReportDetailItem("currentLiabilities", "流动负债合计", rows.balance, ["TOTAL_CURRENT_LIAB"]),
+      annualReportDetailItem("longLoan", "长期借款", rows.balance, ["LONG_LOAN"]),
+      annualReportDetailItem("bondsPayable", "应付债券", rows.balance, ["BOND_PAYABLE"]),
+      annualReportDetailItem("totalLiabilities", "负债合计", rows.balance, ["TOTAL_LIABILITIES"]),
+      annualReportDetailItem("parentEquity", "归母股东权益", rows.balance, ["PARENT_EQUITY", "TOTAL_PARENT_EQUITY"])
+    ],
+    cashFlow: [
+      annualReportDetailItem("salesCash", "销售商品、提供劳务收到的现金", rows.cashFlow, ["SALES_SERVICES"]),
+      annualReportDetailItem("operatingInflow", "经营活动现金流入小计", rows.cashFlow, ["TOTAL_OPERATE_INFLOW"]),
+      annualReportDetailItem("purchaseCash", "购买商品、接受劳务支付的现金", rows.cashFlow, ["BUY_SERVICES", "PURCHASE_SERVICES"]),
+      annualReportDetailItem("staffCash", "支付给职工以及为职工支付的现金", rows.cashFlow, ["PAY_STAFF_CASH"]),
+      annualReportDetailItem("taxCash", "支付的各项税费", rows.cashFlow, ["PAY_ALL_TAX"]),
+      annualReportDetailItem("operatingOutflow", "经营活动现金流出小计", rows.cashFlow, ["TOTAL_OPERATE_OUTFLOW"]),
+      annualReportDetailItem("operatingNetCash", "经营活动现金流量净额", rows.cashFlow, ["NETCASH_OPERATE", "NET_CASH_FLOWS_OPERATE"]),
+      annualReportDetailItem("investingNetCash", "投资活动现金流量净额", rows.cashFlow, ["NETCASH_INVEST"]),
+      annualReportDetailItem("financingNetCash", "筹资活动现金流量净额", rows.cashFlow, ["NETCASH_FINANCE"]),
+      annualReportDetailItem("cashIncrease", "现金及现金等价物净增加额", rows.cashFlow, ["CCE_ADD"]),
+      annualReportDetailItem("openingCash", "期初现金及现金等价物余额", rows.cashFlow, ["BEGIN_CCE"]),
+      annualReportDetailItem("closingCash", "期末现金及现金等价物余额", rows.cashFlow, ["END_CCE"])
+    ]
+  };
+}
+
+export function formatAnnualReportExport(
+  row: { code: string; name: string; reportDate: string; metrics: Record<string, number> },
+  fallbackStockName: string,
+  sourceRows: AnnualReportSourceRows = {}
+) {
   const csv = ["股票代码,股票名称,报告期,营业收入,净利润,ROE", [row.code, row.name, row.reportDate, row.metrics.revenue ?? "", row.metrics.netProfit ?? "", row.metrics.roe ?? ""].join(",")].join("\r\n");
-  return { year: row.reportDate.slice(0, 4), stockCode: row.code, stockName: row.name || fallbackStockName, reportDate: row.reportDate, source: "eastmoney-bun", sourceNote: "由 Bun 财报接口生成。", sourceCsv: csv, metrics: row.metrics };
+  const notice = row.metrics.realFinancialReportDisclosureDate;
+  const noticeText = notice ? String(notice) : "";
+  return {
+    code: row.code, name: row.name || fallbackStockName,
+    year: row.reportDate.slice(0, 4), periodEnd: row.reportDate,
+    disclosureDate: noticeText ? `${noticeText.slice(0, 4)}-${noticeText.slice(4, 6)}-${noticeText.slice(6, 8)}` : "未提供",
+    reportType: "年度报告", currencyUnit: "人民币亿元", auditOpinion: "未提供",
+    sourceProvider: "eastmoney-bun",
+    sourceFileName: `${row.code}-${row.reportDate.slice(0, 4)}-annual-report.csv`,
+    sourceFileType: "CSV", sourceNote: "由 Bun 财报接口生成。", sourceCsv: csv,
+    details: buildAnnualReportDetails(sourceRows),
+    metrics: compactRow([
+      ...Object.entries(row.metrics),
+      ["cashProfitRatio", safeRatio(row.metrics.operatingCashflow, row.metrics.netProfit)],
+      ["receivableRevenueRatio", safeRatio(row.metrics.receivables, row.metrics.revenue)]
+    ])
+  };
 }
 
 export async function fetchAnnualReports(stock: Stock) {
-  const rows = await fetchFinancialMetricRows("2025-12-31");
-  const row = rows.find((item) => item.code === normalizeCode(stock.code));
-  if (!row) return [];
-  return [formatAnnualReportExport(row, stock.name)];
+  const code = normalizeCode(stock.code);
+  if (!code) throw new Error("Invalid stock code for annual reports");
+  const latestYear = Number(latestAnnualReportDate().slice(0, 4));
+  return cacheGetOrCreate(`annual-reports-v3:${code}:${latestYear}`, (rows) => rows.length ? FINANCE_METRIC_CACHE_TTL_MS : 60000, () =>
+    persistentCacheGetOrCreate("annual-reports-v3", `${code}:${latestYear}`, (rows) => rows.length ? FINANCE_PERSISTENT_CACHE_TTL_MS : 60000, async () => {
+      const codeFilter = `${ASHARE_FINANCE_FILTER}(SECURITY_CODE="${code}")`;
+      const statementFilter = `${codeFilter}(REPORT_DATE>='${latestYear - 2}-12-31')(REPORT_DATE<='${latestYear}-12-31')`;
+      const performanceFilter = `${codeFilter}(REPORTDATE>='${latestYear - 2}-12-31')(REPORTDATE<='${latestYear}-12-31')`;
+      const [performanceRows, incomeRows, balanceRows, cashFlowRows] = await Promise.all([
+        fetchDatacenterPages("RPT_LICO_FN_CPD", "ALL", "REPORTDATE", "-1", performanceFilter, 100),
+        fetchDatacenterPages("RPT_DMSK_FN_INCOME", "ALL", "REPORT_DATE", "-1", statementFilter, 100),
+        fetchDatacenterPages("RPT_DMSK_FN_BALANCE", "ALL", "REPORT_DATE", "-1", statementFilter, 100),
+        fetchDatacenterPages("RPT_DMSK_FN_CASHFLOW", "ALL", "REPORT_DATE", "-1", statementFilter, 100)
+      ]);
+      const inYear = (rows: Record<string, unknown>[], date: string) => rows.filter((row) =>
+        normalizeCode(row.SECURITY_CODE) === code && String(row.REPORT_DATE ?? row.REPORTDATE).slice(0, 10) === date);
+      return Array.from({ length: 3 }, (_, index) => `${latestYear - index}-12-31`).flatMap((reportDate) => {
+        const annualPerformanceRows = inYear(performanceRows, reportDate);
+        const annualIncomeRows = inYear(incomeRows, reportDate);
+        const annualBalanceRows = inYear(balanceRows, reportDate);
+        const annualCashFlowRows = inYear(cashFlowRows, reportDate);
+        return buildFinancialMetricRows({
+          performanceRows: annualPerformanceRows, incomeRows: annualIncomeRows,
+          balanceRows: annualBalanceRows, cashFlowRows: annualCashFlowRows, reportDate
+        }).map((row) => formatAnnualReportExport(row, stock.name, {
+          performance: annualPerformanceRows[0],
+          income: annualIncomeRows[0],
+          balance: annualBalanceRows[0],
+          cashFlow: annualCashFlowRows[0]
+        }));
+      });
+    })
+  );
 }
 
 const valuationProfile = {

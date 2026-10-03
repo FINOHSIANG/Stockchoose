@@ -22,6 +22,8 @@ export interface IndustryMomentum {
   stockCount: number;
   topStock: string;
   topStockChange: number;
+  bottomStock: string;
+  bottomStockChange: number;
   totalMarketCap: number;
 }
 
@@ -161,6 +163,8 @@ export function computeIndustryMomentum(stocks: Stock[], limit = 10): IndustryMo
       stockCount: entry.changes.length,
       topStock: sorted[0]?.name ?? "--",
       topStockChange: sorted[0]?.change ?? 0,
+      bottomStock: sorted.at(-1)?.name ?? "--",
+      bottomStockChange: sorted.at(-1)?.change ?? 0,
       totalMarketCap: entry.totalMarketCap,
     });
   }

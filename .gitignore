@@ -7,9 +7,13 @@ playwright-report/
 *.tsbuildinfo
 output/
 release/
+tmp/
 tmp/bun-api.*.log
 tmp/bun-api-check.mjs
 tmp/sidecars/
+tmp/akshare-api-audit/
+tmp/agent-runtime/
+agent/stockchoose-dsh-profile.yml
 
 data-cache/
 progress.md

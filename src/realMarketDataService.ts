@@ -42,6 +42,7 @@ export interface StockProfileResult {
 }
 
 export type StockKlinePeriod = "day" | "week" | "month";
+export type StockKlineAdjustment = "qfq" | "none";
 
 interface NormalizedQuote {
   symbol: string;
@@ -66,6 +67,7 @@ interface NormalizedQuote {
 
 const BUN_TENCENT_QUOTE_ROWS_BASE = "/api/market/tencent/quote-rows";
 const BUN_TENCENT_ASHARE_QUOTE_ROWS_URL = "/api/market/tencent/ashare/quotes";
+const BUN_STOCK_UNIVERSE_URL = "/api/data/stock-universe";
 const BUN_TENCENT_KLINE_POINTS_BASE = "/api/market/tencent/kline-points";
 const BUN_TECHNICAL_INDICATORS_BASE = "/api/market/technical-indicators";
 const BUN_STOCK_PROFILE_BASE = "/api/market/stock";
@@ -143,6 +145,16 @@ const withMetric = (metrics: Record<string, number>, key: string, value: number 
   return { ...metrics, [key]: round(value, precision) };
 };
 
+const SYNTHETIC_INTRADAY_METRIC_KEYS = ["relativeChange", "min15Momentum", "intradayStrength"] as const;
+
+function removeSyntheticIntradayMetrics(metrics: Record<string, number>) {
+  const next = { ...metrics };
+  SYNTHETIC_INTRADAY_METRIC_KEYS.forEach((key) => {
+    delete next[key];
+  });
+  return next;
+}
+
 const TENCENT_KLINE_PERIOD_CODE: Record<StockKlinePeriod, string> = {
   day: "day",
   week: "week",
@@ -153,6 +165,11 @@ const KLINE_PERIOD_LABEL: Record<StockKlinePeriod, string> = {
   day: "日K",
   week: "周K",
   month: "月K"
+};
+
+const KLINE_ADJUSTMENT_LABEL: Record<StockKlineAdjustment, string> = {
+  qfq: "前复权",
+  none: "不复权"
 };
 
 const KLINE_PERIOD_LIMIT: Record<StockKlinePeriod, number> = {
@@ -441,7 +458,6 @@ function quoteDerivedMetric(row: NormalizedQuote): Record<string, number> {
   let metrics: Record<string, number> = { realQuoteSource: 1 };
   metrics = withMetric(metrics, "price", row.price);
   metrics = withMetric(metrics, "pctChange", row.pctChange);
-  metrics = withMetric(metrics, "relativeChange", row.pctChange === undefined ? undefined : row.pctChange - 0.25);
   metrics = withMetric(metrics, "amount", row.amountYi);
   metrics = withMetric(metrics, "volume", row.volumeWanShou);
   metrics = withMetric(metrics, "priceAmplitude", row.amplitude);
@@ -451,8 +467,6 @@ function quoteDerivedMetric(row: NormalizedQuote): Record<string, number> {
   metrics = withMetric(metrics, "marketCap", row.marketCapYi);
   metrics = withMetric(metrics, "floatMarketCap", row.floatMarketCapYi);
   metrics = withMetric(metrics, "limitFlag", row.pctChange === undefined ? undefined : row.pctChange >= 9.8 ? 1 : row.pctChange <= -9.8 ? -1 : 0, 0);
-  metrics = withMetric(metrics, "intradayStrength", row.pctChange === undefined ? undefined : Math.max(0, Math.min(100, 50 + row.pctChange * 4)));
-  metrics = withMetric(metrics, "min15Momentum", row.pctChange === undefined ? undefined : row.pctChange / 4);
   return metrics;
 }
 
@@ -608,12 +622,74 @@ function mergeExistingStockWithTencentQuote(existing: Stock | undefined, quoteSt
   };
 }
 
-async function fetchTencentKlinePoints(stock: Stock, period: StockKlinePeriod, fetchImpl: FetchLike) {
+function stockUniverseRowsFromPayload(payload: unknown): Stock[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Bun stock universe API returned invalid payload");
+  }
+  const rows = (payload as { stocks?: unknown }).stocks;
+  if (!Array.isArray(rows)) throw new Error("Bun stock universe API payload is missing stocks");
+  return rows.filter((row): row is Stock => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+    const stock = row as Partial<Stock>;
+    return typeof stock.code === "string"
+      && typeof stock.name === "string"
+      && Boolean(stock.metrics)
+      && typeof stock.metrics === "object";
+  });
+}
+
+function hasUsableUniverseQuote(stock: Stock) {
+  return Number.isFinite(stock.metrics.price)
+    && stock.metrics.price > 0
+    && Number.isFinite(stock.metrics.marketCap)
+    && stock.metrics.marketCap > 0;
+}
+
+export async function syncBunStockUniverse(
+  seedStocks: Stock[],
+  fetchImpl: FetchLike = fetch
+): Promise<RealMarketDataResult> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const response = await fetchImpl(BUN_STOCK_UNIVERSE_URL);
+    if (!response.ok) throw new Error(`Bun stock universe API HTTP ${response.status}${await responseErrorSuffix(response)}`);
+    const sourceStocks = stockUniverseRowsFromPayload(await jsonFromResponse(response, "Bun stock universe API"));
+    const existingByKey = stocksByQuoteKey(seedStocks);
+    const stocks = sourceStocks
+      .filter(hasUsableUniverseQuote)
+      .map((stock) => mergeExistingStockWithTencentQuote(existingByKey.get(stock.code), stock))
+      .sort((left, right) => left.exchange.localeCompare(right.exchange) || left.code.localeCompare(right.code));
+
+    if (!stocks.length) throw new Error("Bun stock universe API returned no usable A-share quotes");
+    return {
+      ok: true,
+      checkedAt,
+      message: "股票行情自动接入完成",
+      details: `Bun/Eastmoney 返回 ${sourceStocks.length} 只股票，识别 ${stocks.length} 只有效 A 股，已保留本地真实财务字段`,
+      stocks,
+      matchedRows: stocks.length,
+      sourceRows: sourceStocks.length
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      checkedAt,
+      message: "股票行情自动接入失败",
+      details: error instanceof Error ? error.message : "未知网络错误",
+      stocks: seedStocks,
+      matchedRows: 0,
+      sourceRows: 0
+    };
+  }
+}
+
+async function fetchTencentKlinePoints(stock: Stock, period: StockKlinePeriod, adjustment: StockKlineAdjustment, fetchImpl: FetchLike) {
   const symbol = tencentSymbolForStock(stock);
   const bunParams = new URLSearchParams({
     symbol,
     period: TENCENT_KLINE_PERIOD_CODE[period],
-    limit: String(KLINE_PERIOD_LIMIT[period])
+    limit: String(KLINE_PERIOD_LIMIT[period]),
+    adjustment
   });
   const response = await fetchImpl(`${BUN_TENCENT_KLINE_POINTS_BASE}?${bunParams.toString()}`);
   if (!response.ok) throw new Error(`Bun Tencent K线接口 HTTP ${response.status}`);
@@ -630,19 +706,20 @@ const klineErrorText = (error: unknown) => (error instanceof Error ? error.messa
 export async function fetchStockKlineHistory(
   stock: Stock,
   period: StockKlinePeriod = "day",
-  fetchImpl: FetchLike = fetch
+  fetchImpl: FetchLike = fetch,
+  adjustment: StockKlineAdjustment = "qfq"
 ): Promise<StockKlineHistoryResult> {
   const checkedAt = new Date().toISOString();
 
   try {
-    const { points, source } = await fetchTencentKlinePoints(stock, period, fetchImpl);
+    const { points, source } = await fetchTencentKlinePoints(stock, period, adjustment, fetchImpl);
     const visiblePoints = points.slice(-KLINE_PERIOD_LIMIT[period]);
     return {
       ok: true,
       checkedAt,
       message: source === "eastmoney-fallback"
-        ? `腾讯 K 线暂不可用，已加载东方财富备用${KLINE_PERIOD_LABEL[period]}历史行情`
-        : `已加载腾讯真实${KLINE_PERIOD_LABEL[period]}历史行情`,
+        ? `腾讯 K 线暂不可用，已加载东方财富备用${KLINE_ADJUSTMENT_LABEL[adjustment]}${KLINE_PERIOD_LABEL[period]}历史行情`
+        : `已加载腾讯真实${KLINE_ADJUSTMENT_LABEL[adjustment]}${KLINE_PERIOD_LABEL[period]}历史行情`,
       points: visiblePoints,
       sourceRows: points.length
     };
@@ -812,10 +889,9 @@ export async function syncTencentRealMarketData(
       const marketCapYi = quote.marketCapYi;
       const floatMarketCapYi = quote.floatMarketCapYi;
 
-      let metrics = { ...stock.metrics };
+      let metrics = removeSyntheticIntradayMetrics(stock.metrics);
       metrics = withMetric(metrics, "price", realPrice);
       metrics = withMetric(metrics, "pctChange", realPctChange);
-      metrics = withMetric(metrics, "relativeChange", realPctChange === undefined ? undefined : realPctChange - 0.25);
       metrics = withMetric(metrics, "amount", amountYi);
       metrics = withMetric(metrics, "volume", volumeWanShou);
       metrics = withMetric(metrics, "priceAmplitude", quote.amplitude);
@@ -826,8 +902,6 @@ export async function syncTencentRealMarketData(
       metrics = withMetric(metrics, "floatMarketCap", floatMarketCapYi);
       metrics = withMetric(metrics, "realQuoteSource", quote.price === undefined ? undefined : 1, 0);
       metrics = withMetric(metrics, "limitFlag", realPctChange === undefined ? undefined : realPctChange >= 9.8 ? 1 : realPctChange <= -9.8 ? -1 : 0, 0);
-      metrics = withMetric(metrics, "intradayStrength", realPctChange === undefined ? undefined : Math.max(0, Math.min(100, 50 + realPctChange * 4)));
-      metrics = withMetric(metrics, "min15Momentum", realPctChange === undefined ? undefined : realPctChange / 4);
 
       return {
         ...stock,

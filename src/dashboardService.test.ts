@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { computeStrategyDailyChange } from "./dashboardService";
-import type { SelectionRow } from "./types";
+import { computeIndustryMomentum, computeStrategyDailyChange } from "./dashboardService";
+import type { SelectionRow, Stock } from "./types";
 
 function selectionRow(code: string, weight: number, pctChange?: number): SelectionRow {
   return {
@@ -25,6 +25,33 @@ function selectionRow(code: string, weight: number, pctChange?: number): Selecti
     passedFilters: 0,
   };
 }
+
+function industryStock(code: string, name: string, industry1: string, pctChange: number): Stock {
+  return {
+    ...selectionRow(code, 0, pctChange).stock,
+    name,
+    industry1,
+  };
+}
+
+describe("dashboard industry momentum", () => {
+  it("keeps both leading and lagging stocks for directional industry display", () => {
+    const rows = computeIndustryMomentum([
+      industryStock("600001", "领涨股", "食品饮料", 8),
+      industryStock("600002", "中间股", "食品饮料", 5),
+      industryStock("600003", "领跌股", "食品饮料", 2),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      industry: "食品饮料",
+      topStock: "领涨股",
+      topStockChange: 8,
+      bottomStock: "领跌股",
+      bottomStockChange: 2,
+    });
+  });
+});
 
 describe("dashboard strategy daily change", () => {
   it("computes a 60/40 weighted daily change", () => {
