@@ -2,6 +2,11 @@
   "name": "stockchoose-electron",
   "version": "0.1.0-beta.1",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FINOHSIANG/Stockchoose.git"
+  },
   "type": "module",
   "description": "Local Electron stock strategy workstation inspired by guorn stock strategy page.",
   "main": "electron/main.cjs",
