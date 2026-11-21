@@ -43,17 +43,17 @@ https://github.com/FINOHSIANG/Stockchoose
 
 ### 版本 A：产品定位
 
-研究行情、财报、策略和新闻时，不必在多个窗口之间反复搬运上下文。StockChoose 把它们放进一个 Windows 优先的 Agent 研究工作站：可查数据、建股票池和策略、切换业务频道、回到界面核对结果。MIT 开源，Beta 中。  
+研究行情、财报、策略和新闻时，不必在多个窗口之间反复搬运上下文。StockChoose 把它们放进一个 Windows 优先的 Agent 研究工作站：可查数据、建股票池和策略、切换业务频道、回到界面核对结果。MIT 开源，Beta 中。
 https://github.com/FINOHSIANG/Stockchoose
 
 ### 版本 B：开发者角度
 
-一个把 Agent、MCP、本地 Bun API 和 Electron 工作区接起来的 A 股研究项目。当前重点不是“喊出一个预测”，而是让数据来源、策略资源和下一步操作更容易被核查。欢迎用真实复现步骤参与贡献。  
+一个把 Agent、MCP、本地 Bun API 和 Electron 工作区接起来的 A 股研究项目。当前重点不是“喊出一个预测”，而是让数据来源、策略资源和下一步操作更容易被核查。欢迎用真实复现步骤参与贡献。
 https://github.com/FINOHSIANG/Stockchoose
 
 ### 版本 C：边界透明
 
-StockChoose 的规则模拟不是历史回测，交易计划不是券商实盘，Agent 也需要额外配置。它更适合做可核查的研究工作台和扩展实验，而不是收益承诺。代码与测试已公开，欢迎一起把边界做实。  
+StockChoose 的规则模拟不是历史回测，交易计划不是券商实盘，Agent 也需要额外配置。它更适合做可核查的研究工作台和扩展实验，而不是收益承诺。代码与测试已公开，欢迎一起把边界做实。
 https://github.com/FINOHSIANG/Stockchoose
 
 ## 知乎 / 掘金长文开头
