@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">StockChoose Agent 驱动的 A 股研究工作站</title>
+  <desc id="desc">StockChoose brings market data, strategies, filings, sentiment, valuation and trade planning into one open-source desktop workspace.</desc>
+  <rect width="1200" height="630" fill="#f4f6fa"/>
+  <rect x="56" y="54" width="1088" height="522" rx="18" fill="#ffffff" stroke="#d9dee9" stroke-width="2"/>
+  <rect x="56" y="54" width="16" height="522" fill="#6f4ce8"/>
+  <text x="112" y="136" fill="#6f4ce8" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="24" font-weight="700" letter-spacing="1">STOCKCHOOSE</text>
+  <text x="112" y="224" fill="#202535" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="48" font-weight="700">Agent 驱动的 A 股研究工作站</text>
+  <text x="112" y="274" fill="#596273" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="25">把研究问题、数据证据与工作区操作放在同一条流程里</text>
+  <line x1="112" y1="328" x2="1088" y2="328" stroke="#e5e8ef" stroke-width="2"/>
+  <g fill="#303848" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="24">
+    <text x="112" y="386">• 行情与财报</text>
+    <text x="390" y="386">• 策略与股票池</text>
+    <text x="704" y="386">• 舆情与公告</text>
+    <text x="112" y="438">• 价值核算</text>
+    <text x="390" y="438">• 交易计划</text>
+    <text x="704" y="438">• MCP / Bun / Electron</text>
+  </g>
+  <text x="112" y="520" fill="#6a7384" font-family="Cascadia Code, Consolas, monospace" font-size="20">OPEN SOURCE · MIT · WINDOWS-FIRST BETA</text>
+</svg>
